@@ -63,6 +63,9 @@ pengine.7:	pengine.xml
 	$(XSLTPROC) $(MANPAGE_XSLT) $(top_builddir)/pengine/$<
 endif
 
+pengine_wrap.c: pengine.i
+	swig -python pengine.i
+
 ## SOURCES
 noinst_HEADERS	= allocate.h utils.h pengine.h
 #utils.h pengine.h
@@ -70,9 +73,31 @@ noinst_HEADERS	= allocate.h utils.h pengine.h
 libpengine_la_LDFLAGS	= -version-info 3:0:0
 # -L$(top_builddir)/lib/pils -lpils -export-dynamic -module -avoid-version 
 libpengine_la_SOURCES	= pengine.c allocate.c utils.c constraints.c \
-			native.c group.c clone.c master.c graph.c
+			native.c group.c clone.c master.c graph.c api.c
 libpengine_la_LIBADD    = $(top_builddir)/lib/pengine/libpe_status.la \
 	$(top_builddir)/lib/cib/libcib.la
+
+
+BUILT_SOURCES = $(srcdir)/pengine_wrap.c
+SWIG_SOURCES = pengine.i
+
+python_PYTHON = pacemaker.py
+
+# To use, both /usr/lib64/python2.7/site-packages/pacemaker and
+# /usr/lib/python2.7/site-packages/pacemaker need to be in the 
+# Python path :-/
+pkgpython_PYTHON = pengine.py
+pkgpyexec_LTLIBRARIES = _pengine.la
+
+_pengine_la_SOURCES = $(BUILT_SOURCES) $(SWIG_SOURCES)
+_pengine_la_CFLAGS = $(shell $(PKGCONFIG) python --cflags) $(CFLAGS) -Wno-missing-prototypes
+_pengine_la_LDFLAGS = -module
+_pengine_la_LIBADD = $(top_builddir)/pengine/libpengine.la
+_pengine_la_DEPENDENCIES = $(top_builddir)/pengine/libpengine.la
+
+
+$(srcdir)/%_wrap.c : %.i
+	$(SWIG) -python -nothreads -py3 -O -o $@ $<
 
 pengine_SOURCES	= main.c
 pengine_LDADD	= $(top_builddir)/lib/cib/libcib.la $(COMMONLIBS)

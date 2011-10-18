@@ -83,7 +83,9 @@ extern const char *crm_system_name;
 #  define INFINITY_S        "INFINITY"
 #  define MINUS_INFINITY_S "-INFINITY"
 
-#  define INFINITY        1000000
+#  ifndef INFINITY
+#    define INFINITY        1000000
+#  endif
 
 /* Sub-systems */
 #  define CRM_SYSTEM_DC		"dc"

@@ -564,6 +564,13 @@ dnl was NOT being expanded all the time thus causing things to fail.
 AC_CHECK_PROGS(LIBTOOL, glibtool libtool libtool15 libtool13)
 
 AM_PATH_PYTHON
+SWIG_ENABLE_CXX
+SWIG_PYTHON
+
+# As above, pre-expand so the values can be used in .py.in files
+eval pythondir="`eval echo ${pythondir}`"
+eval pyexecdir="`eval echo ${pyexecdir}`"
+
 AC_CHECK_PROGS(MAKE, gmake make)
 AC_PATH_PROGS(HTML2TXT, lynx w3m)
 AC_PATH_PROGS(HELP2MAN, help2man)
@@ -578,6 +585,7 @@ AC_PATH_PROGS(SCP, scp, /usr/bin/scp)
 AC_PATH_PROGS(TAR, tar)
 AC_PATH_PROGS(MD5, md5)
 AC_PATH_PROGS(TEST, test)
+AC_PATH_PROGS(SWIG, swig)
 AC_PATH_PROGS(PKGCONFIG, pkg-config)
 AC_PATH_PROGS(XML2CONFIG, xml2-config)
 AC_PATH_PROGS(VALGRIND_BIN, valgrind, /usr/bin/valgrind)
@@ -1660,6 +1668,7 @@ cib/Makefile							\
 crmd/Makefile							\
 pengine/Makefile						\
 	pengine/regression.core.sh				\
+	pengine/pacemaker.py					\
 doc/Makefile							\
 	doc/Pacemaker_Explained/publican.cfg			\
 	doc/Clusters_from_Scratch/publican.cfg			\

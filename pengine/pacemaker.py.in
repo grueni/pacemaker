@@ -1,0 +1,267 @@
+import sys
+
+sys.path.append("@pythondir@/pacemaker")
+sys.path.append("@pyexecdir@/pacemaker")
+
+import pengine
+import xml.dom.minidom
+
+class PolicyEngine:
+
+    def set_option(self, name, value):
+        n = self.doc.createElement("nvpair")
+        n.setAttribute("id", "option-%s" % name)
+        n.setAttribute("name", name)
+        n.setAttribute("value", value)
+        self.xml['options'].appendChild(n)
+
+    def __init__(self):
+        
+        self.xml = {}
+        self.nested = {}
+        self.objects = {}
+        self.ws = pengine.pengine_create()
+
+        self.doc = xml.dom.minidom.Document()
+        self.xml['cib'] = self.doc.createElement("cib")
+        self.xml['cib'].setAttribute("validate-with", "pacemaker-1.0")
+        self.xml['cib'].setAttribute("admin_epoch", "1")
+        self.xml['cib'].setAttribute("epoch", "1")
+        self.xml['cib'].setAttribute("num_updates", "1")
+
+        self.xml['nodes'] = self.doc.createElement("nodes")
+        self.xml['resources'] = self.doc.createElement("resources")
+        self.xml['constraints'] = self.doc.createElement("constraints")
+        self.xml['status'] = self.doc.createElement("status")
+
+        self.xml['options'] = self.doc.createElement("cluster_property_set")
+        self.xml['options'].setAttribute("id", "defaults")
+
+        crm_config = self.doc.createElement("crm_config")
+        crm_config.appendChild(self.xml['options'])
+
+        config = self.doc.createElement("configuration")
+        config.appendChild(crm_config)
+        config.appendChild(self.xml['nodes'])
+        config.appendChild(self.xml['resources'])
+        config.appendChild(self.xml['constraints'])
+
+        self.doc.appendChild(self.xml['cib'])
+
+        self.xml['cib'].appendChild(config)
+        self.xml['cib'].appendChild(self.xml['status'])
+
+        self.set_option("stonith-enabled", "false")
+        self.set_option("enable-startup-probes", "false")
+        self.set_option("no-quorum-policy", "ignore")
+        self.set_option("default-resource-stickiness", "INFINITY")
+
+    def get_object(self, name):
+        if self.objects.has_key(name):
+            return self.objects[name]
+        return None
+
+    def get_bucket(self, name):
+        for o in self.xml['nodes'].childNodes:
+            if o.getAttribute("id") == name:
+                return o
+        return None
+
+    def get_assigned_bucket(self, name, calculated=False):
+        return pengine.pengine_bucket_for_object(self.ws, name, calculated)
+
+    def add_container(self, name, parents=[]):
+        container = self
+        for key in parents:
+            if container.nested.has_key(key):
+                container = container.nested[key]
+            else:
+                print "No parent %s found for heirarchy %s" % (key, repr(parents))
+                break
+
+        container.nested[name] = PolicyEngine()
+        container.add_bucket(name)
+
+    def add_bucket(self, name, parents=[]):
+        container = self
+        for key in parents:
+            if container.nested.has_key(key):
+                container = container.nested[key]
+            else:
+                print "No parent %s found for heirarchy %s" % (key, repr(parents))
+                break
+
+        n = container.doc.createElement("node")
+        n.setAttribute("id", name)
+        n.setAttribute("uname", name)
+        n.setAttribute("type", "member")
+        container.xml['nodes'].appendChild(n)
+
+        n = container.doc.createElement("node_state")
+        n.setAttribute("id", name)
+        n.setAttribute("uname", name)
+        n.setAttribute("ha", "active")
+        n.setAttribute("crmd", "online")
+        n.setAttribute("join", "member")
+        n.setAttribute("expected", "member")
+        n.setAttribute("in_ccm", "true")
+        container.xml['status'].appendChild(n)
+
+    def add_object(self, name):
+
+        if not self.get_object(name):
+            n = self.doc.createElement("primitive")
+            n.setAttribute("id", name)
+            n.setAttribute("class", "ocf")
+            n.setAttribute("type", "Dummy")
+            n.setAttribute("provider", "pacemaker")
+            self.xml['resources'].appendChild(n)
+            self.objects[name] = n
+
+    def _set_object_assignment(self, name, bucket, action):
+
+        if not self.get_object(name):
+            self.add_object(name)
+
+        if not self.get_bucket(bucket):
+            self.add_bucket(bucket)
+
+        for o in self.xml['status'].childNodes:
+            if o.getAttribute("id") != bucket:
+                continue
+
+            lrm = None
+            rlist = None
+            l = o.getElementsByTagName("lrm")
+            if l:
+                lrm = l[0]
+            if not lrm:
+                lrm = self.doc.createElement("lrm")
+                lrm.setAttribute("id", bucket)
+                o.appendChild(lrm)
+
+            l = lrm.getElementsByTagName("lrm_resources")
+            if l:
+                rlist = l[0]
+            if not rlist:
+                rlist = self.doc.createElement("lrm_resources")
+                rlist.setAttribute("id", bucket)
+                lrm.appendChild(rlist)
+
+            h = None
+            for r in rlist.childNodes:
+                if r.nodeType == r.ELEMENT_NODE and r.tagName == "lrm_resource" and r.getAttribute("id") == name:
+                    h = r
+
+            if not h:
+                h = self.doc.createElement("lrm_resource")
+                h.setAttribute("id", name)
+                h.setAttribute("class", "ocf")
+                h.setAttribute("type", "Dummy")
+                h.setAttribute("provider", "pacemaker")
+                h.setAttribute("op-count", "0")
+                rlist.appendChild(h)
+
+            count = int(h.getAttribute("op-count"))+1 
+            h.setAttribute("op-count", str(count))
+
+            op = self.doc.createElement("lrm_rsc_op")
+            op.setAttribute("id", "%s_%s_0" % (name, action))
+            op.setAttribute("operation", action)
+            op.setAttribute("interval", "0")
+            op.setAttribute("op-status", "0")
+            op.setAttribute("rc-code", "0")
+            op.setAttribute("call-id", str(count))
+            op.setAttribute("crm_feature_set", "3.0")
+            op.setAttribute("op-digest", "f2317cad3d54cec5d7d7aa7d0bf35cf8")
+            h.appendChild(op)
+         
+    def assign_object(self, name, bucket):
+        return self._set_object_assignment(name, bucket, "start")
+            
+    def unassign_object(self, name, bucket):
+        return self._set_object_assignment(name, bucket, "stop")
+   
+    def run(self, assign=True):
+        xmltext = self.doc.toprettyxml()
+        rc = pengine.pengine_run_text(self.ws, xmltext)
+
+        if assign:
+            for o in self.objects.keys():
+                b = self.get_assigned_bucket(o, True)
+                old_b = self.get_assigned_bucket(o, False)
+
+                if not b:
+                    # TODO(beekhof): Implement removal
+                    if not old_b:
+                        print o+" not assigned"
+                    elif self.nested.has_key(b):
+                        print o+" removed from nested bucket "+old_b
+                    else:
+                        print o+" removed from bucket "+old_b
+
+                elif not old_b:
+                    self.assign_object(o, b)
+                    if self.nested.has_key(b):
+                        print o+" assigned to nested bucket "+b
+                        self.nested[b].add_object(o)
+                    else:
+                        print o+" assigned to bucket "+b
+
+                elif old_b == b:
+                    if self.nested.has_key(b):
+                        print o+" still assigned to nested bucket "+b
+                    else:
+                        print o+" still assigned to bucket "+b
+                else:
+                    # TODO(beekhof): Implement removal
+                    if self.nested.has_key(b):
+                        print o+" moved to nested bucket "+b
+                    else:
+                        print o+" moved to bucket "+b
+
+            for key in self.nested.keys():
+                print ""
+                print "Running nested bucket: "+key
+                self.nested[key].run(assign)
+
+        return rc
+
+    def graph(self):
+        return xml.dom.minidom.parseString(pengine.pengine_graph_text(self.ws))
+
+    def update(self):
+        return None
+
+if __name__ == '__main__': 
+    n = 0
+    zpe = PolicyEngine()
+    zpe.add_container("zone-1")
+    zpe.add_container("zone-2")
+
+    while n < 8:
+        c = 1+(n % 2)
+        n = n + 1
+        print "Adding host-%d to zone-%d" % (n, c)
+        p = []
+        p.append("zone-%d" % c)
+        zpe.add_bucket("host-%d" % n, ["zone-%d" % c])
+
+    n=0
+    while n < 10:
+        n = n + 1
+        zpe.add_object("guest-%d" % n)
+
+    print ""
+    print "Initial run"
+    zpe.run(True)
+
+    while n < 20:
+        n = n + 1
+        zpe.add_object("guest-%d" % n)
+
+    print ""
+    print "Second run"
+    zpe.run(True)
+    print zpe.doc.toprettyxml()
+    print zpe.nested['zone-1'].doc.toprettyxml()
