@@ -80,6 +80,8 @@ extern int stonith_fence_history(xmlNode * msg, xmlNode ** output);
 
 extern int stonith_device_register(xmlNode *msg);
 
+extern gboolean process_config_file (const char *filename);
+
 extern void free_device(gpointer data);
 
 extern char *stonith_our_uname;

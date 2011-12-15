@@ -62,8 +62,10 @@ stonith_admin_LDADD	= $(top_builddir)/lib/common/libcrmcommon.la	\
 			$(top_builddir)/lib/fencing/libstonithd.la	\
 			$(CRYPTOLIB) $(CLUSTERLIBS)
 
-stonithd_SOURCES	= main.c commands.c remote.c
+stonithd_SOURCES	= main.c commands.c remote.c config.c
 
+stonithd_CFLAGS		= $(JSON_CFLAGS)
+stonithd_LDFLAGS	= $(JSON_LDFLAGS)
 stonithd_LDADD		= $(top_builddir)/lib/common/libcrmcommon.la	\
 			$(top_builddir)/lib/cluster/libcrmcluster.la	\
 			$(top_builddir)/lib/fencing/libstonithd.la	\

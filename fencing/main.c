@@ -659,6 +659,10 @@ main(int argc, char ** argv)
 	channel2, stonith_client_connect,
 	default_ipc_connection_destroy);
 
+#ifdef STONITH_CONFIG_FILE
+    process_config_file (STONITH_CONFIG_FILE);
+#endif
+
     if(rc == 0) {
 	/* Create the mainloop and run it... */
 	mainloop = g_main_new(FALSE);

@@ -69,4 +69,7 @@
 /* Use g_hash_table compatibility functions */
 #undef USE_GHASH_COMPAT
 
+/* Path to the optional fencing configuration */
+#undef STONITH_CONFIG_FILE
+
 #endif /* CRM_CONFIG__H__IN */

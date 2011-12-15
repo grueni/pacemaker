@@ -1444,6 +1444,32 @@ AC_SUBST(GNUTLSLIBS)
 
 
 dnl ========================================================================
+dnl    JSON for stonith-ng configuration
+dnl ========================================================================
+
+AC_MSG_CHECKING(for json-glib)
+
+JSON_LIBS=""
+JSON_CFLAGS=""
+
+if 
+   $PKGCONFIG --exists json-glib-1.0
+then
+	JSON_LDFLAGS=`$PKGCONFIG --libs json-glib-1.0`
+	JSON_CFLAGS=`$PKGCONFIG --cflags json-glib-1.0`
+	v=`$PKGCONFIG --modversion json-glib-1.0`
+	AC_DEFINE_UNQUOTED(HAVE_JSON, 1, Build in support for json-glib)
+	AC_DEFINE_UNQUOTED(STONITH_CONFIG_FILE, "$sysconfdir/stonith-ng.conf",
+						 Path to the optional fencing configuration)
+	AC_MSG_RESULT(json-glib-1.0 $v)
+else
+	AC_MSG_RESULT(Not found)
+fi
+
+AC_SUBST(JSON_CFLAGS)
+AC_SUBST(JSON_LDFLAGS)
+
+dnl ========================================================================
 dnl    System Health
 dnl ========================================================================
 
