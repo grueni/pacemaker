@@ -187,7 +187,7 @@ pcmk_cpg_deliver(cpg_handle_t handle,
         const char *uname = crm_element_value(xml, "uname");
 
         crm_element_value_int(xml, "proclist", (int *)&procs);
-        /* crm_debug("Got proclist %.32x from %s", procs, uname); */
+        crm_info("Got proclist %.32x from %s", procs, uname);
         if (update_node_processes(nodeid, uname, procs)) {
             update_process_clients();
         }
@@ -202,6 +202,21 @@ pcmk_cpg_membership(cpg_handle_t handle,
                     const struct cpg_address *joined_list, size_t joined_list_entries)
 {
     /* Don't care about CPG membership */
+    int lpc = 0;
+    
+    crm_info("CPG %s change", groupName);
+    for(lpc = 0; lpc < member_list_entries; lpc++) {
+        crm_info("Member[%d]: %u.%u", lpc, member_list[lpc].nodeid, member_list[lpc].pid);
+    }
+
+    for(lpc = 0; lpc < left_list_entries; lpc++) {
+        crm_info("Left[%d]: %u.%u", lpc, left_list[lpc].nodeid, left_list[lpc].pid);
+    }
+
+    for(lpc = 0; lpc < joined_list_entries; lpc++) {
+        crm_info("Joined[%d]: %u.%u", lpc, joined_list[lpc].nodeid, joined_list[lpc].pid);
+    }
+    
     update_process_peers();
 }
 

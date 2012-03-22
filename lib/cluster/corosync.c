@@ -630,8 +630,17 @@ pcmk_proc_dispatch(IPC_Channel * ch, gpointer user_data)
                 const char *uname = crm_element_value(node, "uname");
 
                 crm_element_value_int(node, "processes", &children);
-
-                crm_update_peer(id, 0, 0, 0, children, NULL, uname, NULL, NULL);
+                 if(id == 0) {
+                     crm_err("Bad process update node %s: %.16x", uname, children);
+                     crm_log_xml_err(msg, "Bad Update");
+                 } else {
+                     if(children == 0) {
+                         crm_err("Bad process list for node %u/%s: %s", id, uname, crm_element_value(node, "processes"));
+                     } else {
+                         crm_info("Process list for node %u: %.16x", id, children);
+                     }
+                     crm_update_peer(id, 0, 0, 0, children, NULL, uname, NULL, NULL);
+                 }
             }
             free_xml(msg);
         }

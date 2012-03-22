@@ -1613,6 +1613,7 @@ send_cluster_id(void)
     static uint64_t first_seq = 0;
 
     AIS_ASSERT(local_nodeid != 0);
+    ais_info("Sending node details");
 
     if (started == 0) {
         started = now;

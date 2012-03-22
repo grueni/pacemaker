@@ -570,6 +570,7 @@ update_process_peers(void)
     iov.iov_base = buffer;
     iov.iov_len = rc + 1;
 
+    crm_info("Sent %s", buffer);
     send_cpg_message(&iov);
 }
 
