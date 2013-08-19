@@ -293,7 +293,6 @@ static int cib_archive_filter(const struct dirent * a)
 	if ((s.st_mode & S_IFREG) != S_IFREG)
 	{
 	  return 0;
-	}
 
     } else if(strstr(a->d_name, "cib-") != a->d_name) {
         return 0;
