@@ -19,7 +19,7 @@
 #include <crm_internal.h>
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE
+#  define _GNU_SOURCE
 #endif
 
 #include <sys/types.h>
@@ -34,14 +34,15 @@
 #include <crm/crm.h>
 #include <crm/common/mainloop.h>
 #include <crm/services.h>
+#include <crm/msg_xml.h>
 #include "services_private.h"
 
 #if SUPPORT_UPSTART
-#include <upstart.h>
+#  include <upstart.h>
 #endif
 
 #if SUPPORT_SYSTEMD
-#include <systemd.h>
+#  include <systemd.h>
 #endif
 
 /* TODO: Develop a rollover strategy */
@@ -50,17 +51,53 @@ static int operations = 0;
 GHashTable *recurring_actions = NULL;
 
 svc_action_t *
-services_action_create(const char *name, const char *action, int interval,
-                       int timeout)
+services_action_create(const char *name, const char *action, int interval, int timeout)
 {
     return resources_action_create(name, "lsb", NULL, name, action, interval, timeout, NULL);
 }
 
-svc_action_t *resources_action_create(
-    const char *name, const char *standard, const char *provider, const char *agent,
-    const char *action, int interval, int timeout, GHashTable *params)
+const char *
+resources_find_service_class(const char *agent)
 {
-    svc_action_t *op;
+    /* Priority is:
+     * - lsb
+     * - systemd
+     * - upstart
+     */
+    int rc = 0;
+    struct stat st;
+    char *path = NULL;
+
+#ifdef LSB_ROOT_DIR
+    rc = asprintf(&path, "%s/%s", LSB_ROOT_DIR, agent);
+    if (rc > 0 && stat(path, &st) == 0) {
+        free(path);
+        return "lsb";
+    }
+    free(path);
+#endif
+
+#if SUPPORT_SYSTEMD
+    if (systemd_unit_exists(agent)) {
+        return "systemd";
+    }
+#endif
+
+#if SUPPORT_UPSTART
+    if (upstart_job_exists(agent)) {
+        return "upstart";
+    }
+#endif
+    return NULL;
+}
+
+
+svc_action_t *
+resources_action_create(const char *name, const char *standard, const char *provider,
+                        const char *agent, const char *action, int interval, int timeout,
+                        GHashTable * params)
+{
+    svc_action_t *op = NULL;
 
     /*
      * Do some up front sanity checks before we go off and
@@ -69,30 +106,31 @@ svc_action_t *resources_action_create(
 
     if (crm_strlen_zero(name)) {
         crm_err("A service or resource action must have a name.");
-        return NULL;
+        goto return_error;
     }
 
     if (crm_strlen_zero(standard)) {
         crm_err("A service action must have a valid standard.");
-        return NULL;
+        goto return_error;
     }
 
     if (!strcasecmp(standard, "ocf") && crm_strlen_zero(provider)) {
         crm_err("An OCF resource action must have a provider.");
-        return NULL;
+        goto return_error;
     }
 
     if (crm_strlen_zero(agent)) {
         crm_err("A service or resource action must have an agent.");
-        return NULL;
+        goto return_error;
     }
 
     if (crm_strlen_zero(action)) {
         crm_err("A service or resource action must specify an action.");
-        return NULL;
+        goto return_error;
     }
 
-    if (safe_str_eq(action, "monitor") && (safe_str_eq(standard, "lsb") || safe_str_eq(standard, "service"))) {
+    if (safe_str_eq(action, "monitor")
+        && (safe_str_eq(standard, "lsb") || safe_str_eq(standard, "service"))) {
         action = "status";
     }
 
@@ -113,68 +151,41 @@ svc_action_t *resources_action_create(
         goto return_error;
     }
 
-    if(strcasecmp(op->standard, "service") == 0) {
-        /* Work it out and then fall into the if-else block below.
-         * Priority is:
-         * - lsb
-         * - systemd
-         * - upstart
-         */
-        int rc = 0;
-        struct stat st;
-        char *path = NULL;
+    if (strcasecmp(op->standard, "service") == 0) {
+        const char *expanded = resources_find_service_class(op->agent);
 
-#ifdef LSB_ROOT_DIR
-        rc = asprintf(&path, "%s/%s", LSB_ROOT_DIR, op->agent);
-        if(rc > 0 && stat(path, &st) == 0) {
-            crm_debug("Found an lsb agent for %s/% the", op->rsc, op->agent);
-            free(path);
+        if(expanded) {
+            crm_debug("Found a %s agent for %s/%s", expanded, op->rsc, op->agent);
+            free(op->standard);
+            op->standard = strdup(expanded);
+
+        } else {
+            crm_info("Cannot determine the standard for %s (%s)", op->rsc, op->agent);
             free(op->standard);
             op->standard = strdup("lsb");
-            goto expanded;
         }
-        free(path);
-#endif
-
-#if SUPPORT_SYSTEMD
-        if(systemd_unit_exists(op->agent)) {
-            crm_debug("Found a systemd agent for %s/%s", op->rsc, op->agent);
-            free(op->standard);
-            op->standard = strdup("systemd");
-            goto expanded;
-        }
-#endif
-
-#if SUPPORT_UPSTART
-        if(upstart_job_exists(op->agent)) {
-            crm_debug("Found an upstart agent for %s/%s", op->rsc, op->agent);
-            free(op->standard);
-            op->standard = strdup("upstart");
-            goto expanded;
-        }
-#endif
-
-        crm_info("Cannot determine the standard for %s (%s)", op->rsc, op->agent);
+        CRM_ASSERT(op->standard);
     }
 
-  expanded:
-    if(strcasecmp(op->standard, "ocf") == 0) {
+    if (strcasecmp(op->standard, "ocf") == 0) {
         op->provider = strdup(provider);
         op->params = params;
+        params = NULL;
 
-        if (asprintf(&op->opaque->exec, "%s/resource.d/%s/%s",
-                     OCF_ROOT_DIR, provider, agent) == -1) {
+        if (asprintf(&op->opaque->exec, "%s/resource.d/%s/%s", OCF_ROOT_DIR, provider, agent) == -1) {
+            crm_err("Internal error: cannot create agent path");
             goto return_error;
         }
         op->opaque->args[0] = strdup(op->opaque->exec);
         op->opaque->args[1] = strdup(action);
 
-    } else if(strcasecmp(op->standard, "lsb") == 0) {
+    } else if (strcasecmp(op->standard, "lsb") == 0) {
         if (op->agent[0] == '/') {
-             /* if given an absolute path, use that instead
+            /* if given an absolute path, use that instead
              * of tacking on the LSB_ROOT_DIR path to the front */
             op->opaque->exec = strdup(op->agent);
         } else if (asprintf(&op->opaque->exec, "%s/%s", LSB_ROOT_DIR, op->agent) == -1) {
+            crm_err("Internal error: cannot create agent path");
             goto return_error;
         }
         op->opaque->args[0] = strdup(op->opaque->exec);
@@ -182,18 +193,70 @@ svc_action_t *resources_action_create(
         op->opaque->args[2] = NULL;
 
 #if SUPPORT_SYSTEMD
-    } else if(strcasecmp(op->standard, "systemd") == 0) {
+    } else if (strcasecmp(op->standard, "systemd") == 0) {
         op->opaque->exec = strdup("systemd-dbus");
 #endif
 #if SUPPORT_UPSTART
-    } else if(strcasecmp(op->standard, "upstart") == 0) {
+    } else if (strcasecmp(op->standard, "upstart") == 0) {
         op->opaque->exec = strdup("upstart-dbus");
 #endif
-    } else if(strcasecmp(op->standard, "service") == 0) {
+    } else if (strcasecmp(op->standard, "service") == 0) {
         op->opaque->exec = strdup(SERVICE_SCRIPT);
         op->opaque->args[0] = strdup(SERVICE_SCRIPT);
         op->opaque->args[1] = strdup(agent);
         op->opaque->args[2] = strdup(action);
+
+#if SUPPORT_NAGIOS
+    } else if (strcasecmp(op->standard, "nagios") == 0) {
+        int index = 0;
+
+        if (op->agent[0] == '/') {
+            /* if given an absolute path, use that instead
+             * of tacking on the NAGIOS_PLUGIN_DIR path to the front */
+            op->opaque->exec = strdup(op->agent);
+
+        } else if (asprintf(&op->opaque->exec, "%s/%s", NAGIOS_PLUGIN_DIR, op->agent) == -1) {
+            crm_err("Internal error: cannot create agent path");
+            goto return_error;
+        }
+
+        op->opaque->args[0] = strdup(op->opaque->exec);
+        index = 1;
+
+        if (safe_str_eq(op->action, "monitor") && op->interval == 0) {
+            /* Invoke --version for a nagios probe */
+            op->opaque->args[index] = strdup("--version");
+            index++;
+
+        } else if (params) {
+            GHashTableIter iter;
+            char *key = NULL;
+            char *value = NULL;
+            static int args_size = sizeof(op->opaque->args) / sizeof(char *);
+
+            g_hash_table_iter_init(&iter, params);
+
+            while (g_hash_table_iter_next(&iter, (gpointer *) & key, (gpointer *) & value) &&
+                   index <= args_size - 3) {
+                int len = 3;
+                char *long_opt = NULL;
+
+                if (safe_str_eq(key, XML_ATTR_CRM_VERSION) || strstr(key, CRM_META "_")) {
+                    continue;
+                }
+
+                len += strlen(key);
+                long_opt = calloc(1, len);
+                sprintf(long_opt, "--%s", key);
+                long_opt[len - 1] = 0;
+
+                op->opaque->args[index] = long_opt;
+                op->opaque->args[index + 1] = strdup(value);
+                index += 2;
+            }
+        }
+        op->opaque->args[index] = NULL;
+#endif
 
     } else {
         crm_err("Unknown resource standard: %s", op->standard);
@@ -201,9 +264,15 @@ svc_action_t *resources_action_create(
         op = NULL;
     }
 
+    if(params) {
+        g_hash_table_destroy(params);
+    }
     return op;
 
-return_error:
+  return_error:
+    if(params) {
+        g_hash_table_destroy(params);
+    }
     services_action_free(op);
 
     return NULL;
@@ -234,7 +303,7 @@ services_action_create_generic(const char *exec, const char *args[])
 }
 
 void
-services_action_free(svc_action_t *op)
+services_action_free(svc_action_t * op)
 {
     unsigned int i;
 
@@ -242,6 +311,9 @@ services_action_free(svc_action_t *op)
         return;
     }
 
+    if (op->opaque->repeat_timer) {
+        g_source_remove(op->opaque->repeat_timer);
+    }
     if (op->opaque->stderr_gsource) {
         mainloop_del_fd(op->opaque->stderr_gsource);
         op->opaque->stderr_gsource = NULL;
@@ -259,6 +331,7 @@ services_action_free(svc_action_t *op)
         free(op->opaque->args[i]);
     }
 
+    free(op->opaque);
     free(op->rsc);
     free(op->action);
 
@@ -278,12 +351,8 @@ services_action_free(svc_action_t *op)
 }
 
 gboolean
-cancel_recurring_action(svc_action_t *op)
+cancel_recurring_action(svc_action_t * op)
 {
-    if (op->pid) {
-        return FALSE;
-    }
-
     crm_info("Cancelling operation %s", op->id);
 
     if (recurring_actions) {
@@ -292,6 +361,7 @@ cancel_recurring_action(svc_action_t *op)
 
     if (op->opaque->repeat_timer) {
         g_source_remove(op->opaque->repeat_timer);
+        op->opaque->repeat_timer = 0;
     }
 
     return TRUE;
@@ -300,7 +370,7 @@ cancel_recurring_action(svc_action_t *op)
 gboolean
 services_action_cancel(const char *name, const char *action, int interval)
 {
-    svc_action_t* op = NULL;
+    svc_action_t *op = NULL;
     char id[512];
 
     snprintf(id, sizeof(id), "%s_%s_%d", name, action, interval);
@@ -309,67 +379,145 @@ services_action_cancel(const char *name, const char *action, int interval)
         return FALSE;
     }
 
-    if (cancel_recurring_action(op)) {
+    /* Always kill the recurring timer */
+    cancel_recurring_action(op);
+
+    if (op->pid == 0) {
         op->status = PCMK_LRM_OP_CANCELLED;
         if (op->opaque->callback) {
             op->opaque->callback(op);
         }
         services_action_free(op);
+
     } else {
-        crm_info("Cancelling op: %s will occur once operation completes", id);
+        crm_info("Cancelling in-flight op: performing early termination of %s (pid=%d)", id, op->pid);
         op->cancel = 1;
+        if (mainloop_child_kill(op->pid) == FALSE) {
+            /* even though the early termination failed,
+             * the op will be marked as cancelled once it completes. */
+            crm_err("Termination of %s (pid=%d) failed", id, op->pid);
+            return FALSE;
+        }
     }
 
     return TRUE;
 }
 
 gboolean
-services_action_async(svc_action_t* op, void (*action_callback)(svc_action_t *))
+services_action_kick(const char *name, const char *action, int interval /* ms */)
+{
+    svc_action_t * op = NULL;
+    char *id = NULL;
+
+    if (asprintf(&id, "%s_%s_%d", name, action, interval) == -1) {
+        return FALSE;
+    }
+
+    op = g_hash_table_lookup(recurring_actions, id);
+    free(id);
+
+    if (op == NULL) {
+        return FALSE;
+    }
+
+    if (op->pid) {
+        return TRUE;
+    } else {
+        if (op->opaque->repeat_timer) {
+            g_source_remove(op->opaque->repeat_timer);
+        }
+        recurring_action_timer(op);
+        return TRUE;
+    }
+
+}
+
+/* add new recurring operation, check for duplicates. 
+ * - if duplicate found, return TRUE, immediately reschedule op.
+ * - if no dup, return FALSE, inserve into recurring op list.*/
+static gboolean
+handle_duplicate_recurring(svc_action_t * op, void (*action_callback) (svc_action_t *))
+{
+    svc_action_t * dup = NULL;
+
+    if (recurring_actions == NULL) {
+        recurring_actions = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, NULL);
+        return FALSE;
+    }
+
+    /* check for duplicates */
+    dup = g_hash_table_lookup(recurring_actions, op->id);
+
+    if (dup && (dup != op)) {
+        /* update user data */
+        if (op->opaque->callback) {
+            dup->opaque->callback = op->opaque->callback;
+            dup->cb_data = op->cb_data;
+            op->cb_data = NULL;
+        }
+        /* immediately execute the next interval */
+        if (dup->pid != 0) {
+            if (op->opaque->repeat_timer) {
+                g_source_remove(op->opaque->repeat_timer);
+            }
+            recurring_action_timer(dup);
+        }
+        /* free the dup.  */
+        services_action_free(op);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+gboolean
+services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *))
 {
     if (action_callback) {
         op->opaque->callback = action_callback;
     }
 
-    if (recurring_actions == NULL) {
-        recurring_actions = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                  NULL, NULL);
-    }
-
     if (op->interval > 0) {
+        if (handle_duplicate_recurring(op, action_callback) == TRUE) {
+            /* entry rescheduled, dup freed */
+            return TRUE;
+        }
         g_hash_table_replace(recurring_actions, op->id, op);
     }
-
+    if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
 #if SUPPORT_UPSTART
-    if(strcasecmp(op->standard, "upstart") == 0) {
-	return upstart_job_exec(op, FALSE);
-    }
+        return upstart_job_exec(op, FALSE);
 #endif
+    }
+    if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
 #if SUPPORT_SYSTEMD
-    if(strcasecmp(op->standard, "systemd") == 0) {
-	return systemd_unit_exec(op, FALSE);
-    }
+        return systemd_unit_exec(op, FALSE);
 #endif
+    }
     return services_os_action_execute(op, FALSE);
 }
 
 gboolean
-services_action_sync(svc_action_t* op)
+services_action_sync(svc_action_t * op)
 {
     gboolean rc = TRUE;
 
-    if(strcasecmp(op->standard, "upstart") == 0) {
+    if (op == NULL) {
+        crm_trace("No operation to execute");
+        return FALSE;
+
+    } else if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
 #if SUPPORT_UPSTART
-	rc = upstart_job_exec(op, TRUE);
+        rc = upstart_job_exec(op, TRUE);
 #endif
-    } else if(strcasecmp(op->standard, "systemd") == 0) {
+    } else if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
 #if SUPPORT_SYSTEMD
-	rc = systemd_unit_exec(op, TRUE);
+        rc = systemd_unit_exec(op, TRUE);
 #endif
     } else {
         rc = services_os_action_execute(op, TRUE);
     }
-    crm_trace(" > %s_%s_%d: %s = %d", op->rsc, op->action, op->interval,
-             op->opaque->exec, op->rc);
+    crm_trace(" > %s_%s_%d: %s = %d", op->rsc, op->action, op->interval, op->opaque->exec, op->rc);
     if (op->stdout_data) {
         crm_trace(" >  stdout: %s", op->stdout_data);
     }
@@ -380,9 +528,9 @@ services_action_sync(svc_action_t* op)
 }
 
 GList *
-get_directory_list(const char *root, gboolean files)
+get_directory_list(const char *root, gboolean files, gboolean executable)
 {
-    return services_os_get_directory_list(root, files);
+    return services_os_get_directory_list(root, files, executable);
 }
 
 GList *
@@ -396,6 +544,7 @@ resources_list_standards(void)
 {
     GList *standards = NULL;
     GList *agents = NULL;
+
     standards = g_list_append(standards, strdup("ocf"));
     standards = g_list_append(standards, strdup("lsb"));
     standards = g_list_append(standards, strdup("service"));
@@ -406,21 +555,27 @@ resources_list_standards(void)
     agents = NULL;
 #endif
 
-    if(agents) {
+    if (agents) {
         standards = g_list_append(standards, strdup("systemd"));
         g_list_free_full(agents, free);
     }
-
 #if SUPPORT_UPSTART
     agents = upstart_job_listall();
 #else
     agents = NULL;
 #endif
 
-    if(agents) {
+    if (agents) {
         standards = g_list_append(standards, strdup("upstart"));
         g_list_free_full(agents, free);
     }
+#if SUPPORT_NAGIOS
+    agents = resources_os_list_nagios_agents();
+    if (agents) {
+        standards = g_list_append(standards, strdup("nagios"));
+        g_list_free_full(agents, free);
+    }
+#endif
 
     return standards;
 }
@@ -443,18 +598,17 @@ resources_list_agents(const char *standard, const char *provider)
         GList *tmp2;
         GList *result = resources_os_list_lsb_agents();
 
-        if(standard == NULL) {
+        if (standard == NULL) {
             tmp1 = result;
             tmp2 = resources_os_list_ocf_agents(NULL);
-            if(tmp2) {
+            if (tmp2) {
                 result = g_list_concat(tmp1, tmp2);
             }
         }
-
 #if SUPPORT_SYSTEMD
         tmp1 = result;
         tmp2 = systemd_unit_listall();
-        if(tmp2) {
+        if (tmp2) {
             result = g_list_concat(tmp1, tmp2);
         }
 #endif
@@ -462,7 +616,7 @@ resources_list_agents(const char *standard, const char *provider)
 #if SUPPORT_UPSTART
         tmp1 = result;
         tmp2 = upstart_job_listall();
-        if(tmp2) {
+        if (tmp2) {
             result = g_list_concat(tmp1, tmp2);
         }
 #endif
@@ -480,6 +634,10 @@ resources_list_agents(const char *standard, const char *provider)
 #if SUPPORT_UPSTART
     } else if (strcasecmp(standard, "upstart") == 0) {
         return upstart_job_listall();
+#endif
+#if SUPPORT_NAGIOS
+    } else if (strcasecmp(standard, "nagios") == 0) {
+        return resources_os_list_nagios_agents();
 #endif
     }
 

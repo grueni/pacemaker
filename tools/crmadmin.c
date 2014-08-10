@@ -298,7 +298,6 @@ do_work(void)
         crmd_operation = CRM_OP_PING;
         crm_xml_add(msg_options, XML_ATTR_TIMEOUT, "0");
 
-
     } else if (DO_NODE_LIST) {
 
         cib_t *the_cib = cib_new();
@@ -310,12 +309,14 @@ do_work(void)
             return -1;
         }
 
-        output = get_cib_copy(the_cib);
-        do_find_node_list(output);
+        rc = the_cib->cmds->query(the_cib, NULL, &output, cib_scope_local | cib_sync_call);
+        if(rc == pcmk_ok) {
+            do_find_node_list(output);
 
-        free_xml(output);
+            free_xml(output);
+        }
         the_cib->cmds->signoff(the_cib);
-        exit(rc);
+        crm_exit(rc);
 
     } else if (DO_RESET) {
         /* tell dest_node to initiate the shutdown proceedure
@@ -392,12 +393,11 @@ crmadmin_ipc_connection_destroy(gpointer user_data)
     if (mainloop) {
         g_main_quit(mainloop);
     } else {
-        exit(1);
+        crm_exit(ENOTCONN);
     }
 }
 
-struct ipc_client_callbacks crm_callbacks = 
-{
+struct ipc_client_callbacks crm_callbacks = {
     .dispatch = admin_msg_callback,
     .destroy = crmadmin_ipc_connection_destroy
 };
@@ -405,7 +405,8 @@ struct ipc_client_callbacks crm_callbacks =
 gboolean
 do_init(void)
 {
-    mainloop_io_t *source = mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &crm_callbacks);
+    mainloop_io_t *source =
+        mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &crm_callbacks);
 
     admin_uuid = calloc(1, 11);
     if (admin_uuid != NULL) {
@@ -420,77 +421,47 @@ do_init(void)
 
     } else if (crmd_channel != NULL) {
         xmlNode *xml = create_hello_message(admin_uuid, crm_system_name, "0", "1");
+
         crm_ipc_send(crmd_channel, xml, 0, 0, NULL);
         return TRUE;
     }
     return FALSE;
 }
 
-static xmlNode *
+static bool
 validate_crm_message(xmlNode * msg, const char *sys, const char *uuid, const char *msg_type)
 {
-    const char *to = NULL;
     const char *type = NULL;
     const char *crm_msg_reference = NULL;
-    xmlNode *action = NULL;
-    const char *true_sys;
-    char *local_sys = NULL;
 
     if (msg == NULL) {
-        return NULL;
+        return FALSE;
     }
 
-    to = crm_element_value(msg, F_CRM_SYS_TO);
     type = crm_element_value(msg, F_CRM_MSG_TYPE);
-
     crm_msg_reference = crm_element_value(msg, XML_ATTR_REFERENCE);
-    action = msg;
-    true_sys = sys;
-
-    if (uuid != NULL) {
-        local_sys = generate_hash_key(sys, uuid);
-        true_sys = local_sys;
-    }
-
-    if (to == NULL) {
-        crm_info("No sub-system defined.");
-        action = NULL;
-    } else if (true_sys != NULL && strcasecmp(to, true_sys) != 0) {
-        crm_trace("The message is not for this sub-system (%s != %s).", to, true_sys);
-        action = NULL;
-    }
-
-    free(local_sys);
 
     if (type == NULL) {
         crm_info("No message type defined.");
-        return NULL;
+        return FALSE;
 
     } else if (msg_type != NULL && strcasecmp(msg_type, type) != 0) {
         crm_info("Expecting a (%s) message but received a (%s).", msg_type, type);
-        action = NULL;
+        return FALSE;
     }
 
     if (crm_msg_reference == NULL) {
         crm_info("No message crm_msg_reference defined.");
-        action = NULL;
+        return FALSE;
     }
-/*
- 	if(action != NULL) 
-		crm_trace(
-		       "XML is valid and node with message type (%s) found.",
-		       type);
-	crm_trace("Returning node (%s)", crm_element_name(action));
-*/
 
-    return action;
+    return TRUE;
 }
 
 int
 admin_msg_callback(const char *buffer, ssize_t length, gpointer userdata)
 {
     static int received_responses = 0;
-    const char *result = NULL;
     xmlNode *xml = string2xml(buffer);
 
     received_responses++;
@@ -504,45 +475,35 @@ admin_msg_callback(const char *buffer, ssize_t length, gpointer userdata)
     } else if (validate_crm_message(xml, crm_system_name, admin_uuid, XML_ATTR_RESPONSE) == FALSE) {
         crm_trace("Message was not a CRM response. Discarding.");
 
-    } else {
-        result = crm_element_value(xml, XML_ATTR_RESULT);
-        if (result == NULL || strcasecmp(result, "ok") == 0) {
-            result = "pass";
+    } else if (DO_HEALTH) {
+        xmlNode *data = get_message_xml(xml, F_CRM_DATA);
+        const char *state = crm_element_value(data, "crmd_state");
 
-        } else {
-            result = "fail";
+        printf("Status of %s@%s: %s (%s)\n",
+               crm_element_value(data, XML_PING_ATTR_SYSFROM),
+               crm_element_value(xml, F_CRM_HOST_FROM),
+               state, crm_element_value(data, XML_PING_ATTR_STATUS));
+
+        if (BE_SILENT && state != NULL) {
+            fprintf(stderr, "%s\n", state);
         }
 
-        if (DO_HEALTH) {
-            xmlNode *data = get_message_xml(xml, F_CRM_DATA);
-            const char *state = crm_element_value(data, "crmd_state");
+    } else if (DO_WHOIS_DC) {
+        const char *dc = crm_element_value(xml, F_CRM_HOST_FROM);
 
-            printf("Status of %s@%s: %s (%s)\n",
-                   crm_element_value(data, XML_PING_ATTR_SYSFROM),
-                   crm_element_value(xml, F_CRM_HOST_FROM),
-                   state, crm_element_value(data, XML_PING_ATTR_STATUS));
-
-            if (BE_SILENT && state != NULL) {
-                fprintf(stderr, "%s\n", state);
-            }
-
-        } else if (DO_WHOIS_DC) {
-            const char *dc = crm_element_value(xml, F_CRM_HOST_FROM);
-
-            printf("Designated Controller is: %s\n", dc);
-            if (BE_SILENT && dc != NULL) {
-                fprintf(stderr, "%s\n", dc);
-            }
-            exit(0);
+        printf("Designated Controller is: %s\n", dc);
+        if (BE_SILENT && dc != NULL) {
+            fprintf(stderr, "%s\n", dc);
         }
+        crm_exit(pcmk_ok);
     }
-    
+
     free_xml(xml);
 
     if (received_responses >= expected_responses) {
         crm_trace("Received expected number (%d) of messages from Heartbeat."
-                    "  Exiting normally.", expected_responses);
-        exit(0);
+                  "  Exiting normally.", expected_responses);
+        crm_exit(pcmk_ok);
     }
 
     message_timer_id = g_timeout_add(message_timeout_ms, admin_message_timeout, NULL);
@@ -576,8 +537,8 @@ is_node_online(xmlNode * node_state)
         return TRUE;
     }
     crm_trace("Node %s: ccm=%s join=%s exp=%s crm=%s",
-                uname, crm_str(ccm_state),
-                crm_str(join_state), crm_str(exp_state), crm_str(crm_state));
+              uname, crm_str(ccm_state),
+              crm_str(join_state), crm_str(exp_state), crm_str(crm_state));
     crm_trace("Node %s is offline", uname);
     return FALSE;
 }

@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -39,9 +39,13 @@
 #include <notify.h>
 
 int pending_updates = 0;
-extern GHashTable *client_list;
 
-gboolean cib_notify_client(gpointer key, gpointer value, gpointer user_data);
+struct cib_notification_s {
+    xmlNode *msg;
+    struct iovec *iov;
+    int32_t iov_size;
+};
+
 void attach_cib_generation(xmlNode * msg, const char *field, xmlNode * a_cib);
 
 void do_cib_notify(int options, const char *op, xmlNode * update,
@@ -50,9 +54,9 @@ void do_cib_notify(int options, const char *op, xmlNode * update,
 static void
 need_pre_notify(gpointer key, gpointer value, gpointer user_data)
 {
-    cib_client_t *client = value;
+    crm_client_t *client = value;
 
-    if (client->pre_notify) {
+    if (is_set(client->options, cib_notify_pre)) {
         gboolean *needed = user_data;
 
         *needed = TRUE;
@@ -62,68 +66,101 @@ need_pre_notify(gpointer key, gpointer value, gpointer user_data)
 static void
 need_post_notify(gpointer key, gpointer value, gpointer user_data)
 {
-    cib_client_t *client = value;
+    crm_client_t *client = value;
 
-    if (client->post_notify) {
+    if (is_set(client->options, cib_notify_post)) {
         gboolean *needed = user_data;
 
         *needed = TRUE;
     }
 }
 
-gboolean
-cib_notify_client(gpointer key, gpointer value, gpointer user_data)
+static gboolean
+cib_notify_send_one(gpointer key, gpointer value, gpointer user_data)
 {
     const char *type = NULL;
     gboolean do_send = FALSE;
 
-    cib_client_t *client = value;
-    xmlNode *update_msg = user_data;
+    crm_client_t *client = value;
+    struct cib_notification_s *update = user_data;
 
     CRM_CHECK(client != NULL, return TRUE);
-    CRM_CHECK(update_msg != NULL, return TRUE);
+    CRM_CHECK(update != NULL, return TRUE);
 
-    if (client->ipc == NULL) {
+    if (client->ipcs == NULL && client->remote == NULL) {
         crm_warn("Skipping client with NULL channel");
         return FALSE;
     }
 
-    type = crm_element_value(update_msg, F_SUBTYPE);
+    type = crm_element_value(update->msg, F_SUBTYPE);
 
     CRM_LOG_ASSERT(type != NULL);
-    if (client->diffs && safe_str_eq(type, T_CIB_DIFF_NOTIFY)) {
+    if (is_set(client->options, cib_notify_diff) && safe_str_eq(type, T_CIB_DIFF_NOTIFY)) {
         do_send = TRUE;
 
-    } else if (client->replace && safe_str_eq(type, T_CIB_REPLACE_NOTIFY)) {
+    } else if (is_set(client->options, cib_notify_replace)
+               && safe_str_eq(type, T_CIB_REPLACE_NOTIFY)) {
         do_send = TRUE;
 
-    } else if (client->confirmations && safe_str_eq(type, T_CIB_UPDATE_CONFIRM)) {
+    } else if (is_set(client->options, cib_notify_confirm)
+               && safe_str_eq(type, T_CIB_UPDATE_CONFIRM)) {
         do_send = TRUE;
 
-    } else if (client->pre_notify && safe_str_eq(type, T_CIB_PRE_NOTIFY)) {
+    } else if (is_set(client->options, cib_notify_pre) && safe_str_eq(type, T_CIB_PRE_NOTIFY)) {
         do_send = TRUE;
 
-    } else if (client->post_notify && safe_str_eq(type, T_CIB_POST_NOTIFY)) {
+    } else if (is_set(client->options, cib_notify_post) && safe_str_eq(type, T_CIB_POST_NOTIFY)) {
         do_send = TRUE;
     }
 
     if (do_send) {
-        if (client->ipc) {
-            if(crm_ipcs_send(client->ipc, 0, update_msg, TRUE) == FALSE) {
-                crm_warn("Notification of client %s/%s failed", client->name, client->id);
-            }
-
+        switch (client->kind) {
+            case CRM_CLIENT_IPC:
+                if (crm_ipcs_sendv(client, update->iov, crm_ipc_server_event) < 0) {
+                    crm_warn("Notification of client %s/%s failed", client->name, client->id);
+                }
+                break;
 #ifdef HAVE_GNUTLS_GNUTLS_H
-        } else if (client->session) {
-            crm_debug("Sent %s notification to client %s/%s", type, client->name, client->id);
-            crm_send_remote_msg(client->session, update_msg, client->encrypted);
-
+            case CRM_CLIENT_TLS:
 #endif
-        } else {
-            crm_err("Unknown transport for %s", client->name);
+            case CRM_CLIENT_TCP:
+                crm_debug("Sent %s notification to client %s/%s", type, client->name, client->id);
+                crm_remote_send(client->remote, update->msg);
+                break;
+            default:
+                crm_err("Unknown transport %d for %s", client->kind, client->name);
         }
     }
     return FALSE;
+}
+
+static void
+cib_notify_send(xmlNode * xml)
+{
+    struct iovec *iov;
+    struct cib_notification_s update;
+
+    ssize_t rc = crm_ipc_prepare(0, xml, &iov, 0);
+
+    crm_trace("Notifying clients");
+
+    if (rc > 0) {
+        update.msg = xml;
+        update.iov = iov;
+        update.iov_size = rc;
+        g_hash_table_foreach_remove(client_connections, cib_notify_send_one, &update);
+
+    } else {
+        crm_notice("Notification failed: %s (%d)", pcmk_strerror(rc), rc);
+    }
+
+    if (iov) {
+        free(iov[0].iov_base);
+        free(iov[1].iov_base);
+        free(iov);
+    }
+
+    crm_trace("Notify complete");
 }
 
 void
@@ -134,7 +171,7 @@ cib_pre_notify(int options, const char *op, xmlNode * existing, xmlNode * update
     const char *id = NULL;
     gboolean needed = FALSE;
 
-    g_hash_table_foreach(client_list, need_pre_notify, &needed);
+    g_hash_table_foreach(client_connections, need_pre_notify, &needed);
     if (needed == FALSE) {
         return;
     }
@@ -170,7 +207,7 @@ cib_pre_notify(int options, const char *op, xmlNode * existing, xmlNode * update
         add_message_xml(update_msg, F_CIB_UPDATE, update);
     }
 
-    g_hash_table_foreach_remove(client_list, cib_notify_client, update_msg);
+    cib_notify_send(update_msg);
 
     if (update == NULL) {
         crm_trace("Performing operation %s (on section=%s)", op, type);
@@ -183,12 +220,11 @@ cib_pre_notify(int options, const char *op, xmlNode * existing, xmlNode * update
 }
 
 void
-cib_post_notify(int options, const char *op, xmlNode * update,
-                int result, xmlNode * new_obj)
+cib_post_notify(int options, const char *op, xmlNode * update, int result, xmlNode * new_obj)
 {
     gboolean needed = FALSE;
 
-    g_hash_table_foreach(client_list, need_post_notify, &needed);
+    g_hash_table_foreach(client_connections, need_post_notify, &needed);
     if (needed == FALSE) {
         return;
     }
@@ -280,10 +316,8 @@ do_cib_notify(int options, const char *op, xmlNode * update,
         add_message_xml(update_msg, F_CIB_UPDATE_RESULT, result_data);
     }
 
-    crm_trace("Notifying clients");
-    g_hash_table_foreach_remove(client_list, cib_notify_client, update_msg);
+    cib_notify_send(update_msg);
     free_xml(update_msg);
-    crm_trace("Notify complete");
 }
 
 void
@@ -318,7 +352,7 @@ cib_replace_notify(const char *origin, xmlNode * update, int result, xmlNode * d
     cib_diff_version_details(diff, &add_admin_epoch, &add_epoch, &add_updates,
                              &del_admin_epoch, &del_epoch, &del_updates);
 
-    if(del_updates < 0) {
+    if (del_updates < 0) {
         crm_log_xml_debug(diff, "Bad replace diff");
     }
 
@@ -340,6 +374,6 @@ cib_replace_notify(const char *origin, xmlNode * update, int result, xmlNode * d
 
     crm_log_xml_trace(replace_msg, "CIB Replaced");
 
-    g_hash_table_foreach_remove(client_list, cib_notify_client, replace_msg);
+    cib_notify_send(replace_msg);
     free_xml(replace_msg);
 }

@@ -37,7 +37,6 @@
 
 #include <glib.h>
 #include <pengine.h>
-#include <lib/pengine/utils.h>
 #include <allocate.h>
 #if HAVE_LIBXML2
 #  include <libxml/parser.h>
@@ -204,7 +203,7 @@ main(int argc, char **argv)
                 inhibit_exit = TRUE;
                 break;
             case 'X':
-                /*use_stdin = TRUE;*/
+                /*use_stdin = TRUE; */
                 input_xml = optarg;
                 break;
             case 's':
@@ -314,7 +313,7 @@ main(int argc, char **argv)
 
     if (validate_xml(cib_object, NULL, FALSE) != TRUE) {
         free_xml(cib_object);
-        return -pcmk_err_dtd_validation;
+        return -pcmk_err_schema_validation;
     }
 
     if (input_file != NULL) {
@@ -334,10 +333,11 @@ main(int argc, char **argv)
     }
 
     if (use_date != NULL) {
-        a_date = parse_date(&use_date);
-        log_date(LOG_WARNING, "Set fake 'now' to", a_date, crm_time_log_date | crm_time_log_timeofday);
-        log_date(LOG_WARNING, "Set fake 'now' to (localtime)",
-                 a_date, crm_time_log_date | crm_time_log_timeofday | ha_log_local);
+        a_date = crm_time_new(use_date);
+        crm_time_log(LOG_WARNING, "Set fake 'now' to", a_date,
+                     crm_time_log_date | crm_time_log_timeofday);
+        crm_time_log(LOG_WARNING, "Set fake 'now' to (localtime)", a_date,
+                     crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);
     }
 
     set_working_set_defaults(&data_set);

@@ -17,7 +17,7 @@
 #
 MAINTAINERCLEANFILES    = Makefile.in
 
-INCLUDES       	= -I$(top_builddir)/include  -I$(top_srcdir)/include   \
+AM_CPPFLAGS       	= -I$(top_builddir)/include  -I$(top_srcdir)/include   \
 		  -I$(top_builddir)/libltdl  -I$(top_srcdir)/libltdl
 
 headerdir=$(pkgincludedir)/crm/cluster
@@ -27,12 +27,13 @@ header_HEADERS =
 ## libraries
 lib_LTLIBRARIES	= libcrmcluster.la 
 
-libcrmcluster_la_SOURCES = cluster.c membership.c
-libcrmcluster_la_LDFLAGS = -version-info 2:0:0 $(CLUSTERLIBS) 
+libcrmcluster_la_SOURCES = election.c cluster.c membership.c
+libcrmcluster_la_LDFLAGS = -version-info 4:1:0 $(CLUSTERLIBS) 
 libcrmcluster_la_LIBADD  = $(top_builddir)/lib/common/libcrmcommon.la $(top_builddir)/lib/fencing/libstonithd.la
 libcrmcluster_la_DEPENDENCIES = $(top_builddir)/lib/common/libcrmcommon.la $(top_builddir)/lib/fencing/libstonithd.la 
 
 if BUILD_CS_SUPPORT
+libcrmcluster_la_SOURCES += cpg.c
 if BUILD_CS_PLUGIN
 libcrmcluster_la_SOURCES += legacy.c
 else

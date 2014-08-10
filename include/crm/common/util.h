@@ -18,6 +18,12 @@
 #ifndef CRM_COMMON_UTIL__H
 #  define CRM_COMMON_UTIL__H
 
+/**
+ * \file
+ * \brief Utility functions
+ * \ingroup core
+ */
+
 #  include <sys/types.h>
 #  include <stdlib.h>
 #  include <limits.h>
@@ -44,6 +50,7 @@
                                         /* Status of an offline client */
 #  endif
 
+char *crm_itoa_stack(int an_int, char *buf, size_t len);
 char *crm_itoa(int an_int);
 gboolean crm_is_true(const char *s);
 int crm_str_to_boolean(const char *s, int *ret);
@@ -52,25 +59,36 @@ long long crm_get_msec(const char *input);
 unsigned long long crm_get_interval(const char *input);
 int char2score(const char *score);
 char *score2char(int score);
+char *score2char_stack(int score, char *buf, size_t len);
 
 int compare_version(const char *version1, const char *version2);
 
 gboolean parse_op_key(const char *key, char **rsc_id, char **op_type, int *interval);
-gboolean decode_transition_key(
-    const char *key, char **uuid, int *action, int *transition_id, int *target_rc);
-gboolean decode_transition_magic(
-    const char *magic, char **uuid, int *transition_id, int *action_id,
-    int *op_status, int *op_rc, int *target_rc);
+gboolean decode_transition_key(const char *key, char **uuid, int *action, int *transition_id,
+                               int *target_rc);
+gboolean decode_transition_magic(const char *magic, char **uuid, int *transition_id, int *action_id,
+                                 int *op_status, int *op_rc, int *target_rc);
+
+char * crm_strip_trailing_newline(char *str);
 
 #  define safe_str_eq(a, b) crm_str_eq(a, b, FALSE)
+
 gboolean crm_str_eq(const char *a, const char *b, gboolean use_case);
+
+/* used with hash tables where case does not matter */
+static inline gboolean
+crm_strcase_equal(gconstpointer a, gconstpointer b)
+{
+    return crm_str_eq((const char *) a, (const char *) b, FALSE);
+}
+
 gboolean safe_str_neq(const char *a, const char *b);
 
 #  define crm_atoi(text, default_text) crm_parse_int(text, default_text)
 
 /* coverity[+kill] */
 void crm_abort(const char *file, const char *function, int line,
-                      const char *condition, gboolean do_core, gboolean do_fork);
+               const char *condition, gboolean do_core, gboolean do_fork);
 
 static inline gboolean
 is_not_set(long long word, long long bit)
@@ -90,15 +108,33 @@ is_set_any(long long word, long long bit)
     return ((word & bit) != 0);
 }
 
+static inline guint
+crm_hash_table_size(GHashTable * hashtable)
+{
+    if (hashtable == NULL) {
+        return 0;
+    }
+    return g_hash_table_size(hashtable);
+}
+
 char *crm_meta_name(const char *field);
 const char *crm_meta_value(GHashTable * hash, const char *field);
 
-int rsc_op_expected_rc(lrmd_event_data_t *event);
-gboolean did_rsc_op_fail(lrmd_event_data_t *event, int target_rc);
+int rsc_op_expected_rc(lrmd_event_data_t * event);
+gboolean did_rsc_op_fail(lrmd_event_data_t * event, int target_rc);
 
 char *crm_md5sum(const char *buffer);
 
 char *crm_generate_uuid(void);
+
+void crm_build_path(const char *path_c, mode_t mode);
 int crm_user_lookup(const char *name, uid_t * uid, gid_t * gid);
+
+#ifdef HAVE_GNUTLS_GNUTLS_H
+void crm_gnutls_global_init(void);
+#endif
+
+int crm_exit(int rc);
+bool pcmk_acl_required(const char *user);
 
 #endif

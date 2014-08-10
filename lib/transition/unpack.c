@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -104,7 +104,8 @@ unpack_synapse(crm_graph_t * new_graph, xmlNode * xml_synapse)
     }
 
     new_graph->num_synapses++;
-    CRM_CHECK(new_synapse->id >= 0, free(new_synapse); return NULL);
+    CRM_CHECK(new_synapse->id >= 0, free(new_synapse);
+              return NULL);
 
     crm_trace("look for actions in synapse %s", crm_element_value(xml_synapse, XML_ATTR_ID));
 
@@ -165,10 +166,10 @@ unpack_graph(xmlNode * xml_graph, const char *reference)
   <synapse>
   <action_set>
   <rsc_op id="2"
-  ... 
+  ...
   <inputs>
   <rsc_op id="2"
-  ... 
+  ...
 */
     crm_graph_t *new_graph = NULL;
     const char *t_id = NULL;
@@ -184,9 +185,6 @@ unpack_graph(xmlNode * xml_graph, const char *reference)
     new_graph->stonith_timeout = -1;
     new_graph->completion_action = tg_done;
 
-    new_graph->migrating = g_hash_table_new_full(crm_str_hash, g_str_equal,
-                                                 g_hash_destroy_str, g_hash_destroy_str);
-
     if (reference) {
         new_graph->source = strdup(reference);
     } else {
@@ -195,11 +193,13 @@ unpack_graph(xmlNode * xml_graph, const char *reference)
 
     if (xml_graph != NULL) {
         t_id = crm_element_value(xml_graph, "transition_id");
-        CRM_CHECK(t_id != NULL, free(new_graph); return NULL);
+        CRM_CHECK(t_id != NULL, free(new_graph);
+                  return NULL);
         new_graph->id = crm_parse_int(t_id, "-1");
 
         time = crm_element_value(xml_graph, "cluster-delay");
-        CRM_CHECK(time != NULL, free(new_graph); return NULL);
+        CRM_CHECK(time != NULL, free(new_graph);
+                  return NULL);
         new_graph->network_delay = crm_get_msec(time);
 
         time = crm_element_value(xml_graph, "stonith-timeout");
@@ -279,7 +279,6 @@ destroy_graph(crm_graph_t * graph)
         destroy_synapse(synapse);
     }
 
-    g_hash_table_destroy(graph->migrating);
     free(graph->source);
     free(graph);
 }
@@ -298,7 +297,8 @@ convert_graph_action(xmlNode * resource, crm_action_t * action, int status, int 
     CRM_CHECK(action->type == action_type_rsc, return NULL);
 
     action_resource = first_named_child(action->xml, XML_CIB_TAG_RESOURCE);
-    CRM_CHECK(action_resource != NULL, crm_log_xml_warn(action->xml, "Bad"); return NULL);
+    CRM_CHECK(action_resource != NULL, crm_log_xml_warn(action->xml, "Bad");
+              return NULL);
 
     op = calloc(1, sizeof(lrmd_event_data_t));
 
@@ -308,6 +308,8 @@ convert_graph_action(xmlNode * resource, crm_action_t * action, int status, int 
 
     op->rc = rc;
     op->op_status = status;
+    op->t_run = time(NULL);
+    op->t_rcchange = op->t_run;
 
     op->params = g_hash_table_new_full(crm_str_hash, g_str_equal,
                                        g_hash_destroy_str, g_hash_destroy_str);

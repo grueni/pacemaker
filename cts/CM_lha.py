@@ -1,7 +1,7 @@
 '''CTS: Cluster Testing System: LinuxHA v2 dependent modules...
 '''
 
-__copyright__='''
+__copyright__ = '''
 Author: Huang Zhen <zhenhltc@cn.ibm.com>
 Copyright (C) 2004 International Business Machines
 
@@ -31,6 +31,7 @@ from cts.CTSvars  import *
 from cts.CTS      import *
 from cts.CIB      import *
 from cts.CTStests import AuditResource
+from cts.watcher  import LogWatcher
 
 try:
     from xml.dom.minidom import *
@@ -53,9 +54,13 @@ class crm_lha(ClusterManager):
     It implements the things we need to talk to and manipulate
     linux-ha version 2 clusters
     '''
-    def __init__(self, Environment, randseed=None):
+    def __init__(self, Environment, randseed=None, name=None):
         ClusterManager.__init__(self, Environment, randseed=randseed)
         #HeartbeatCM.__init__(self, Environment, randseed=randseed)
+
+        #if not name: name="crm-lha"
+        #self["Name"] = name
+        #self.name = name
 
         self.fastfail = 0
         self.clear_cache = 0
@@ -64,96 +69,9 @@ class crm_lha(ClusterManager):
         self.cluster_monitor = 0
         self.use_short_names = 1
 
-        self.update({
-            "Name"           : "crm-lha",
-            "DeadTime"       : 300,
-            "StartTime"      : 300,        # Max time to start up
-            "StableTime"     : 30,
-            "StartCmd"       : CTSvars.INITDIR+"/heartbeat start > /dev/null 2>&1",
-            "StopCmd"        : CTSvars.INITDIR+"/heartbeat stop  > /dev/null 2>&1",
-            "StatusCmd"      : "crmadmin -t 60000 -S %s 2>/dev/null",
-            "EpocheCmd"      : "crm_node -H -e",
-            "QuorumCmd"      : "crm_node -H -q",
-            "ParitionCmd"    : "crm_node -H -p",
-            "CibQuery"       : "cibadmin -Ql",
-            # 300,000 == 5 minutes
-            "RscRunning"     : CTSvars.CRM_DAEMON_DIR + "/lrmd_test -R -r %s",
-            "CIBfile"        : "%s:"+CTSvars.CRM_CONFIG_DIR+"/cib.xml",
-            "TmpDir"         : "/tmp",
-
-            "BreakCommCmd"   : "iptables -A INPUT -s %s -j DROP >/dev/null 2>&1",
-            "FixCommCmd"     : "iptables -D INPUT -s %s -j DROP >/dev/null 2>&1",
-
-# tc qdisc add dev lo root handle 1: cbq avpkt 1000 bandwidth 1000mbit
-# tc class add dev lo parent 1: classid 1:1 cbq rate "$RATE"kbps allot 17000 prio 5 bounded isolated
-# tc filter add dev lo parent 1: protocol ip prio 16 u32 match ip dst 127.0.0.1 match ip sport $PORT 0xFFFF flowid 1:1
-# tc qdisc add dev lo parent 1: netem delay "$LATENCY"msec "$(($LATENCY/4))"msec 10% 2> /dev/null > /dev/null
-            "ReduceCommCmd"  : "",
-            "RestoreCommCmd" : "tc qdisc del dev lo root",
-
-            "LogFileName"    : Environment["LogFileName"],
-
-            "UUIDQueryCmd"    : "crmadmin -N",
-            "StandbyCmd"      : "crm_attribute -VQ  -U %s -n standby -l forever -v %s 2>/dev/null",
-            "StandbyQueryCmd" : "crm_attribute -QG -U %s -n standby -l forever -d off 2>/dev/null",
-
-            # Patterns to look for in the log files for various occasions...
-            "Pat:DC_IDLE"      : "crmd.*State transition.*-> S_IDLE",
-            
-            # This wont work if we have multiple partitions
-            "Pat:Local_started" : "%s .*The local CRM is operational",
-            "Pat:Slave_started" : "%s .*State transition.*-> S_NOT_DC",
-            "Pat:Master_started"   : "%s .* State transition.*-> S_IDLE",
-            "Pat:We_stopped"   : "heartbeat.*%s.*Heartbeat shutdown complete",
-            "Pat:Logd_stopped" : "%s logd:.*Exiting write process",
-            "Pat:They_stopped" : "%s .*LOST:.* %s ",
-            "Pat:They_dead"    : "node %s.*: is dead",
-            "Pat:TransitionComplete" : "Transition status: Complete: complete",
-
-            "Pat:ChildKilled"  : "%s heartbeat.*%s.*killed by signal 9",
-            "Pat:ChildRespawn" : "%s heartbeat.*Respawning client.*%s",
-            "Pat:ChildExit"    : "(ERROR|error): Client .* exited with return code",
-            
-            "Pat:We_fenced"    : "crmd.* Executing .* fencing operation .* on %s",
-            "Pat:They_fenced"  : "stonith.* log_operation: Operation .* for host '%s' with device .* returned: 0",
-            "Pat:They_fenced_offset"  : "for host '",
-
-
-            # Bad news Regexes.  Should never occur.
-            "BadRegexes"   : (
-                r" trace:",
-                r"error:",
-                r"crit:",
-                r"ERROR:",
-                r"CRIT:",
-                r"Shutting down...NOW",
-                r"Timer I_TERMINATE just popped",
-                r"input=I_ERROR",
-                r"input=I_FAIL",
-                r"input=I_INTEGRATED cause=C_TIMER_POPPED",
-                r"input=I_FINALIZED cause=C_TIMER_POPPED",
-                r"input=I_ERROR",
-                r", exiting\.",
-                r"WARN.*Ignoring HA message.*vote.*not in our membership list",
-                r"pengine.*Attempting recovery of resource",
-                r"is taking more than 2x its timeout",
-                r"Confirm not received from",
-                r"Welcome reply not received from",
-                r"Attempting to schedule .* after a stop",
-                r"Resource .* was active at shutdown",
-                r"duplicate entries for call_id",
-                r"Search terminated:",
-                r"No need to invoke the TE",
-                r"global_timer_callback:",
-                r"Faking parameter digest creation",
-                r"Parameters to .* action changed:",
-                r"Parameters to .* changed",
-            ),
-        })
-
         if self.Env["DoBSC"]:
-            del self["Pat:They_stopped"]
-            del self["Pat:Logd_stopped"]
+            del self.templates["Pat:They_stopped"]
+            del self.templates["Pat:Logd_stopped"]
             self.Env["use_logd"] = 0
 
         self._finalConditions()
@@ -168,15 +86,7 @@ class crm_lha(ClusterManager):
         # At some point implement a more elegant solution that 
         #   also produces a report at the end
         '''Return list of errors which are known and very noisey should be ignored'''
-        if 1:
-            return [ 
-                "(ERROR|error): crm_abort: crm_glib_handler: ",
-                "(ERROR|error): Message hist queue is filling up",
-                "stonithd.*CRIT: external_hostlist: 'vmware gethosts' returned an empty hostlist",
-                "stonithd.*(ERROR|error): Could not list nodes for stonith RA external/vmware.",
-                "pengine.*Preventing .* from re-starting",
-                ]
-        return []
+        return PatternSelector().get_patterns(self.name, "BadNewsIgnore")
 
     def install_config(self, node):
         if not self.ns.WaitForNodeToComeUp(node):
@@ -193,12 +103,12 @@ class crm_lha(ClusterManager):
 
             self.cib_installed = 1
             if self.Env["CIBfilename"] == None:
-                self.log("Installing Generated CIB on node %s" %(node))
+                self.log("Installing Generated CIB on node %s" % (node))
                 self.cib.install(node)
 
             else:
-                self.log("Installing CIB (%s) on node %s" %(self.Env["CIBfilename"], node))
-                if 0 != self.rsh.cp(self.Env["CIBfilename"], "root@" + (self["CIBfile"]%node)):
+                self.log("Installing CIB (%s) on node %s" % (self.Env["CIBfilename"], node))
+                if 0 != self.rsh.cp(self.Env["CIBfilename"], "root@" + (self.templates["CIBfile"] % node)):
                     raise ValueError("Can not scp file to %s %d"%(node))
         
             self.rsh(node, "chown "+CTSvars.CRM_DAEMON_USER+" "+CTSvars.CRM_CONFIG_DIR+"/cib.xml")
@@ -217,28 +127,28 @@ class crm_lha(ClusterManager):
 
         watchpats = [ ]
         watchpats.append("Current ping state: (S_IDLE|S_NOT_DC)")
-        watchpats.append(self["Pat:Slave_started"]%node)
-        watchpats.append(self["Pat:Master_started"]%node)
-        idle_watch = CTS.LogWatcher(self.Env, self["LogFileName"], watchpats, "ClusterIdle")
+        watchpats.append(self.templates["Pat:Slave_started"]%node)
+        watchpats.append(self.templates["Pat:Master_started"]%node)
+        idle_watch = LogWatcher(self.Env["LogFileName"], watchpats, "ClusterIdle", hosts=[node], kind=self.Env["LogWatcher"])
         idle_watch.setwatch()
 
-        out = self.rsh(node, self["StatusCmd"]%node, 1)
+        out = self.rsh(node, self.templates["StatusCmd"]%node, 1)
         self.debug("Node %s status: '%s'" %(node, out))            
 
         if not out or string.find(out, 'ok') < 0:
             if self.ShouldBeStatus[node] == "up":
                 self.log(
                     "Node status for %s is %s but we think it should be %s"
-                    %(node, "down", self.ShouldBeStatus[node]))
-            self.ShouldBeStatus[node]="down"
+                    % (node, "down", self.ShouldBeStatus[node]))
+            self.ShouldBeStatus[node] = "down"
             return 0
 
         if self.ShouldBeStatus[node] == "down":
             self.log(
                 "Node status for %s is %s but we think it should be %s: %s"
-                %(node, "up", self.ShouldBeStatus[node], out))
+                % (node, "up", self.ShouldBeStatus[node], out))
 
-        self.ShouldBeStatus[node]="up"
+        self.ShouldBeStatus[node] = "up"
 
         # check the output first - because syslog-ng looses messages
         if string.find(out, 'S_NOT_DC') != -1:
@@ -251,7 +161,7 @@ class crm_lha(ClusterManager):
         # fall back to syslog-ng and wait
         if not idle_watch.look():
             # just up
-            self.debug("Warn: Node %s is unstable: %s" %(node, out))
+            self.debug("Warn: Node %s is unstable: %s" % (node, out))
             return 1
 
         # Up and stable
@@ -271,36 +181,33 @@ class crm_lha(ClusterManager):
 
         if self.test_node_CM(node) == 2:
             return 1
-        self.log("Warn: Node %s not stable" %(node)) 
+        self.log("Warn: Node %s not stable" % (node)) 
         return None
 
     def partition_stable(self, nodes, timeout=None):
         watchpats = [ ]
         watchpats.append("Current ping state: S_IDLE")
-        watchpats.append(self["Pat:DC_IDLE"])
+        watchpats.append(self.templates["Pat:DC_IDLE"])
         self.debug("Waiting for cluster stability...") 
 
         if timeout == None:
-            timeout = self["DeadTime"]
+            timeout = self.Env["DeadTime"]
 
-        idle_watch = CTS.LogWatcher(self.Env, self["LogFileName"], watchpats, "ClusterStable", timeout)
-        idle_watch.setwatch()
-
-        any_up = 0
-        for node in self.Env["nodes"]:
-            # have each node dump its current state
-            if self.ShouldBeStatus[node] == "up":
-                self.rsh(node, self["StatusCmd"] %node, 1)
-                any_up = 1
-
-        if any_up == 0:
+        if len(nodes) < 3:
             self.debug("Cluster is inactive") 
             return 1
+
+        idle_watch = LogWatcher(self.Env["LogFileName"], watchpats, "ClusterStable", timeout, hosts=nodes.split(), kind=self.Env["LogWatcher"])
+        idle_watch.setwatch()
+
+        for node in nodes.split():
+            # have each node dump its current state
+            self.rsh(node, self.templates["StatusCmd"] % node, 1)
 
         ret = idle_watch.look()
         while ret:
             self.debug(ret) 
-            for node in nodes:
+            for node in nodes.split():
                 if re.search(node, ret):
                     return 1
             ret = idle_watch.look()
@@ -330,7 +237,7 @@ class crm_lha(ClusterManager):
         rc = 0
 
         if not status_line: 
-            status_line = self.rsh(node, self["StatusCmd"]%node, 1)
+            status_line = self.rsh(node, self.templates["StatusCmd"]%node, 1)
 
         if not status_line:
             rc = 0
@@ -365,7 +272,7 @@ class crm_lha(ClusterManager):
         for node in self.Env["nodes"]:
             if self.ShouldBeStatus[node] == "up":
 
-                cmd = self["RscRunning"] % (rid)
+                cmd = self.templates["RscRunning"] % (rid)
                 (rc, lines) = self.rsh(node, cmd, None)
 
                 if rc == 127:
@@ -382,27 +289,31 @@ class crm_lha(ClusterManager):
 
         for node in self.Env["nodes"]:
             if self.ShouldBeStatus[node] == "up":
-                partition = self.rsh(node, self["ParitionCmd"], 1)
+                partition = self.rsh(node, self.templates["ParitionCmd"], 1)
 
                 if not partition:
-                    self.log("no partition details for %s" %node)
+                    self.log("no partition details for %s" % node)
                 elif len(partition) > 2:
-                    partition = partition[:-1]
-                    found=0
+                    nodes = partition.split()
+                    nodes.sort()
+                    partition = string.join(nodes, ' ')
+
+                    found = 0
                     for a_partition in ccm_partitions:
                         if partition == a_partition:
                             found = 1
                     if found == 0:
-                        self.debug("Adding partition from %s: %s" %(node, partition))
+                        self.debug("Adding partition from %s: %s" % (node, partition))
                         ccm_partitions.append(partition)
                     else:
-                        self.debug("Partition '%s' from %s is consistent with existing entries" %(partition, node))
+                        self.debug("Partition '%s' from %s is consistent with existing entries" % (partition, node))
 
                 else:
-                    self.log("bad partition details for %s" %node)
+                    self.log("bad partition details for %s" % node)
             else:
-                self.debug("Node %s is down... skipping" %node)
+                self.debug("Node %s is down... skipping" % node)
 
+        self.debug("Found partitions: %s" % repr(ccm_partitions) )
         return ccm_partitions
 
     def HasQuorum(self, node_list):
@@ -415,13 +326,13 @@ class crm_lha(ClusterManager):
 
         for node in node_list:
             if self.ShouldBeStatus[node] == "up":
-                quorum = self.rsh(node, self["QuorumCmd"], 1)
+                quorum = self.rsh(node, self.templates["QuorumCmd"], 1)
                 if string.find(quorum, "1") != -1:
                     return 1
                 elif string.find(quorum, "0") != -1:
                     return 0
                 else:
-                    self.debug("WARN: Unexpected quorum test result from "+ node +":"+ quorum)
+                    self.debug("WARN: Unexpected quorum test result from " + node + ":" + quorum)
 
         return 0
     def Components(self):    
@@ -564,16 +475,16 @@ class crm_lha(ClusterManager):
         return complist
 
     def NodeUUID(self, node):
-        lines = self.rsh(node, self["UUIDQueryCmd"], 1)
+        lines = self.rsh(node, self.templates["UUIDQueryCmd"], 1)
         for line in lines:
-            self.debug("UUIDLine:"+ line)
+            self.debug("UUIDLine:" + line)
             m = re.search(r'%s.+\((.+)\)' % node, line)
             if m:
                 return m.group(1)
         return ""
 
     def StandbyStatus(self, node):
-        out=self.rsh(node, self["StandbyQueryCmd"]%node, 1)
+        out=self.rsh(node, self.templates["StandbyQueryCmd"] % node, 1)
         if not out:
             return "off"
         out = out[:-1]
@@ -584,9 +495,33 @@ class crm_lha(ClusterManager):
     # status == "off": Enter Active mode
     def SetStandbyMode(self, node, status):
         current_status = self.StandbyStatus(node)
-        cmd = self["StandbyCmd"] % (node, status)
+        cmd = self.templates["StandbyCmd"] % (node, status)
         ret = self.rsh(node, cmd)
         return True
+
+    def AddDummyRsc(self, node, rid):
+        rsc_xml = """ '<resources>
+                <primitive class=\"ocf\" id=\"%s\" provider=\"pacemaker\" type=\"Dummy\">
+                    <operations>
+                        <op id=\"%s-interval-10s\" interval=\"10s\" name=\"monitor\"/
+                    </operations>
+                </primitive>
+            </resources>'""" % (rid, rid)
+        constraint_xml = """ '<constraints>
+                <rsc_location id=\"location-%s-%s\" node=\"%s\" rsc=\"%s\" score=\"INFINITY\"/>
+            </constraints>'
+            """ % (rid, node, node, rid)
+
+        self.rsh(node, self.templates['CibAddXml'] % (rsc_xml))
+        self.rsh(node, self.templates['CibAddXml'] % (constraint_xml))
+
+    def RemoveDummyRsc(self, node, rid):
+        constraint = "\"//rsc_location[@rsc='%s']\"" % (rid)
+        rsc = "\"//primitive[@id='%s']\"" % (rid)
+
+        self.rsh(node, self.templates['CibDelXpath'] % constraint)
+        self.rsh(node, self.templates['CibDelXpath'] % rsc)
+
 
 #######################################################################
 #

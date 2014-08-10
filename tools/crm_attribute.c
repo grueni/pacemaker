@@ -1,17 +1,17 @@
 
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -64,7 +64,7 @@ static struct crm_option long_options[] = {
     {"quiet",   0, 0, 'q', "\tPrint only the value on stdout\n"},
 
     {"name",    1, 0, 'n', "Name of the attribute/option to operate on"},
-    
+
     {"-spacer-",    0, 0, '-', "\nCommands:"},
     {"query",       0, 0, 'G', "\tQuery the current value of the attribute/option"},
     {"update",      1, 0, 'v', "Update the value of the attribute/option"},
@@ -80,19 +80,19 @@ static struct crm_option long_options[] = {
     {"set-name",    1, 0, 's', "(Advanced) The attribute set in which to place the value"},
     {"id",	    1, 0, 'i', "\t(Advanced) The ID used to identify the attribute"},
     {"default",     1, 0, 'd', "(Advanced) The default value to display if none is found in the configuration"},
-    
+
     {"inhibit-policy-engine", 0, 0, '!', NULL, 1},
 
     /* legacy */
     {"quiet",       0, 0, 'Q', NULL, 1},
-    {"node-uname",  1, 0, 'U', NULL, 1}, 
+    {"node-uname",  1, 0, 'U', NULL, 1},
     {"node-uuid",   1, 0, 'u', NULL, 1},
     {"get-value",   0, 0, 'G', NULL, 1},
     {"delete-attr", 0, 0, 'D', NULL, 1},
     {"attr-value",  1, 0, 'v', NULL, 1},
-    {"attr-name",   1, 0, 'n', NULL, 1}, 
+    {"attr-name",   1, 0, 'n', NULL, 1},
     {"attr-id",     1, 0, 'i', NULL, 1},
-    
+
     {"-spacer-",	1, 0, '-', "\nExamples:", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', "Add a new attribute called 'location' with the value of 'office' for host 'myhost':", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', " crm_attribute --node myhost --name location --update office", pcmk_option_example},
@@ -106,7 +106,7 @@ static struct crm_option long_options[] = {
     {"-spacer-",	1, 0, '-', " crm_attribute --type crm_config --name cluster-delay --query", pcmk_option_example},
     {"-spacer-",	1, 0, '-', "Query the value of the cluster-delay cluster option. Only print the value:", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', " crm_attribute --type crm_config --name cluster-delay --query --quiet", pcmk_option_example},
-    
+
     {0, 0, 0, 0}
 };
 /* *INDENT-ON* */
@@ -122,6 +122,7 @@ main(int argc, char **argv)
     int flag;
 
     int option_index = 0;
+    int is_remote_node = 0;
 
     crm_log_cli_init("crm_attribute");
     crm_set_options(NULL, "command -n attribute [options]", long_options,
@@ -216,7 +217,11 @@ main(int argc, char **argv)
 
     if (rc != pcmk_ok) {
         fprintf(stderr, "Error signing on to the CIB service: %s\n", pcmk_strerror(rc));
-        return rc;
+        return crm_exit(rc);
+    }
+
+    if (type == NULL && dest_uname != NULL) {
+	    type = "forever";
     }
 
     if (safe_str_eq(type, "reboot")) {
@@ -231,17 +236,28 @@ main(int argc, char **argv)
         type = XML_CIB_TAG_CRMCONFIG;
 
     } else if (safe_str_neq(type, XML_CIB_TAG_TICKETS)) {
-        if(dest_uname == NULL) {
-            dest_uname = get_local_node_name();
+        if (dest_uname == NULL) {
+            dest_uname = get_node_name(0);
         }
-        if (pcmk_ok != query_node_uuid(the_cib, dest_uname, &dest_node)) {
+
+        rc = query_node_uuid(the_cib, dest_uname, &dest_node, &is_remote_node);
+        if (pcmk_ok != rc) {
             fprintf(stderr, "Could not map name=%s to a UUID\n", dest_uname);
+            the_cib->cmds->signoff(the_cib);
+            cib_delete(the_cib);
+            return crm_exit(rc);
         }
     }
 
+    if (attr_name == NULL && command == 'D') {
+        fprintf(stderr, "Error during deletion, no attribute name specified.\n");
+        return crm_exit(1);
+    }
+
     if ((command == 'v' || command == 'D')
-               && safe_str_eq(type, XML_CIB_TAG_STATUS)
-               && attrd_update_delegate(NULL, command, dest_uname, attr_name, attr_value, type, set_name, NULL, NULL)) {
+        && safe_str_eq(type, XML_CIB_TAG_STATUS)
+        && pcmk_ok == attrd_update_delegate(NULL, command, dest_uname, attr_name, attr_value, type, set_name,
+                                 NULL, NULL, is_remote_node)) {
         crm_info("Update %s=%s sent via attrd", attr_name, command == 'D' ? "<none>" : attr_value);
 
     } else if (command == 'D') {
@@ -259,9 +275,8 @@ main(int argc, char **argv)
             time_t now = time(NULL);
 
             now_s = crm_itoa(now);
-            update_attr_delegate(
-                the_cib, cib_sync_call, XML_CIB_TAG_CRMCONFIG, NULL, NULL, NULL, NULL,
-                "last-lrm-refresh", now_s, TRUE, NULL);
+            update_attr_delegate(the_cib, cib_sync_call, XML_CIB_TAG_CRMCONFIG, NULL, NULL, NULL,
+                                 NULL, "last-lrm-refresh", now_s, TRUE, NULL, NULL);
             free(now_s);
         }
 
@@ -270,9 +285,8 @@ main(int argc, char **argv)
         CRM_LOG_ASSERT(attr_name != NULL);
         CRM_LOG_ASSERT(attr_value != NULL);
 
-        rc = update_attr_delegate(
-            the_cib, cib_opts, type, dest_node, set_type, set_name,
-            attr_id, attr_name, attr_value, TRUE, NULL);
+        rc = update_attr_delegate(the_cib, cib_opts, type, dest_node, set_type, set_name,
+                                  attr_id, attr_name, attr_value, TRUE, NULL, is_remote_node ? "remote" : NULL);
 
     } else {                    /* query */
 
@@ -302,17 +316,17 @@ main(int argc, char **argv)
         } else if (read_value != NULL) {
             fprintf(stdout, "%s\n", read_value);
         }
+        free(read_value);
     }
 
     if (rc == -EINVAL) {
         printf("Please choose from one of the matches above and suppy the 'id' with --attr-id\n");
+
     } else if (rc != pcmk_ok) {
         fprintf(stderr, "Error performing operation: %s\n", pcmk_strerror(rc));
     }
 
     the_cib->cmds->signoff(the_cib);
     cib_delete(the_cib);
-    crm_xml_cleanup();
-    qb_log_fini();
-    return rc;
+    return crm_exit(rc);
 }

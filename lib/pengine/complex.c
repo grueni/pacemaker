@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -22,7 +22,6 @@
 #include <crm/pengine/internal.h>
 #include <crm/msg_xml.h>
 
-extern xmlNode *get_object_root(const char *object_type, xmlNode * the_root);
 void populate_hash(xmlNode * nvpair_list, GHashTable * hash, const char **attrs, int attrs_length);
 
 resource_object_functions_t resource_class_functions[] = {
@@ -160,6 +159,10 @@ get_rsc_attributes(GHashTable * meta_hash, resource_t * rsc,
     unpack_instance_attributes(data_set->input, rsc->xml, XML_TAG_ATTR_SETS, node_hash,
                                meta_hash, NULL, FALSE, data_set->now);
 
+    if (rsc->container) {
+        g_hash_table_replace(meta_hash, strdup(CRM_META"_"XML_RSC_ATTR_CONTAINER), strdup(rsc->container->id));
+    }
+
     /* set anything else based on the parent */
     if (rsc->parent != NULL) {
         get_rsc_attributes(meta_hash, rsc->parent, node, data_set);
@@ -197,6 +200,7 @@ unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * d
     xmlNode *rsc_ops = NULL;
     xmlNode *template_ops = NULL;
     const char *template_ref = NULL;
+    const char *clone = NULL;
     const char *id = NULL;
 
     if (xml_obj == NULL) {
@@ -220,9 +224,9 @@ unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * d
         return FALSE;
     }
 
-    cib_resources = get_object_root(XML_CIB_TAG_RESOURCES, data_set->input);
+    cib_resources = get_xpath_object("//"XML_CIB_TAG_RESOURCES, data_set->input, LOG_TRACE);
     if (cib_resources == NULL) {
-        pe_err("Cannot get the root of object '%s'", XML_CIB_TAG_RESOURCES);
+        pe_err("No resources configured");
         return FALSE;
     }
 
@@ -235,6 +239,12 @@ unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * d
     new_xml = copy_xml(template);
     xmlNodeSetName(new_xml, xml_obj->name);
     crm_xml_replace(new_xml, XML_ATTR_ID, id);
+
+    clone = crm_element_value(xml_obj, XML_RSC_ATTR_INCARNATION);
+    if(clone) {
+        crm_xml_add(new_xml, XML_RSC_ATTR_INCARNATION, clone);
+    }
+
     template_ops = find_xml_node(new_xml, "operations", FALSE);
 
     for (child_xml = __xml_first_child(xml_obj); child_xml != NULL;
@@ -295,8 +305,6 @@ add_template_rsc(xmlNode * xml_obj, pe_working_set_t * data_set)
 {
     const char *template_ref = NULL;
     const char *id = NULL;
-    xmlNode *rsc_set = NULL;
-    xmlNode *rsc_ref = NULL;
 
     if (xml_obj == NULL) {
         pe_err("No resource object for processing resource list of template");
@@ -319,16 +327,9 @@ add_template_rsc(xmlNode * xml_obj, pe_working_set_t * data_set)
         return FALSE;
     }
 
-    rsc_set = g_hash_table_lookup(data_set->template_rsc_sets, template_ref);
-    if (rsc_set == NULL) {
-        rsc_set = create_xml_node(NULL, XML_CONS_TAG_RSC_SET);
-        crm_xml_add(rsc_set, XML_ATTR_ID, template_ref);
-
-        g_hash_table_insert(data_set->template_rsc_sets, strdup(template_ref), rsc_set);
+    if (add_tag_ref(data_set->template_rsc_sets, template_ref, id) == FALSE) {
+        return FALSE;
     }
-
-    rsc_ref = create_xml_node(rsc_set, XML_TAG_RESOURCE_REF);
-    crm_xml_add(rsc_ref, XML_ATTR_ID, id);
 
     return TRUE;
 }
@@ -337,12 +338,15 @@ gboolean
 common_unpack(xmlNode * xml_obj, resource_t ** rsc,
               resource_t * parent, pe_working_set_t * data_set)
 {
+    bool isdefault = FALSE;
     xmlNode *expanded_xml = NULL;
     xmlNode *ops = NULL;
     resource_t *top = NULL;
     const char *value = NULL;
+    const char *rclass = NULL; /* Look for this after any templates have been expanded */
     const char *id = crm_element_value(xml_obj, XML_ATTR_ID);
-    const char *class = crm_element_value(xml_obj, XML_AGENT_ATTR_CLASS);
+    int container_remote_node = 0;
+    int baremetal_remote_node = 0;
 
     crm_log_xml_trace(xml_obj, "Processing resource input...");
 
@@ -372,14 +376,16 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
         (*rsc)->orig_xml = NULL;
     }
 
+    /* Do not use xml_obj from here on, use (*rsc)->xml in case templates are involved */
+    rclass = crm_element_value((*rsc)->xml, XML_AGENT_ATTR_CLASS);
     (*rsc)->parent = parent;
 
     ops = find_xml_node((*rsc)->xml, "operations", FALSE);
     (*rsc)->ops_xml = expand_idref(ops, data_set->input);
 
-    (*rsc)->variant = get_resource_type(crm_element_name(xml_obj));
+    (*rsc)->variant = get_resource_type(crm_element_name((*rsc)->xml));
     if ((*rsc)->variant == pe_unknown) {
-        pe_err("Unknown resource type: %s", crm_element_name(xml_obj));
+        pe_err("Unknown resource type: %s", crm_element_name((*rsc)->xml));
         free(*rsc);
         return FALSE;
     }
@@ -395,7 +401,7 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
 
     (*rsc)->known_on = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, g_hash_destroy_str);
 
-    value = crm_element_value(xml_obj, XML_RSC_ATTR_INCARNATION);
+    value = crm_element_value((*rsc)->xml, XML_RSC_ATTR_INCARNATION);
     if (value) {
         (*rsc)->id = crm_concat(id, value, ':');
         add_hash_param((*rsc)->meta, XML_RSC_ATTR_INCARNATION, value);
@@ -437,6 +443,27 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
         set_bit((*rsc)->flags, pe_rsc_notify);
     }
 
+    if (xml_contains_remote_node((*rsc)->xml)) {
+        if (g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_CONTAINER)) {
+            container_remote_node = 1;
+        } else {
+            baremetal_remote_node = 1;
+        }
+    }
+
+    value = g_hash_table_lookup((*rsc)->meta, XML_OP_ATTR_ALLOW_MIGRATE);
+    if (crm_is_true(value)) {
+        set_bit((*rsc)->flags, pe_rsc_allow_migrate);
+    } else if (value == NULL && baremetal_remote_node) {
+        /* by default, we want baremetal remote-nodes to be able
+         * to float around the cluster without having to stop all the
+         * resources within the remote-node before moving. Allowing
+         * migration support enables this feature. If this ever causes
+         * problems, migration support can be explicitly turned off with
+         * allow-migrate=false. */
+        set_bit((*rsc)->flags, pe_rsc_allow_migrate);
+    }
+
     value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_MANAGED);
     if (value != NULL && safe_str_neq("default", value)) {
         gboolean bool_value = TRUE;
@@ -449,8 +476,19 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
         }
     }
 
-    if (is_set(data_set->flags, pe_flag_maintenance_mode)) {
+    value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_MAINTENANCE);
+    if (value != NULL && safe_str_neq("default", value)) {
+        gboolean bool_value = FALSE;
+
+        crm_str_to_boolean(value, &bool_value);
+        if (bool_value == TRUE) {
+            clear_bit((*rsc)->flags, pe_rsc_managed);
+            set_bit((*rsc)->flags, pe_rsc_maintenance);
+        }
+
+    } else if (is_set(data_set->flags, pe_flag_maintenance_mode)) {
         clear_bit((*rsc)->flags, pe_rsc_managed);
+        set_bit((*rsc)->flags, pe_rsc_maintenance);
     }
 
     pe_rsc_trace((*rsc), "Options for %s", (*rsc)->id);
@@ -518,8 +556,8 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
             if (fail_sticky == -INFINITY) {
                 (*rsc)->migration_threshold = 1;
                 pe_rsc_info((*rsc),
-                    "Set a migration threshold of %d for %s based on a failure-stickiness of %s",
-                     (*rsc)->migration_threshold, (*rsc)->id, value);
+                            "Set a migration threshold of %d for %s based on a failure-stickiness of %s",
+                            (*rsc)->migration_threshold, (*rsc)->id, value);
 
             } else if ((*rsc)->stickiness != 0 && fail_sticky != 0) {
                 (*rsc)->migration_threshold = (*rsc)->stickiness / fail_sticky;
@@ -529,11 +567,76 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
                 }
                 (*rsc)->migration_threshold += 1;
                 pe_rsc_info((*rsc),
-                    "Calculated a migration threshold for %s of %d based on a stickiness of %d/%s",
-                     (*rsc)->id, (*rsc)->migration_threshold, (*rsc)->stickiness, value);
+                            "Calculated a migration threshold for %s of %d based on a stickiness of %d/%s",
+                            (*rsc)->id, (*rsc)->migration_threshold, (*rsc)->stickiness, value);
             }
         }
     }
+
+    if (safe_str_eq(rclass, "stonith")) {
+        set_bit(data_set->flags, pe_flag_have_stonith_resource);
+        set_bit((*rsc)->flags, pe_rsc_fence_device);
+    }
+
+    value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_REQUIRES);
+
+  handle_requires_pref:
+    if (safe_str_eq(value, "nothing")) {
+
+    } else if (safe_str_eq(value, "quorum")) {
+        set_bit((*rsc)->flags, pe_rsc_needs_quorum);
+
+    } else if (safe_str_eq(value, "unfencing")) {
+        if (is_set((*rsc)->flags, pe_rsc_fence_device)) {
+            crm_config_warn("%s is a fencing device but requires (un)fencing", (*rsc)->id);
+            value = "quorum";
+            isdefault = TRUE;
+            goto handle_requires_pref;
+
+        } else if (is_not_set(data_set->flags, pe_flag_stonith_enabled)) {
+            crm_config_warn("%s requires (un)fencing but fencing is disabled", (*rsc)->id);
+            value = "quorum";
+            isdefault = TRUE;
+            goto handle_requires_pref;
+
+        } else {
+            set_bit((*rsc)->flags, pe_rsc_needs_fencing);
+            set_bit((*rsc)->flags, pe_rsc_needs_unfencing);
+        }
+
+    } else if (safe_str_eq(value, "fencing")) {
+        set_bit((*rsc)->flags, pe_rsc_needs_fencing);
+        if (is_not_set(data_set->flags, pe_flag_stonith_enabled)) {
+            crm_config_warn("%s requires fencing but fencing is disabled", (*rsc)->id);
+        }
+
+    } else {
+        if (value) {
+            crm_config_err("Invalid value for %s->requires: %s%s",
+                           (*rsc)->id, value,
+                           is_set(data_set->flags, pe_flag_stonith_enabled) ? "" : " (stonith-enabled=false)");
+        }
+
+        isdefault = TRUE;
+        if(is_set((*rsc)->flags, pe_rsc_fence_device)) {
+            value = "quorum";
+
+        } else if (is_set(data_set->flags, pe_flag_enable_unfencing)) {
+            value = "unfencing";
+
+        } else if (is_set(data_set->flags, pe_flag_stonith_enabled)) {
+            value = "fencing";
+
+        } else if (data_set->no_quorum_policy == no_quorum_ignore) {
+            value = "nothing";
+
+        } else {
+            value = "quorum";
+        }
+        goto handle_requires_pref;
+    }
+
+    pe_rsc_trace((*rsc), "\tRequired to start: %s%s", value, isdefault?" (default)":"");
 
     value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_FAIL_TIMEOUT);
     if (value != NULL) {
@@ -543,7 +646,7 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
 
     get_target_role(*rsc, &((*rsc)->next_role));
     pe_rsc_trace((*rsc), "\tDesired next state: %s",
-              (*rsc)->next_role != RSC_ROLE_UNKNOWN ? role2text((*rsc)->next_role) : "default");
+                 (*rsc)->next_role != RSC_ROLE_UNKNOWN ? role2text((*rsc)->next_role) : "default");
 
     if ((*rsc)->fns->unpack(*rsc, data_set) == FALSE) {
         return FALSE;
@@ -551,14 +654,15 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
 
     if (is_set(data_set->flags, pe_flag_symmetric_cluster)) {
         resource_location(*rsc, NULL, 0, "symmetric_default", data_set);
+    } else if (container_remote_node) {
+        /* remote resources tied to a container resource must always be allowed
+         * to opt-in to the cluster. Whether the connection resource is actually
+         * allowed to be placed on a node is dependent on the container resource */
+        resource_location(*rsc, NULL, 0, "remote_connection_default", data_set);
     }
 
     pe_rsc_trace((*rsc), "\tAction notification: %s",
-              is_set((*rsc)->flags, pe_rsc_notify) ? "required" : "not required");
-
-    if (safe_str_eq(class, "stonith")) {
-        set_bit(data_set->flags, pe_flag_have_stonith_resource);
-    }
+                 is_set((*rsc)->flags, pe_rsc_notify) ? "required" : "not required");
 
     (*rsc)->utilization =
         g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
@@ -598,6 +702,23 @@ common_update_score(resource_t * rsc, const char *id, int score)
     }
 }
 
+gboolean
+is_parent(resource_t *child, resource_t *rsc)
+{
+    resource_t *parent = child;
+
+    if (parent == NULL || rsc == NULL) {
+        return FALSE;
+    }
+    while (parent->parent != NULL) {
+        if (parent->parent == rsc) {
+            return TRUE;
+        }
+        parent = parent->parent;
+    }
+    return FALSE;
+}
+
 resource_t *
 uber_parent(resource_t * rsc)
 {
@@ -635,15 +756,17 @@ common_free(resource_t * rsc)
     if (rsc->utilization != NULL) {
         g_hash_table_destroy(rsc->utilization);
     }
-    if (rsc->orig_xml) {
-        free_xml(rsc->xml);
-    }
+
     if (rsc->parent == NULL && is_set(rsc->flags, pe_rsc_orphan)) {
-        if (rsc->orig_xml) {
-            free_xml(rsc->orig_xml);
-        } else {
-            free_xml(rsc->xml);
-        }
+        free_xml(rsc->xml);
+        rsc->xml = NULL;
+        free_xml(rsc->orig_xml);
+        rsc->orig_xml = NULL;
+
+        /* if rsc->orig_xml, then rsc->xml is an expanded xml from a template */
+    } else if (rsc->orig_xml) {
+        free_xml(rsc->xml);
+        rsc->xml = NULL;
     }
     if (rsc->running_on) {
         g_list_free(rsc->running_on);
@@ -661,11 +784,13 @@ common_free(resource_t * rsc)
         g_hash_table_destroy(rsc->allowed_nodes);
         rsc->allowed_nodes = NULL;
     }
+    g_list_free(rsc->fillers);
     g_list_free(rsc->rsc_location);
     pe_rsc_trace(rsc, "Resource freed");
     free(rsc->id);
     free(rsc->clone_name);
     free(rsc->allocated_to);
     free(rsc->variant_opaque);
+    free(rsc->pending_task);
     free(rsc);
 }

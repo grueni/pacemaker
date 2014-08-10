@@ -1,17 +1,16 @@
-
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -55,7 +54,7 @@ void clean_up(int rc);
 void crm_diff_update(const char *event, xmlNode * msg);
 gboolean mon_refresh_display(gpointer user_data);
 int cib_connect(gboolean full);
-void mon_st_callback(stonith_t *st, stonith_event_t *e);
+void mon_st_callback(stonith_t * st, stonith_event_t * e);
 
 char *xml_file = NULL;
 char *as_html_file = NULL;
@@ -96,10 +95,18 @@ gboolean print_last_updated = TRUE;
 gboolean print_last_change = TRUE;
 gboolean print_tickets = FALSE;
 gboolean watch_fencing = FALSE;
+gboolean hide_headers = FALSE;
+gboolean print_brief = FALSE;
+gboolean print_pending = FALSE;
+gboolean print_clone_detail = FALSE;
+
+/* FIXME allow, detect, and correctly interpret glob pattern or regex? */
+const char *print_neg_location_prefix;
+const char *print_neg_location_prefix_toggle;
 
 #define FILTER_STR {"shutdown", "terminate", "standby", "fail-count",	\
 	    "last-failure", "probe_complete", "#id", "#uname",		\
-	    "#is_dc", NULL}
+	    "#is_dc", "#kind", NULL}
 
 gboolean log_diffs = FALSE;
 gboolean log_updates = FALSE;
@@ -167,14 +174,21 @@ mon_timer_popped(gpointer data)
 {
     int rc = pcmk_ok;
 
+#if CURSES_ENABLED
+    if(as_console) {
+        clear();
+        refresh();
+    }
+#endif
+
     if (timer_id > 0) {
         g_source_remove(timer_id);
     }
 
+    print_as("Reconnecting...\n");
     rc = cib_connect(TRUE);
 
     if (rc != pcmk_ok) {
-        print_dot();
         timer_id = g_timeout_add(reconnect_msec, mon_timer_popped, NULL);
     }
     return FALSE;
@@ -185,7 +199,6 @@ mon_cib_connection_destroy(gpointer user_data)
 {
     print_as("Connection to the CIB terminated\n");
     if (cib) {
-        print_as("Reconnecting...");
         cib->cmds->signoff(cib);
         timer_id = g_timeout_add(reconnect_msec, mon_timer_popped, NULL);
     }
@@ -206,9 +219,9 @@ mon_shutdown(int nsig)
 #endif
 
 #if CURSES_ENABLED
-#ifndef HAVE_SIGHANDLER_T
-typedef void (*sighandler_t)(int);
-#endif
+#  ifndef HAVE_SIGHANDLER_T
+typedef void (*sighandler_t) (int);
+#  endif
 static sighandler_t ncurses_winch_handler;
 static void
 mon_winresize(int nsig)
@@ -242,19 +255,19 @@ cib_connect(gboolean full)
         need_pass = FALSE;
     }
 
-    if(watch_fencing && st == NULL) {
+    if (watch_fencing && st == NULL) {
         st = stonith_api_new();
     }
-    
-    if(watch_fencing && st->state == stonith_disconnected) {
+
+    if (watch_fencing && st->state == stonith_disconnected) {
         crm_trace("Connecting to stonith");
         rc = st->cmds->connect(st, crm_system_name, NULL);
-        if(rc == pcmk_ok) {
+        if (rc == pcmk_ok) {
             crm_trace("Setting up stonith callbacks");
             st->cmds->register_notification(st, T_STONITH_NOTIFY_FENCE, mon_st_callback);
         }
     }
-    
+
     if (cib->state != cib_connected_query && cib->state != cib_connected_command) {
         crm_trace("Connecting to the CIB");
         if (as_console && need_pass && cib->variant == cib_remote) {
@@ -268,14 +281,17 @@ cib_connect(gboolean full)
             return rc;
         }
 
-        current_cib = get_cib_copy(cib);
-        mon_refresh_display(NULL);
+        rc = cib->cmds->query(cib, NULL, &current_cib, cib_scope_local | cib_sync_call);
+        if (rc == pcmk_ok) {
+            mon_refresh_display(NULL);
+        }
 
-        if (full) {
+        if (rc == pcmk_ok && full) {
             if (rc == pcmk_ok) {
                 rc = cib->cmds->set_connection_dnotify(cib, mon_cib_connection_destroy);
                 if (rc == -EPROTONOSUPPORT) {
-                    print_as("Notification setup failed, won't be able to reconnect after failure");
+                    print_as
+                        ("Notification setup not supported, won't be able to reconnect after failure");
                     if (as_console) {
                         sleep(2);
                     }
@@ -310,27 +326,32 @@ static struct crm_option long_options[] = {
     {"quiet",          0, 0, 'Q', "\tDisplay only essential output" },
 
     {"-spacer-",	1, 0, '-', "\nModes:"},
-    {"as-html",        1, 0, 'h', "Write cluster status to the named html file"},
-    {"as-xml",         0, 0, 'X', "\tWrite cluster status as xml to stdout. This will enable one-shot mode."},
-    {"web-cgi",        0, 0, 'w', "\tWeb mode with output suitable for cgi"},
-    {"simple-status",  0, 0, 's', "Display the cluster status once as a simple one line output (suitable for nagios)"},
-    {"snmp-traps",     1, 0, 'S', "Send SNMP traps to this station", !ENABLE_SNMP},
+    {"as-html",        1, 0, 'h', "\tWrite cluster status to the named html file"},
+    {"as-xml",         0, 0, 'X', "\t\tWrite cluster status as xml to stdout. This will enable one-shot mode."},
+    {"web-cgi",        0, 0, 'w', "\t\tWeb mode with output suitable for cgi"},
+    {"simple-status",  0, 0, 's', "\tDisplay the cluster status once as a simple one line output (suitable for nagios)"},
+    {"snmp-traps",     1, 0, 'S', "\tSend SNMP traps to this station", !ENABLE_SNMP},
     {"snmp-community", 1, 0, 'C', "Specify community for SNMP traps(default is NULL)", !ENABLE_SNMP},
-    {"mail-to",        1, 0, 'T', "Send Mail alerts to this user.  See also --mail-from, --mail-host, --mail-prefix", !ENABLE_ESMTP},
-    
+    {"mail-to",        1, 0, 'T', "\tSend Mail alerts to this user.  See also --mail-from, --mail-host, --mail-prefix", !ENABLE_ESMTP},
+
     {"-spacer-",	1, 0, '-', "\nDisplay Options:"},
     {"group-by-node",  0, 0, 'n', "\tGroup resources by node"     },
-    {"inactive",       0, 0, 'r', "\tDisplay inactive resources"  },
+    {"inactive",       0, 0, 'r', "\t\tDisplay inactive resources"  },
     {"failcounts",     0, 0, 'f', "\tDisplay resource fail counts"},
     {"operations",     0, 0, 'o', "\tDisplay resource operation history" },
     {"timing-details", 0, 0, 't', "\tDisplay resource operation history with timing details" },
     {"tickets",        0, 0, 'c', "\t\tDisplay cluster tickets"},
-    {"watch-fencing",  0, 0, 'W', "\t\tListen for fencing events. For use with --external-agent, --mail-to and/or --snmp-traps where supported"},
+    {"watch-fencing",  0, 0, 'W', "\tListen for fencing events. For use with --external-agent, --mail-to and/or --snmp-traps where supported"},
+    {"neg-locations",  2, 0, 'L', "Display negative location constraints [optionally filtered by id prefix]"},
     {"show-node-attributes", 0, 0, 'A', "Display node attributes" },
+    {"hide-headers",   0, 0, 'D', "\tHide all headers" },
+    {"show-detail",    0, 0, 'R', "\tShow more details of cloned resources" },
+    {"brief",          0, 0, 'b', "\t\tBrief output" },
+    {"pending",        0, 0, 'j', "\t\tDisplay pending state if 'record-pending' is enabled" },
 
     {"-spacer-",	1, 0, '-', "\nAdditional Options:"},
     {"interval",       1, 0, 'i', "\tUpdate frequency in seconds" },
-    {"one-shot",       0, 0, '1', "\tDisplay the cluster status once on the console and exit"},
+    {"one-shot",       0, 0, '1', "\t\tDisplay the cluster status once on the console and exit"},
     {"disable-ncurses",0, 0, 'N', "\tDisable the use of ncurses", !CURSES_ENABLED},
     {"daemonize",      0, 0, 'd', "\tRun in the background as a daemon"},
     {"pid-file",       1, 0, 'p', "\t(Advanced) Daemon pid file location"},
@@ -340,7 +361,7 @@ static struct crm_option long_options[] = {
     {"external-agent",    1, 0, 'E', "A program to run when resource operations take place."},
     {"external-recipient",1, 0, 'e', "A recipient for your program (assuming you want the program to send something to someone)."},
 
-    
+
     {"xml-file",       1, 0, 'x', NULL, 1},
 
     {"-spacer-",	1, 0, '-', "\nExamples:", pcmk_option_paragraph},
@@ -358,10 +379,128 @@ static struct crm_option long_options[] = {
     {"-spacer-",	1, 0, '-', " crm_mon --daemonize --mail-to user@example.com --mail-host mail.example.com", pcmk_option_example|!ENABLE_ESMTP},
     {"-spacer-",	1, 0, '-', "Start crm_mon as a background daemon and have it send SNMP alerts:", pcmk_option_paragraph|!ENABLE_SNMP},
     {"-spacer-",	1, 0, '-', " crm_mon --daemonize --snmp-traps snmptrapd.example.com", pcmk_option_example|!ENABLE_SNMP},
-    
+
     {NULL, 0, 0, 0}
 };
 /* *INDENT-ON* */
+
+#if CURSES_ENABLED
+static const char *
+get_option_desc(char c)
+{
+    int lpc;
+
+    for (lpc = 0; long_options[lpc].name != NULL; lpc++) {
+
+        if (long_options[lpc].name[0] == '-')
+            continue;
+
+        if (long_options[lpc].val == c) {
+            const char * tab = NULL;
+            tab = strrchr(long_options[lpc].desc, '\t');
+            return tab ? ++tab : long_options[lpc].desc;
+        }
+    }
+
+    return NULL;
+}
+
+static gboolean
+detect_user_input(GIOChannel *channel, GIOCondition condition, gpointer unused)
+{
+    int c;
+    gboolean config_mode = FALSE;
+
+    while (1) {
+
+        /* Get user input */
+        c = getchar();
+
+        switch (c) {
+            case 'c':
+                print_tickets = ! print_tickets;
+                break;
+            case 'f':
+                print_failcount = ! print_failcount;
+                break;
+            case 'n':
+                group_by_node = ! group_by_node;
+                break;
+            case 'o':
+                print_operations = ! print_operations;
+                break;
+            case 'r':
+                inactive_resources = ! inactive_resources;
+                break;
+            case 'R':
+                print_clone_detail = ! print_clone_detail;
+                break;
+            case 't':
+                print_timing = ! print_timing;
+                if (print_timing)
+                    print_operations = TRUE;
+                break;
+            case 'A':
+                print_nodes_attr = ! print_nodes_attr;
+                break;
+            case 'L':
+                if (print_neg_location_prefix) {
+                    /* toggle off */
+                    print_neg_location_prefix_toggle = print_neg_location_prefix;
+                    print_neg_location_prefix = NULL;
+                } else if (print_neg_location_prefix_toggle) {
+                    /* toggle on */
+                    print_neg_location_prefix = print_neg_location_prefix_toggle;
+                    print_neg_location_prefix_toggle = NULL;
+                } else {
+                    /* toggled on for the first time at runtime */
+                    print_neg_location_prefix = "";
+                }
+                break;
+            case 'D':
+                hide_headers = ! hide_headers;
+                break;
+            case 'b':
+                print_brief = ! print_brief;
+                break;
+            case 'j':
+                print_pending = ! print_pending;
+                break;
+            case '?':
+                config_mode = TRUE;
+                break;
+            default:
+                goto refresh;
+        }
+
+        if (!config_mode)
+            goto refresh;
+
+        blank_screen();
+
+        print_as("Display option change mode\n");
+        print_as("\n");
+        print_as("%c c: \t%s\n", print_tickets ? '*': ' ', get_option_desc('c'));
+        print_as("%c f: \t%s\n", print_failcount ? '*': ' ', get_option_desc('f'));
+        print_as("%c n: \t%s\n", group_by_node ? '*': ' ', get_option_desc('n'));
+        print_as("%c o: \t%s\n", print_operations ? '*': ' ', get_option_desc('o'));
+        print_as("%c r: \t%s\n", inactive_resources ? '*': ' ', get_option_desc('r'));
+        print_as("%c t: \t%s\n", print_timing ? '*': ' ', get_option_desc('t'));
+        print_as("%c A: \t%s\n", print_nodes_attr ? '*': ' ', get_option_desc('A'));
+        print_as("%c L: \t%s\n", print_neg_location_prefix ? '*': ' ', get_option_desc('L'));
+        print_as("%c D: \t%s\n", hide_headers ? '*': ' ', get_option_desc('D'));
+        print_as("%c R: \t%s\n", print_clone_detail ? '*': ' ', get_option_desc('R'));
+        print_as("%c b: \t%s\n", print_brief ? '*': ' ', get_option_desc('b'));
+        print_as("%c j: \t%s\n", print_pending ? '*': ' ', get_option_desc('j'));
+        print_as("\n");
+        print_as("Toggle fields via field letter, type any other key to return");
+    }
+
+refresh:
+    mon_refresh_display(NULL);
+    return TRUE;
+}
+#endif
 
 int
 main(int argc, char **argv)
@@ -377,7 +516,7 @@ main(int argc, char **argv)
                     "Provides a summary of cluster's current state."
                     "\n\nOutputs varying levels of detail in a number of different formats.\n");
 
-#ifndef ON_DARWIN
+#if !defined (ON_DARWIN) && !defined (ON_BSD)
     /* prevent zombies */
     signal(SIGCLD, SIG_IGN);
 #endif
@@ -428,19 +567,44 @@ main(int argc, char **argv)
             case 'A':
                 print_nodes_attr = TRUE;
                 break;
+            case 'L':
+                print_neg_location_prefix = optarg ?: "";
+                break;
+            case 'D':
+                hide_headers = TRUE;
+                break;
+            case 'b':
+                print_brief = TRUE;
+                break;
+            case 'j':
+                print_pending = TRUE;
+                break;
+            case 'R':
+                print_clone_detail = TRUE;
+                break;
             case 'c':
                 print_tickets = TRUE;
                 break;
             case 'p':
                 free(pid_file);
+                if(optarg == NULL) {
+                    return crm_help(flag, EX_USAGE);
+                }
                 pid_file = strdup(optarg);
                 break;
             case 'x':
+                if(optarg == NULL) {
+                    return crm_help(flag, EX_USAGE);
+                }
                 xml_file = strdup(optarg);
                 one_shot = TRUE;
                 break;
             case 'h':
+                if(optarg == NULL) {
+                    return crm_help(flag, EX_USAGE);
+                }
                 as_html_file = strdup(optarg);
+                umask(S_IWGRP | S_IWOTH);
                 break;
             case 'X':
                 as_xml = TRUE;
@@ -486,7 +650,7 @@ main(int argc, char **argv)
                 break;
             case '$':
             case '?':
-                crm_help(flag, EX_OK);
+                return crm_help(flag, EX_OK);
                 break;
             default:
                 printf("Argument code 0%o (%c) is not (?yet?) supported\n", flag, flag);
@@ -502,7 +666,7 @@ main(int argc, char **argv)
         printf("\n");
     }
     if (argerr) {
-        crm_help('?', EX_USAGE);
+        return crm_help('?', EX_USAGE);
     }
 
     if (one_shot) {
@@ -515,7 +679,7 @@ main(int argc, char **argv)
         if (!as_html_file && !snmp_target && !crm_mail_to && !external_agent && !as_xml) {
             printf
                 ("Looks like you forgot to specify one or more of: --as-html, --as-xml, --mail-to, --snmp-target, --external-agent\n");
-            crm_help('?', EX_USAGE);
+            return crm_help('?', EX_USAGE);
         }
 
         crm_make_daemon(crm_system_name, TRUE, pid_file);
@@ -543,19 +707,24 @@ main(int argc, char **argv)
 
     if (current_cib == NULL) {
         cib = cib_new();
-        if (!one_shot) {
-            print_as("Attempting connection to the cluster...");
-        }
 
         do {
+            if (!one_shot) {
+                print_as("Attempting connection to the cluster...\n");
+            }
             exit_code = cib_connect(!one_shot);
 
             if (one_shot) {
                 break;
 
             } else if (exit_code != pcmk_ok) {
-                print_dot();
                 sleep(reconnect_msec / 1000);
+#if CURSES_ENABLED
+                if(as_console) {
+                    clear();
+                    refresh();
+                }
+#endif
             }
 
         } while (exit_code == -ENOTCONN);
@@ -583,6 +752,7 @@ main(int argc, char **argv)
         if (ncurses_winch_handler == SIG_DFL ||
             ncurses_winch_handler == SIG_IGN || ncurses_winch_handler == SIG_ERR)
             ncurses_winch_handler = NULL;
+        g_io_add_watch(g_io_channel_unix_new(STDIN_FILENO), G_IO_IN, detect_user_input, NULL);
     }
 #endif
     refresh_trigger = mainloop_add_trigger(G_PRIORITY_LOW, mon_refresh_display, NULL);
@@ -594,37 +764,6 @@ main(int argc, char **argv)
 
     clean_up(0);
     return 0;                   /* never reached */
-}
-
-void
-wait_for_refresh(int offset, const char *prefix, int msec)
-{
-    int lpc = msec / 1000;
-    struct timespec sleept = { 1, 0 };
-
-    if (as_console == FALSE) {
-        timer_id = g_timeout_add(msec, mon_timer_popped, NULL);
-        return;
-    }
-
-    crm_notice("%sRefresh in %ds...", prefix ? prefix : "", lpc);
-    while (lpc > 0) {
-#if CURSES_ENABLED
-        move(offset, 0);
-/* 		printw("%sRefresh in \033[01;32m%ds\033[00m...", prefix?prefix:"", lpc); */
-        printw("%sRefresh in %ds...\n", prefix ? prefix : "", lpc);
-        clrtoeol();
-        refresh();
-#endif
-        lpc--;
-        if (lpc == 0) {
-            timer_id = g_timeout_add(1000, mon_timer_popped, NULL);
-        } else {
-            if (nanosleep(&sleept, NULL) != 0) {
-                return;
-            }
-        }
-    }
 }
 
 #define mon_warn(fmt...) do {			\
@@ -664,6 +803,7 @@ print_simple_status(pe_working_set_t * data_set)
     GListPtr gIter = NULL;
     int nodes_online = 0;
     int nodes_standby = 0;
+    int nodes_maintenance = 0;
 
     dc = data_set->dc_node;
 
@@ -676,6 +816,8 @@ print_simple_status(pe_working_set_t * data_set)
 
         if (node->details->standby && node->details->online) {
             nodes_standby++;
+        } else if (node->details->maintenance && node->details->online) {
+            nodes_maintenance++;
         } else if (node->details->online) {
             nodes_online++;
         } else {
@@ -688,15 +830,15 @@ print_simple_status(pe_working_set_t * data_set)
         if (nodes_standby > 0) {
             print_as(", %d standby nodes", nodes_standby);
         }
+        if (nodes_maintenance > 0) {
+            print_as(", %d maintenance nodes", nodes_maintenance);
+        }
         print_as(", %d resources configured", count_resources(data_set, NULL));
     }
 
     print_as("\n");
     return 0;
 }
-
-extern int get_failcount(node_t * node, resource_t * rsc, int *last_failure,
-                         pe_working_set_t * data_set);
 
 static void
 print_date(time_t time)
@@ -713,23 +855,18 @@ print_date(time_t time)
     print_as("'%s'", date_str);
 }
 
+#include <crm/pengine/internal.h>
 static void
 print_rsc_summary(pe_working_set_t * data_set, node_t * node, resource_t * rsc, gboolean all)
 {
     gboolean printed = FALSE;
+
     time_t last_failure = 0;
-
-    char *fail_attr = crm_concat("fail-count", rsc->id, '-');
-    const char *value = g_hash_table_lookup(node->details->attrs, fail_attr);
-
-    int failcount = char2score(value);  /* Get the true value, not the effective one from get_failcount() */
-
-    get_failcount(node, rsc, (int *)&last_failure, data_set);
-    free(fail_attr);
+    int failcount = get_failcount_full(node, rsc, &last_failure, FALSE, NULL, data_set);
 
     if (all || failcount || last_failure > 0) {
         printed = TRUE;
-        print_as("   %s: migration-threshold=%d", rsc->id, rsc->migration_threshold);
+        print_as("   %s: migration-threshold=%d", rsc_printable_id(rsc), rsc->migration_threshold);
     }
 
     if (failcount > 0) {
@@ -804,31 +941,35 @@ print_rsc_history(pe_working_set_t * data_set, node_t * node, xmlNode * rsc_entr
 
         if (print_timing) {
             int int_value;
-            const char *attr = "last-rc-change";
+            const char *attr = XML_RSC_OP_LAST_CHANGE;
 
             value = crm_element_value(xml_op, attr);
             if (value) {
                 int_value = crm_parse_int(value, NULL);
-                print_as(" %s=", attr);
-                print_date(int_value);
+                if (int_value > 0) {
+                    print_as(" %s=", attr);
+                    print_date(int_value);
+                }
             }
 
-            attr = "last-run";
+            attr = XML_RSC_OP_LAST_RUN;
             value = crm_element_value(xml_op, attr);
             if (value) {
                 int_value = crm_parse_int(value, NULL);
-                print_as(" %s=", attr);
-                print_date(int_value);
+                if (int_value > 0) {
+                    print_as(" %s=", attr);
+                    print_date(int_value);
+                }
             }
 
-            attr = "exec-time";
+            attr = XML_RSC_OP_T_EXEC;
             value = crm_element_value(xml_op, attr);
             if (value) {
                 int_value = crm_parse_int(value, NULL);
                 print_as(" %s=%dms", attr, int_value);
             }
 
-            attr = "queue-time";
+            attr = XML_RSC_OP_T_QUEUE;
             value = crm_element_value(xml_op, attr);
             if (value) {
                 int_value = crm_parse_int(value, NULL);
@@ -836,7 +977,7 @@ print_rsc_history(pe_working_set_t * data_set, node_t * node, xmlNode * rsc_entr
             }
         }
 
-        print_as(" rc=%s (%s)\n", op_rc, lrmd_event_rc2str(rc));
+        print_as(" rc=%s (%s)\n", op_rc, services_ocf_exitcode_str(rc));
     }
 
     /* no need to free the contents */
@@ -857,24 +998,26 @@ print_attr_msg(node_t * node, GListPtr rsc_list, const char *attrname, const cha
         }
 
         if (safe_str_eq(type, "ping") || safe_str_eq(type, "pingd")) {
-            const char *name = "pingd";
-            const char *multiplier = NULL;
-            char **host_list = NULL;
-            int host_list_num = 0;
-            int expected_score = 0;
+            const char *name = g_hash_table_lookup(rsc->parameters, "name");
 
-            if (g_hash_table_lookup(rsc->meta, "name") != NULL) {
-                name = g_hash_table_lookup(rsc->meta, "name");
+            if (name == NULL) {
+                name = "pingd";
             }
 
             /* To identify the resource with the attribute name. */
             if (safe_str_eq(name, attrname)) {
+                int host_list_num = 0;
+                int expected_score = 0;
                 int value = crm_parse_int(attrvalue, "0");
+                const char *hosts = g_hash_table_lookup(rsc->parameters, "host_list");
+                const char *multiplier = g_hash_table_lookup(rsc->parameters, "multiplier");
 
-                multiplier = g_hash_table_lookup(rsc->meta, "multiplier");
-                host_list = g_strsplit(g_hash_table_lookup(rsc->meta, "host_list"), " ", 0);
-                host_list_num = g_strv_length(host_list);
-                g_strfreev(host_list);
+                if(hosts) {
+                    char **host_list = g_strsplit(hosts, " ", 0);
+                    host_list_num = g_strv_length(host_list);
+                    g_strfreev(host_list);
+                }
+
                 /* pingd multiplier is the same as the default value. */
                 expected_score = host_list_num * crm_parse_int(multiplier, "1");
 
@@ -986,8 +1129,7 @@ print_ticket(gpointer name, gpointer value, gpointer data)
     ticket_t *ticket = (ticket_t *) value;
 
     print_as(" %s\t%s%10s", ticket->id,
-             ticket->granted ? "granted":"revoked",
-             ticket->standby ? " [standby]":"");
+             ticket->granted ? "granted" : "revoked", ticket->standby ? " [standby]" : "");
     if (ticket->last_granted > -1) {
         print_as(" last-granted=");
         print_date(ticket->last_granted);
@@ -1000,16 +1142,46 @@ print_ticket(gpointer name, gpointer value, gpointer data)
 static void
 print_cluster_tickets(pe_working_set_t * data_set)
 {
-    xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set->input);
-
-    /* For recording the tickets that are referenced in rsc_ticket constraints
-     * but have never been granted yet. */
-    unpack_constraints(cib_constraints, data_set);
 
     print_as("\nTickets:\n");
     g_hash_table_foreach(data_set->tickets, print_ticket, NULL);
 
     return;
+}
+
+static void print_neg_locations(pe_working_set_t *data_set)
+{
+    GListPtr gIter, gIter2;
+
+    print_as("\nFencing constraints:\n");
+    for (gIter = data_set->placement_constraints; gIter != NULL; gIter = gIter->next) {
+        rsc_to_node_t *location = (rsc_to_node_t *) gIter->data;
+        if (!g_str_has_prefix(location->id, print_neg_location_prefix))
+            continue;
+        for (gIter2 = location->node_list_rh; gIter2 != NULL; gIter2 = gIter2->next) {
+            node_t *node = (node_t *) gIter2->data;
+            if (node->weight >= 0) /* != -INFINITY ??? */
+                continue;
+            print_as(" %s\tprevents %s from running %son %s\n",
+                    location->id, location->rsc_lh->id,
+                    location->role_filter == RSC_ROLE_MASTER ? "as Master " : "",
+                    node->details->uname);
+        }
+    }
+}
+
+static void
+crm_mon_get_parameters(resource_t *rsc, pe_working_set_t * data_set)
+{
+    get_rsc_attributes(rsc->parameters, rsc, NULL, data_set);
+    crm_trace("Beekhof: unpacked params for %s (%d)", rsc->id, g_hash_table_size(rsc->parameters));
+    if(rsc->children) {
+        GListPtr gIter = NULL;
+
+        for (gIter = rsc->children; gIter != NULL; gIter = gIter->next) {
+            crm_mon_get_parameters(gIter->data, data_set);
+        }
+    }
 }
 
 static int
@@ -1021,7 +1193,11 @@ print_status(pe_working_set_t * data_set)
     node_t *dc = NULL;
     char *since_epoch = NULL;
     char *online_nodes = NULL;
+    char *online_remote_nodes = NULL;
+    char *online_remote_containers = NULL;
     char *offline_nodes = NULL;
+    char *offline_remote_nodes = NULL;
+    const char *stack_s = NULL;
     xmlNode *dc_version = NULL;
     xmlNode *quorum_node = NULL;
     xmlNode *stack = NULL;
@@ -1036,6 +1212,14 @@ print_status(pe_working_set_t * data_set)
         print_opts = pe_print_printf;
     }
 
+    if (print_pending) {
+        print_opts |= pe_print_pending;
+    }
+
+    if (print_clone_detail) {
+        print_opts |= pe_print_clone_details;
+    }
+
     updates++;
     dc = data_set->dc_node;
 
@@ -1045,11 +1229,11 @@ print_status(pe_working_set_t * data_set)
     }
 
     since_epoch = ctime(&a_time);
-    if (since_epoch != NULL && print_last_updated) {
+    if (since_epoch != NULL && print_last_updated && !hide_headers) {
         print_as("Last updated: %s", since_epoch);
     }
 
-    if (print_last_change) {
+    if (print_last_change && !hide_headers) {
         const char *last_written = crm_element_value(data_set->input, XML_CIB_ATTR_WRITTEN);
         const char *user = crm_element_value(data_set->input, XML_ATTR_UPDATE_USER);
         const char *client = crm_element_value(data_set->input, XML_ATTR_UPDATE_CLIENT);
@@ -1071,13 +1255,16 @@ print_status(pe_working_set_t * data_set)
     stack =
         get_xpath_object("//nvpair[@name='cluster-infrastructure']", data_set->input, LOG_DEBUG);
     if (stack) {
-        print_as("Stack: %s\n", crm_element_value(stack, XML_NVPAIR_ATTR_VALUE));
+        stack_s = crm_element_value(stack, XML_NVPAIR_ATTR_VALUE);
+        if (!hide_headers) {
+            print_as("Stack: %s\n", stack_s);
+        }
     }
 
     dc_version = get_xpath_object("//nvpair[@name='dc-version']", data_set->input, LOG_DEBUG);
     if (dc == NULL) {
         print_as("Current DC: NONE\n");
-    } else {
+    } else if (!hide_headers) {
         const char *quorum = crm_element_value(data_set->input, XML_ATTR_HAVE_QUORUM);
 
         if (safe_str_neq(dc->details->uname, dc->details->id)) {
@@ -1098,14 +1285,27 @@ print_status(pe_working_set_t * data_set)
         quorum_votes = crm_element_value(quorum_node, XML_NVPAIR_ATTR_VALUE);
     }
 
-    print_as("%d Nodes configured, %s expected votes\n", g_list_length(data_set->nodes),
-             quorum_votes);
-    print_as("%d Resources configured.\n", count_resources(data_set, NULL));
-    print_as("\n\n");
+    if(!hide_headers) {
+        if(stack_s && strstr(stack_s, "classic openais") != NULL) {
+            print_as("%d Nodes configured, %s expected votes\n", g_list_length(data_set->nodes),
+                     quorum_votes);
+        } else {
+            print_as("%d Nodes configured\n", g_list_length(data_set->nodes));
+        }
+        print_as("%d Resources configured\n", count_resources(data_set, NULL));
+        print_as("\n\n");
+    }
 
     for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
         node_t *node = (node_t *) gIter->data;
         const char *node_mode = NULL;
+        char *node_name = NULL;
+
+        if (is_container_remote_node(node)) {
+            node_name = g_strdup_printf("%s:%s", node->details->uname, node->details->remote_rsc->container->id);
+        } else {
+            node_name = g_strdup_printf("%s", node->details->uname);
+        }
 
         if (node->details->unclean) {
             if (node->details->online && node->details->unclean) {
@@ -1131,28 +1331,54 @@ print_status(pe_working_set_t * data_set)
                 node_mode = "OFFLINE (standby)";
             }
 
+        } else if (node->details->maintenance) {
+            if (node->details->online) {
+                node_mode = "maintenance";
+            } else {
+                node_mode = "OFFLINE (maintenance)";
+            }
+
         } else if (node->details->online) {
             node_mode = "online";
             if (group_by_node == FALSE) {
-                online_nodes = add_list_element(online_nodes, node->details->uname);
+                if (is_container_remote_node(node)) {
+                    online_remote_containers = add_list_element(online_remote_containers, node_name);
+                } else if (is_baremetal_remote_node(node)) {
+                    online_remote_nodes = add_list_element(online_remote_nodes, node_name);
+                } else {
+                    online_nodes = add_list_element(online_nodes, node_name);
+                }
                 continue;
             }
-
         } else {
             node_mode = "OFFLINE";
             if (group_by_node == FALSE) {
-                offline_nodes = add_list_element(offline_nodes, node->details->uname);
+                if (is_baremetal_remote_node(node)) {
+                    offline_remote_nodes = add_list_element(offline_remote_nodes, node_name);
+                } else if (is_container_remote_node(node)) {
+                    /* ignore offline container nodes */
+                } else {
+                    offline_nodes = add_list_element(offline_nodes, node_name);
+                }
                 continue;
             }
         }
 
-        if (safe_str_eq(node->details->uname, node->details->id)) {
-            print_as("Node %s: %s\n", node->details->uname, node_mode);
+        if (is_container_remote_node(node)) {
+            print_as("ContainerNode %s: %s\n", node_name, node_mode);
+        } else if (is_baremetal_remote_node(node)) {
+            print_as("RemoteNode %s: %s\n", node_name, node_mode);
+        } else if (safe_str_eq(node->details->uname, node->details->id)) {
+            print_as("Node %s: %s\n", node_name, node_mode);
         } else {
-            print_as("Node %s (%s): %s\n", node->details->uname, node->details->id, node_mode);
+            print_as("Node %s (%s): %s\n", node_name, node->details->id, node_mode);
         }
 
-        if (group_by_node) {
+        if (print_brief && group_by_node) {
+            print_rscs_brief(node->details->running_rsc, "\t", print_opts | pe_print_rsconly,
+                             stdout, FALSE);
+
+        } else if (group_by_node) {
             GListPtr gIter2 = NULL;
 
             for (gIter2 = node->details->running_rsc; gIter2 != NULL; gIter2 = gIter2->next) {
@@ -1161,6 +1387,7 @@ print_status(pe_working_set_t * data_set)
                 rsc->fns->print(rsc, "\t", print_opts | pe_print_rsconly, stdout);
             }
         }
+        free(node_name);
     }
 
     if (online_nodes) {
@@ -1170,6 +1397,18 @@ print_status(pe_working_set_t * data_set)
     if (offline_nodes) {
         print_as("OFFLINE: [%s ]\n", offline_nodes);
         free(offline_nodes);
+    }
+    if (online_remote_nodes) {
+        print_as("RemoteOnline: [%s ]\n", online_remote_nodes);
+        free(online_remote_nodes);
+    }
+    if (offline_remote_nodes) {
+        print_as("RemoteOFFLINE: [%s ]\n", offline_remote_nodes);
+        free(offline_remote_nodes);
+    }
+    if (online_remote_containers) {
+        print_as("Containers: [%s ]\n", online_remote_containers);
+        free(online_remote_containers);
     }
 
     if (group_by_node == FALSE && inactive_resources) {
@@ -1181,11 +1420,23 @@ print_status(pe_working_set_t * data_set)
 
     if (group_by_node == FALSE || inactive_resources) {
         print_as("\n");
+
+        if (print_brief && group_by_node == FALSE) {
+            print_opts |= pe_print_brief;
+            print_rscs_brief(data_set->resources, NULL, print_opts, stdout,
+                             inactive_resources);
+        }
+
         for (gIter = data_set->resources; gIter != NULL; gIter = gIter->next) {
             resource_t *rsc = (resource_t *) gIter->data;
 
             gboolean is_active = rsc->fns->active(rsc, TRUE);
             gboolean partially_active = rsc->fns->active(rsc, FALSE);
+
+            if (print_brief && group_by_node == FALSE
+                && rsc->variant == pe_native) {
+                continue;
+            }
 
             if (is_set(rsc->flags, pe_rsc_orphan) && is_active == FALSE) {
                 continue;
@@ -1203,16 +1454,22 @@ print_status(pe_working_set_t * data_set)
 
     if (print_nodes_attr) {
         print_as("\nNode Attributes:\n");
+
+        for (gIter = data_set->resources; gIter != NULL; gIter = gIter->next) {
+            crm_mon_get_parameters(gIter->data, data_set);
+        }
+
         for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
             node_t *node = (node_t *) gIter->data;
 
             if (node == NULL || node->details->online == FALSE) {
                 continue;
             }
-            attr_list = NULL;
             print_as("* Node %s:\n", node->details->uname);
             g_hash_table_foreach(node->details->attrs, create_attr_list, NULL);
             g_list_foreach(attr_list, print_node_attribute, node);
+            g_list_free(attr_list);
+            attr_list = NULL;
         }
     }
 
@@ -1226,37 +1483,51 @@ print_status(pe_working_set_t * data_set)
         print_as("\nFailed actions:\n");
         for (xml_op = __xml_first_child(data_set->failed); xml_op != NULL;
              xml_op = __xml_next(xml_op)) {
-            int val = 0;
+            int status = 0;
+            int rc = 0;
             const char *id = ID(xml_op);
             const char *op_key = crm_element_value(xml_op, XML_LRM_ATTR_TASK_KEY);
-            const char *last = crm_element_value(xml_op, "last_run");
+            const char *last = crm_element_value(xml_op, XML_RSC_OP_LAST_CHANGE);
             const char *node = crm_element_value(xml_op, XML_ATTR_UNAME);
             const char *call = crm_element_value(xml_op, XML_LRM_ATTR_CALLID);
-            const char *rc = crm_element_value(xml_op, XML_LRM_ATTR_RC);
-            const char *status = crm_element_value(xml_op, XML_LRM_ATTR_OPSTATUS);
+            const char *rc_s = crm_element_value(xml_op, XML_LRM_ATTR_RC);
+            const char *status_s = crm_element_value(xml_op, XML_LRM_ATTR_OPSTATUS);
 
-            val = crm_parse_int(status, "0");
-            print_as("    %s (node=%s, call=%s, rc=%s, status=%s",
-                     op_key ? op_key : id, node, call, rc, services_lrm_status_str(val));
+            rc = crm_parse_int(rc_s, "0");
+            status = crm_parse_int(status_s, "0");
 
             if (last) {
                 time_t run_at = crm_parse_int(last, "0");
+                char *run_at_s = ctime(&run_at);
+                if(run_at_s) {
+                    run_at_s[24] = 0; /* Overwrite the newline */
+                }
 
-                print_as(", last-run=%s, queued=%sms, exec=%sms\n",
-                         ctime(&run_at),
-                         crm_element_value(xml_op, "exec_time"),
-                         crm_element_value(xml_op, "queue_time"));
+                print_as("    %s on %s '%s' (%d): call=%s, status=%s, last-rc-change='%s', queued=%sms, exec=%sms\n",
+                         op_key ? op_key : id, node, services_ocf_exitcode_str(rc), rc, call, services_lrm_status_str(status),
+                         run_at_s, crm_element_value(xml_op, XML_RSC_OP_T_QUEUE), crm_element_value(xml_op, XML_RSC_OP_T_EXEC));
+            } else {
+                print_as("    %s on %s '%s' (%d): call=%s, status=%s\n",
+                         op_key ? op_key : id, node, services_ocf_exitcode_str(rc), rc, call, services_lrm_status_str(status));
             }
-
-            val = crm_parse_int(rc, "0");
-            print_as("): %s\n", lrmd_event_rc2str(val));
         }
+        print_as("\n");
     }
 
+    if (print_tickets || print_neg_location_prefix) {
+        /* For recording the tickets that are referenced in rsc_ticket constraints
+         * but have never been granted yet.
+         * To be able to print negative location constraint summary,
+         * we also need them to be unpacked. */
+        xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set->input);
+        unpack_constraints(cib_constraints, data_set);
+    }
     if (print_tickets) {
         print_cluster_tickets(data_set);
     }
-
+    if (print_neg_location_prefix) {
+        print_neg_locations(data_set);
+    }
 #if CURSES_ENABLED
     if (as_console) {
         refresh();
@@ -1274,9 +1545,13 @@ print_xml_status(pe_working_set_t * data_set)
     xmlNode *stack = NULL;
     xmlNode *quorum_node = NULL;
     const char *quorum_votes = "unknown";
+    int print_opts = pe_print_xml;
 
     dc = data_set->dc_node;
 
+    if (print_pending) {
+        print_opts |= pe_print_pending;
+    }
 
     fprintf(stream, "<?xml version=\"1.0\"?>\n");
     fprintf(stream, "<crm_mon version=\"%s\">\n", VERSION);
@@ -1298,18 +1573,17 @@ print_xml_status(pe_working_set_t * data_set)
         const char *client = crm_element_value(data_set->input, XML_ATTR_UPDATE_CLIENT);
         const char *origin = crm_element_value(data_set->input, XML_ATTR_UPDATE_ORIG);
 
-        fprintf(stream, "        <last_change time=\"%s\" user=\"%s\" client=\"%s\" origin=\"%s\" />\n",
-            last_written ? last_written : "",
-            user ? user : "",
-            client ? client : "",
-            origin ? origin : "");
+        fprintf(stream,
+                "        <last_change time=\"%s\" user=\"%s\" client=\"%s\" origin=\"%s\" />\n",
+                last_written ? last_written : "", user ? user : "", client ? client : "",
+                origin ? origin : "");
     }
 
     stack = get_xpath_object("//nvpair[@name='cluster-infrastructure']",
-        data_set->input,
-        LOG_DEBUG);
+                             data_set->input, LOG_DEBUG);
     if (stack) {
-        fprintf(stream, "        <stack type=\"%s\" />\n", crm_element_value(stack, XML_NVPAIR_ATTR_VALUE));
+        fprintf(stream, "        <stack type=\"%s\" />\n",
+                crm_element_value(stack, XML_NVPAIR_ATTR_VALUE));
     }
 
     if (!dc) {
@@ -1319,26 +1593,25 @@ print_xml_status(pe_working_set_t * data_set)
         const char *uname = dc->details->uname;
         const char *id = dc->details->id;
         xmlNode *dc_version = get_xpath_object("//nvpair[@name='dc-version']",
-            data_set->input,
-            LOG_DEBUG);
-        fprintf(stream, "        <current_dc present=\"true\" version=\"%s\" name=\"%s\" id=\"%s\" with_quorum=\"%s\" />\n",
-            dc_version ? crm_element_value(dc_version, XML_NVPAIR_ATTR_VALUE) : "",
-            uname,
-            id,
-            quorum ? (crm_is_true(quorum) ? "true" : "false") : "false");
+                                               data_set->input,
+                                               LOG_DEBUG);
+
+        fprintf(stream,
+                "        <current_dc present=\"true\" version=\"%s\" name=\"%s\" id=\"%s\" with_quorum=\"%s\" />\n",
+                dc_version ? crm_element_value(dc_version, XML_NVPAIR_ATTR_VALUE) : "", uname, id,
+                quorum ? (crm_is_true(quorum) ? "true" : "false") : "false");
     }
 
     quorum_node = get_xpath_object("//nvpair[@name='" XML_ATTR_EXPECTED_VOTES "']",
-                    data_set->input,
-                    LOG_DEBUG);
+                                   data_set->input, LOG_DEBUG);
     if (quorum_node) {
         quorum_votes = crm_element_value(quorum_node, XML_NVPAIR_ATTR_VALUE);
     }
     fprintf(stream, "        <nodes_configured number=\"%d\" expected_votes=\"%s\" />\n",
-        g_list_length(data_set->nodes),
-        quorum_votes);
+            g_list_length(data_set->nodes), quorum_votes);
 
-    fprintf(stream, "        <resources_configured number=\"%d\" />\n", count_resources(data_set, NULL));
+    fprintf(stream, "        <resources_configured number=\"%d\" />\n",
+            count_resources(data_set, NULL));
 
     fprintf(stream, "    </summary>\n");
 
@@ -1349,12 +1622,15 @@ print_xml_status(pe_working_set_t * data_set)
         const char *node_type = "unknown";
 
         switch (node->details->type) {
-        case node_member:
-            node_type = "member";
-            break;
-        case node_ping:
-            node_type = "ping";
-            break;
+            case node_member:
+                node_type = "member";
+                break;
+            case node_remote:
+                node_type = "remote";
+                break;
+            case node_ping:
+                node_type = "ping";
+                break;
         }
 
         fprintf(stream, "        <node name=\"%s\" ", node->details->uname);
@@ -1362,6 +1638,7 @@ print_xml_status(pe_working_set_t * data_set)
         fprintf(stream, "online=\"%s\" ", node->details->online ? "true" : "false");
         fprintf(stream, "standby=\"%s\" ", node->details->standby ? "true" : "false");
         fprintf(stream, "standby_onfail=\"%s\" ", node->details->standby_onfail ? "true" : "false");
+        fprintf(stream, "maintenance=\"%s\" ", node->details->maintenance ? "true" : "false");
         fprintf(stream, "pending=\"%s\" ", node->details->pending ? "true" : "false");
         fprintf(stream, "unclean=\"%s\" ", node->details->unclean ? "true" : "false");
         fprintf(stream, "shutdown=\"%s\" ", node->details->shutdown ? "true" : "false");
@@ -1372,11 +1649,12 @@ print_xml_status(pe_working_set_t * data_set)
 
         if (group_by_node) {
             GListPtr lpc2 = NULL;
+
             fprintf(stream, ">\n");
             for (lpc2 = node->details->running_rsc; lpc2 != NULL; lpc2 = lpc2->next) {
                 resource_t *rsc = (resource_t *) lpc2->data;
 
-                rsc->fns->print(rsc, "            ", pe_print_xml | pe_print_rsconly, stream);
+                rsc->fns->print(rsc, "            ", print_opts | pe_print_rsconly, stream);
             }
             fprintf(stream, "        </node>\n");
         } else {
@@ -1398,14 +1676,54 @@ print_xml_status(pe_working_set_t * data_set)
 
             } else if (group_by_node == FALSE) {
                 if (partially_active || inactive_resources) {
-                    rsc->fns->print(rsc, "        ", pe_print_xml, stream);
+                    rsc->fns->print(rsc, "        ", print_opts, stream);
                 }
 
             } else if (is_active == FALSE && inactive_resources) {
-                rsc->fns->print(rsc, "        ", pe_print_xml, stream);
+                rsc->fns->print(rsc, "        ", print_opts, stream);
             }
         }
         fprintf(stream, "    </resources>\n");
+    }
+
+    /*** FAILURES ***/
+    if (xml_has_children(data_set->failed)) {
+        xmlNode *xml_op = NULL;
+
+        fprintf(stream, "    <failures>\n");
+        for (xml_op = __xml_first_child(data_set->failed); xml_op != NULL;
+             xml_op = __xml_next(xml_op)) {
+            int status = 0;
+            int rc = 0;
+	    int interval = 0;
+            const char *id = ID(xml_op);
+            const char *op_key = crm_element_value(xml_op, XML_LRM_ATTR_TASK_KEY);
+	    const char *task = crm_element_value(xml_op, XML_LRM_ATTR_TASK); // needed?
+            const char *last = crm_element_value(xml_op, XML_RSC_OP_LAST_CHANGE);
+            const char *node = crm_element_value(xml_op, XML_ATTR_UNAME);
+            const char *call = crm_element_value(xml_op, XML_LRM_ATTR_CALLID);
+            const char *rc_s = crm_element_value(xml_op, XML_LRM_ATTR_RC);
+	    const char *interval_s = crm_element_value(xml_op, XML_LRM_ATTR_INTERVAL);
+
+            rc = crm_parse_int(rc_s, "0");
+	    interval = crm_parse_int(interval_s, "0");
+
+            if (last) {
+                time_t run_at = crm_parse_int(last, "0");
+                char *run_at_s = ctime(&run_at);
+                if(run_at_s) {
+                    run_at_s[24] = 0; /* Overwrite the newline */
+                }
+
+                fprintf(stream, "        <failure %s=\"%s\" node=\"%s\" exitstatus=\"%s\" exitcode=\"%d\" call=\"%s\" status=\"%s\" last-rc-change=\"%s\" queued=\"%s\" exec=\"%s\" interval=\"%d\" task=\"%s\" />\n",
+                        op_key ? "op_key" : "id" ,op_key ? op_key : id, node, services_ocf_exitcode_str(rc), rc, call, services_lrm_status_str(status),
+                        run_at_s, crm_element_value(xml_op, XML_RSC_OP_T_QUEUE), crm_element_value(xml_op, XML_RSC_OP_T_EXEC), interval, task);
+            } else {
+                print_as("        <failure %s=\"%s\" node=\"%s\" exitstatus=\"%s\" exitcode=\"%d\" call=\"%s\" status=\"%s\" />\n",
+                         op_key ? "op_key" : "id", op_key ? op_key : id, node, services_ocf_exitcode_str(rc), rc, call, services_lrm_status_str(status));
+            }
+        }
+        fprintf(stream, "    </failures>\n");
     }
 
     fprintf(stream, "</crm_mon>\n");
@@ -1423,6 +1741,11 @@ print_html_status(pe_working_set_t * data_set, const char *filename, gboolean we
     node_t *dc = NULL;
     static int updates = 0;
     char *filename_tmp = NULL;
+    int print_opts = pe_print_html;
+
+    if (print_pending) {
+        print_opts |= pe_print_pending;
+    }
 
     if (web_cgi) {
         stream = stdout;
@@ -1513,6 +1836,12 @@ print_html_status(pe_working_set_t * data_set, const char *filename, gboolean we
         } else if (node->details->standby) {
             fprintf(stream, "Node: %s (%s): %s", node->details->uname, node->details->id,
                     "<font color=\"red\">OFFLINE (standby)</font>\n");
+        } else if (node->details->maintenance && node->details->online) {
+            fprintf(stream, "Node: %s (%s): %s", node->details->uname, node->details->id,
+                    "<font color=\"blue\">maintenance</font>\n");
+        } else if (node->details->maintenance) {
+            fprintf(stream, "Node: %s (%s): %s", node->details->uname, node->details->id,
+                    "<font color=\"red\">OFFLINE (maintenance)</font>\n");
         } else if (node->details->online) {
             fprintf(stream, "Node: %s (%s): %s", node->details->uname, node->details->id,
                     "<font color=\"green\">online</font>\n");
@@ -1520,7 +1849,13 @@ print_html_status(pe_working_set_t * data_set, const char *filename, gboolean we
             fprintf(stream, "Node: %s (%s): %s", node->details->uname, node->details->id,
                     "<font color=\"red\">OFFLINE</font>\n");
         }
-        if (group_by_node) {
+        if (print_brief && group_by_node) {
+            fprintf(stream, "<ul>\n");
+            print_rscs_brief(node->details->running_rsc, NULL, print_opts | pe_print_rsconly,
+                             stream, FALSE);
+            fprintf(stream, "</ul>\n");
+
+        } else if (group_by_node) {
             GListPtr lpc2 = NULL;
 
             fprintf(stream, "<ul>\n");
@@ -1528,7 +1863,7 @@ print_html_status(pe_working_set_t * data_set, const char *filename, gboolean we
                 resource_t *rsc = (resource_t *) lpc2->data;
 
                 fprintf(stream, "<li>");
-                rsc->fns->print(rsc, NULL, pe_print_html | pe_print_rsconly, stream);
+                rsc->fns->print(rsc, NULL, print_opts | pe_print_rsconly, stream);
                 fprintf(stream, "</li>\n");
             }
             fprintf(stream, "</ul>\n");
@@ -1545,21 +1880,32 @@ print_html_status(pe_working_set_t * data_set, const char *filename, gboolean we
     }
 
     if (group_by_node == FALSE || inactive_resources) {
+        if (print_brief && group_by_node == FALSE) {
+            print_opts |= pe_print_brief;
+            print_rscs_brief(data_set->resources, NULL, print_opts, stream,
+                             inactive_resources);
+        }
+
         for (gIter = data_set->resources; gIter != NULL; gIter = gIter->next) {
             resource_t *rsc = (resource_t *) gIter->data;
             gboolean is_active = rsc->fns->active(rsc, TRUE);
             gboolean partially_active = rsc->fns->active(rsc, FALSE);
+
+            if (print_brief && group_by_node == FALSE
+                && rsc->variant == pe_native) {
+                continue;
+            }
 
             if (is_set(rsc->flags, pe_rsc_orphan) && is_active == FALSE) {
                 continue;
 
             } else if (group_by_node == FALSE) {
                 if (partially_active || inactive_resources) {
-                    rsc->fns->print(rsc, NULL, pe_print_html, stream);
+                    rsc->fns->print(rsc, NULL, print_opts, stream);
                 }
 
             } else if (is_active == FALSE && inactive_resources) {
-                rsc->fns->print(rsc, NULL, pe_print_html, stream);
+                rsc->fns->print(rsc, NULL, print_opts, stream);
             }
         }
     }
@@ -1713,7 +2059,9 @@ send_snmp_trap(const char *node, const char *rsc, const char *task, int target_r
     }
 
     /* Add extries to the trap */
-    add_snmp_field(trap_pdu, snmp_crm_oid_rsc, rsc);
+    if (rsc) {
+        add_snmp_field(trap_pdu, snmp_crm_oid_rsc, rsc);
+    }
     add_snmp_field(trap_pdu, snmp_crm_oid_node, node);
     add_snmp_field(trap_pdu, snmp_crm_oid_task, task);
     add_snmp_field(trap_pdu, snmp_crm_oid_desc, desc);
@@ -1859,9 +2207,11 @@ send_custom_trap(const char *node, const char *rsc, const char *task, int target
 
     crm_debug("Sending external notification to '%s' via '%s'", external_recipient, external_agent);
 
+    if(rsc) {
+        setenv("CRM_notify_rsc", rsc, 1);
+    }
     setenv("CRM_notify_recipient", external_recipient, 1);
     setenv("CRM_notify_node", node, 1);
-    setenv("CRM_notify_rsc", rsc, 1);
     setenv("CRM_notify_task", task, 1);
     setenv("CRM_notify_desc", desc, 1);
     setenv("CRM_notify_rc", rc_s, 1);
@@ -1894,7 +2244,7 @@ send_smtp_trap(const char *node, const char *rsc, const char *task, int target_r
     auth_context_t authctx;
     struct sigaction sa;
 
-    int len = 20;
+    int len = 25; /* Note: Check extra padding on the Subject line below */
     int noauth = 1;
     int smtp_debug = LOG_DEBUG;
     char crm_mail_body[BODY_MAX];
@@ -1934,6 +2284,7 @@ send_smtp_trap(const char *node, const char *rsc, const char *task, int target_r
     len++;
 
     crm_mail_subject = calloc(1, len);
+    /* If you edit this line, ensure you allocate enough memory for it by altering 'len' above */
     snprintf(crm_mail_subject, len, "%s - %s event for %s on %s: %s\r\n", crm_mail_prefix, task,
              rsc, node, desc);
 
@@ -1953,10 +2304,10 @@ send_smtp_trap(const char *node, const char *rsc, const char *task, int target_r
                     "\toperation status: (%d) %s\r\n", status, services_lrm_status_str(status));
     if (status == PCMK_LRM_OP_DONE) {
         len += snprintf(crm_mail_body + len, BODY_MAX - len,
-                        "\tscript returned: (%d) %s\r\n", rc, lrmd_event_rc2str(rc));
+                        "\tscript returned: (%d) %s\r\n", rc, services_ocf_exitcode_str(rc));
         len += snprintf(crm_mail_body + len, BODY_MAX - len,
                         "\texpected return value: (%d) %s\r\n", target_rc,
-                        lrmd_event_rc2str(target_rc));
+                        services_ocf_exitcode_str(target_rc));
     }
 
     auth_client_init();
@@ -2033,7 +2384,7 @@ send_smtp_trap(const char *node, const char *rsc, const char *task, int target_r
 }
 
 static void
-handle_rsc_op(xmlNode * rsc_op)
+handle_rsc_op(xmlNode * xml, const char *node)
 {
     int rc = -1;
     int status = -1;
@@ -2046,13 +2397,24 @@ handle_rsc_op(xmlNode * rsc_op)
     char *rsc = NULL;
     char *task = NULL;
     const char *desc = NULL;
-    const char *node = NULL;
     const char *magic = NULL;
-    const char *id = crm_element_value(rsc_op, XML_LRM_ATTR_TASK_KEY);
+    const char *id = NULL;
     char *update_te_uuid = NULL;
 
-    xmlNode *n = rsc_op;
+    xmlNode *n = xml;
+    xmlNode * rsc_op = xml;
 
+    if(strcmp((const char*)xml->name, XML_LRM_TAG_RSC_OP) != 0) {
+        xmlNode *cIter;
+
+        for(cIter = xml->children; cIter; cIter = cIter->next) {
+            handle_rsc_op(cIter, node);
+        }
+
+        return;
+    }
+
+    id = crm_element_value(rsc_op, XML_LRM_ATTR_TASK_KEY);
     if (id == NULL) {
         /* Compatability with <= 1.1.5 */
         id = ID(rsc_op);
@@ -2079,10 +2441,14 @@ handle_rsc_op(xmlNode * rsc_op)
         n = n->parent;
     }
 
-    node = crm_element_value(n, XML_ATTR_UNAME);
+    if(node == NULL) {
+        node = crm_element_value(n, XML_ATTR_UNAME);
+    }
+
     if (node == NULL) {
         node = ID(n);
     }
+
     if (node == NULL) {
         crm_err("No node detected for event %s (%s)", magic, id);
         goto bail;
@@ -2092,12 +2458,12 @@ handle_rsc_op(xmlNode * rsc_op)
     desc = pcmk_strerror(pcmk_ok);
     if (status == PCMK_LRM_OP_DONE && target_rc == rc) {
         crm_notice("%s of %s on %s completed: %s", task, rsc, node, desc);
-        if (rc == PCMK_EXECRA_NOT_RUNNING) {
+        if (rc == PCMK_OCF_NOT_RUNNING) {
             notify = FALSE;
         }
 
     } else if (status == PCMK_LRM_OP_DONE) {
-        desc = lrmd_event_rc2str(rc);
+        desc = services_ocf_exitcode_str(rc);
         crm_warn("%s of %s on %s failed: %s", task, rsc, node, desc);
 
     } else {
@@ -2120,63 +2486,219 @@ handle_rsc_op(xmlNode * rsc_op)
     free(task);
 }
 
+static gboolean
+mon_trigger_refresh(gpointer user_data)
+{
+    mainloop_set_trigger(refresh_trigger);
+    return FALSE;
+}
+
+#define NODE_PATT "/lrm[@id="
+static char *get_node_from_xpath(const char *xpath) 
+{
+    char *nodeid = NULL;
+    char *tmp = strstr(xpath, NODE_PATT);
+
+    if(tmp) {
+        tmp += strlen(NODE_PATT);
+        tmp += 1;
+
+        nodeid = strdup(tmp);
+        tmp = strstr(nodeid, "\'");
+        CRM_ASSERT(tmp);
+        tmp[0] = 0;
+    }
+    return nodeid;
+}
+
+static void crm_diff_update_v2(const char *event, xmlNode * msg) 
+{
+    xmlNode *change = NULL;
+    xmlNode *diff = get_message_xml(msg, F_CIB_UPDATE_RESULT);
+
+    for (change = __xml_first_child(diff); change != NULL; change = __xml_next(change)) {
+        const char *name = NULL;
+        const char *op = crm_element_value(change, XML_DIFF_OP);
+        const char *xpath = crm_element_value(change, XML_DIFF_PATH);
+        xmlNode *match = NULL;
+        const char *node = NULL;
+
+        if(op == NULL) {
+            continue;
+
+        } else if(strcmp(op, "create") == 0) {
+            match = change->children;
+
+        } else if(strcmp(op, "move") == 0) {
+            continue;
+
+        } else if(strcmp(op, "delete") == 0) {
+            continue;
+
+        } else if(strcmp(op, "modify") == 0) {
+            match = first_named_child(change, XML_DIFF_RESULT);
+            if(match) {
+                match = match->children;
+            }
+        }
+
+        if(match) {
+            name = (const char *)match->name;
+        }
+
+        crm_trace("Handling %s operation for %s %p, %s", op, xpath, match, name);
+        if(xpath == NULL) {
+            /* Version field, ignore */
+
+        } else if(name == NULL) {
+            crm_debug("No result for %s operation to %s", op, xpath);
+            CRM_ASSERT(strcmp(op, "delete") == 0 || strcmp(op, "move") == 0);
+
+        } else if(strcmp(name, XML_TAG_CIB) == 0) {
+            xmlNode *state = NULL;
+            xmlNode *status = first_named_child(match, XML_CIB_TAG_STATUS);
+
+            for (state = __xml_first_child(status); state != NULL; state = __xml_next(state)) {
+                node = ID(state);
+                handle_rsc_op(state, node);
+            }
+
+        } else if(strcmp(name, XML_CIB_TAG_STATUS) == 0) {
+            xmlNode *state = NULL;
+
+            for (state = __xml_first_child(match); state != NULL; state = __xml_next(state)) {
+                node = ID(state);
+                handle_rsc_op(state, node);
+            }
+
+        } else if(strcmp(name, XML_CIB_TAG_STATE) == 0) {
+            node = ID(match);
+            handle_rsc_op(match, node);
+
+        } else if(strcmp(name, XML_CIB_TAG_LRM) == 0) {
+            node = ID(match);
+            handle_rsc_op(match, node);
+
+        } else if(strcmp(name, XML_LRM_TAG_RESOURCES) == 0) {
+            char *local_node = get_node_from_xpath(xpath);
+
+            handle_rsc_op(match, local_node);
+            free(local_node);
+
+        } else if(strcmp(name, XML_LRM_TAG_RESOURCE) == 0) {
+            char *local_node = get_node_from_xpath(xpath);
+
+            handle_rsc_op(match, local_node);
+            free(local_node);
+
+        } else if(strcmp(name, XML_LRM_TAG_RSC_OP) == 0) {
+            char *local_node = get_node_from_xpath(xpath);
+
+            handle_rsc_op(match, local_node);
+            free(local_node);
+
+        } else {
+            crm_err("Ignoring %s operation for %s %p, %s", op, xpath, match, name);
+        }
+    }
+}
+
+static void crm_diff_update_v1(const char *event, xmlNode * msg) 
+{
+    /* Process operation updates */
+    xmlXPathObject *xpathObj = xpath_search(msg,
+                                            "//" F_CIB_UPDATE_RESULT "//" XML_TAG_DIFF_ADDED
+                                            "//" XML_LRM_TAG_RSC_OP);
+    int lpc = 0, max = numXpathResults(xpathObj);
+
+    for (lpc = 0; lpc < max; lpc++) {
+        xmlNode *rsc_op = getXpathResult(xpathObj, lpc);
+
+        handle_rsc_op(rsc_op, NULL);
+    }
+    freeXpathObject(xpathObj);
+}
+
 void
 crm_diff_update(const char *event, xmlNode * msg)
 {
     int rc = -1;
     long now = time(NULL);
-    const char *op = NULL;
+    static bool stale = FALSE;
+    static int updates = 0;
+    static mainloop_timer_t *refresh_timer = NULL;
+    xmlNode *diff = get_message_xml(msg, F_CIB_UPDATE_RESULT);
 
     print_dot();
 
+    if(refresh_timer == NULL) {
+        refresh_timer = mainloop_timer_add("refresh", 2000, FALSE, mon_trigger_refresh, NULL);
+    }
+
     if (current_cib != NULL) {
-        xmlNode *cib_last = current_cib;
-        current_cib = NULL;
+        rc = xml_apply_patchset(current_cib, diff, TRUE);
 
-        rc = cib_apply_patch_event(msg, cib_last, &current_cib, LOG_DEBUG);
-        free_xml(cib_last);
-
-        switch(rc) {
-            case pcmk_err_diff_resync:
-            case pcmk_err_diff_failed:
-                crm_warn("[%s] %s Patch aborted: %s (%d)", event, op, pcmk_strerror(rc), rc);
+        switch (rc) {
+            case -pcmk_err_diff_resync:
+            case -pcmk_err_diff_failed:
+                crm_notice("[%s] Patch aborted: %s (%d)", event, pcmk_strerror(rc), rc);
+                free_xml(current_cib); current_cib = NULL;
+                break;
             case pcmk_ok:
+                updates++;
                 break;
             default:
-                crm_warn("[%s] %s ABORTED: %s (%d)", event, op, pcmk_strerror(rc), rc);
-                return;
+                crm_notice("[%s] ABORTED: %s (%d)", event, pcmk_strerror(rc), rc);
+                free_xml(current_cib); current_cib = NULL;
         }
     }
 
     if (current_cib == NULL) {
-        current_cib = get_cib_copy(cib);
+        crm_trace("Re-requesting the full cib");
+        cib->cmds->query(cib, NULL, &current_cib, cib_scope_local | cib_sync_call);
     }
 
     if (crm_mail_to || snmp_target || external_agent) {
-        /* Process operation updates */
-        xmlXPathObject *xpathObj =
-            xpath_search(msg,
-                         "//" F_CIB_UPDATE_RESULT "//" XML_TAG_DIFF_ADDED "//" XML_LRM_TAG_RSC_OP);
-        if (xpathObj && xpathObj->nodesetval->nodeNr > 0) {
-            int lpc = 0, max = xpathObj->nodesetval->nodeNr;
-
-            for (lpc = 0; lpc < max; lpc++) {
-                xmlNode *rsc_op = getXpathResult(xpathObj, lpc);
-
-                handle_rsc_op(rsc_op);
-            }
-        }
-        if (xpathObj) {
-            xmlXPathFreeObject(xpathObj);
+        int format = 0;
+        crm_element_value_int(diff, "format", &format);
+        switch(format) {
+            case 1:
+                crm_diff_update_v1(event, msg);
+                break;
+            case 2:
+                crm_diff_update_v2(event, msg);
+                break;
+            default:
+                crm_err("Unknown patch format: %d", format);
         }
     }
 
+    if (current_cib == NULL) {
+        if(!stale) {
+            print_as("--- Stale data ---");
+        }
+        stale = TRUE;
+        return;
+    }
+
+    stale = FALSE;
+    /* Refresh
+     * - immediately if the last update was more than 5s ago
+     * - every 10 updates
+     * - at most 2s after the last update
+     */
     if ((now - last_refresh) > (reconnect_msec / 1000)) {
-        /* Force a refresh */
-        mon_refresh_display(NULL);
+        mainloop_set_trigger(refresh_trigger);
+        mainloop_timer_stop(refresh_timer);
+        updates = 0;
+
+    } else if(updates > 10) {
+        mainloop_set_trigger(refresh_trigger);
+        mainloop_timer_stop(refresh_timer);
+        updates = 0;
 
     } else {
-        mainloop_set_trigger(refresh_trigger);
+        mainloop_timer_start(refresh_timer);
     }
 }
 
@@ -2192,7 +2714,7 @@ mon_refresh_display(gpointer user_data)
         if (cib) {
             cib->cmds->signoff(cib);
         }
-        print_as("Upgrade failed: %s", pcmk_strerror(-pcmk_err_dtd_validation));
+        print_as("Upgrade failed: %s", pcmk_strerror(-pcmk_err_schema_validation));
         if (as_console) {
             sleep(2);
         }
@@ -2231,11 +2753,12 @@ mon_refresh_display(gpointer user_data)
     return TRUE;
 }
 
-void mon_st_callback(stonith_t *st, stonith_event_t *e)
+void
+mon_st_callback(stonith_t * st, stonith_event_t * e)
 {
-    char *desc = g_strdup_printf(
-        "Operation %s requested by %s for peer %s: %s (ref=%s)",
-        e->operation, e->origin, e->target, pcmk_strerror(e->result), e->id); 
+    char *desc = g_strdup_printf("Operation %s requested by %s for peer %s: %s (ref=%s)",
+                                 e->operation, e->origin, e->target, pcmk_strerror(e->result),
+                                 e->id);
 
     if (snmp_target) {
         send_snmp_trap(e->target, NULL, e->operation, pcmk_ok, e->result, 0, desc);
@@ -2284,7 +2807,7 @@ clean_up(int rc)
     free(pid_file);
 
     if (rc >= 0) {
-        exit(rc);
+        crm_exit(rc);
     }
     return;
 }

@@ -110,7 +110,7 @@ load_file_cib(const char *filename)
     if (rc == 0) {
         root = filename2xml(filename);
         if (root == NULL) {
-            return -pcmk_err_dtd_validation;
+            return -pcmk_err_schema_validation;
         }
 
     } else {
@@ -128,7 +128,7 @@ load_file_cib(const char *filename)
     dtd_ok = validate_xml(root, NULL, TRUE);
     if (dtd_ok == FALSE) {
         crm_err("CIB does not validate against %s", ignore_dtd);
-        rc = -pcmk_err_dtd_validation;
+        rc = -pcmk_err_schema_validation;
         goto bail;
     }
 
@@ -186,12 +186,12 @@ cib_file_signoff(cib_t * cib)
         rc = pcmk_ok;
 
     } else {
-        crm_err("Could not write CIB to %s", private->filename);
+        crm_err("Could not write CIB to %s: %s (%d)", private->filename, pcmk_strerror(rc), rc);
     }
     free_xml(in_mem_cib);
 
     cib->state = cib_disconnected;
-    cib->type = cib_none;
+    cib->type = cib_no_connection;
 
     return rc;
 }
@@ -254,8 +254,10 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
                              const char *user_name)
 {
     int rc = pcmk_ok;
+    char *effective_user = NULL;
     gboolean query = FALSE;
     gboolean changed = FALSE;
+    xmlNode *request = NULL;
     xmlNode *output = NULL;
     xmlNode *cib_diff = NULL;
     xmlNode *result_cib = NULL;
@@ -264,6 +266,7 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
     static int max_msg_types = DIMOF(cib_file_ops);
 
     crm_info("%s on %s", op, section);
+    call_options |= (cib_no_mtime | cib_inhibit_bcast | cib_scope_local);
 
     if (cib->state == cib_disconnected) {
         return -ENOTCONN;
@@ -290,11 +293,19 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
     }
 
     cib->call_id++;
-    rc = cib_perform_op(op, call_options | cib_inhibit_bcast, fn, query,
-                        section, NULL, data, TRUE, &changed, in_mem_cib, &result_cib, &cib_diff,
+    request = cib_create_op(cib->call_id, "dummy-token", op, host, section, data, call_options, user_name);
+#if ENABLE_ACL
+    if(user_name) {
+        crm_xml_add(request, XML_ACL_TAG_USER, user_name);
+    }
+    crm_trace("Performing %s operation as %s", op, user_name);
+#endif
+    rc = cib_perform_op(op, call_options, fn, query,
+                        section, request, data, TRUE, &changed, in_mem_cib, &result_cib, &cib_diff,
                         &output);
 
-    if (rc == -pcmk_err_dtd_validation) {
+    free_xml(request);
+    if (rc == -pcmk_err_schema_validation) {
         validate_xml_verbose(result_cib);
     }
 
@@ -302,7 +313,7 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
         free_xml(result_cib);
 
     } else if (query == FALSE) {
-        log_xml_diff(LOG_DEBUG, cib_diff, "cib:diff");
+        xml_log_patchset(LOG_DEBUG, "cib:diff", cib_diff);
         free_xml(in_mem_cib);
         in_mem_cib = result_cib;
     }
@@ -314,14 +325,16 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
     }
 
     if (output_data && output) {
-        *output_data = copy_xml(output);
+        if(output == in_mem_cib) {
+            *output_data = copy_xml(output);
+        } else {
+            *output_data = output;
+        }
+
+    } else if(output != in_mem_cib) {
+        free_xml(output);
     }
 
-    if (query == FALSE || (call_options & cib_no_children)) {
-        free_xml(output);
-    } else if (safe_str_eq(crm_element_name(output), "xpath-query")) {
-        free_xml(output);
-    }
-
+    free(effective_user);
     return rc;
 }

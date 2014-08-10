@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -30,9 +30,7 @@
 gboolean
 group_unpack(resource_t * rsc, pe_working_set_t * data_set)
 {
-    resource_t *self = NULL;
     xmlNode *xml_obj = rsc->xml;
-    xmlNode *xml_self = copy_xml(rsc->xml);
     xmlNode *xml_native_rsc = NULL;
     group_variant_data_t *group_data = NULL;
     const char *group_ordered = g_hash_table_lookup(rsc->meta, XML_RSC_ATTR_ORDERED);
@@ -43,7 +41,6 @@ group_unpack(resource_t * rsc, pe_working_set_t * data_set)
 
     group_data = calloc(1, sizeof(group_variant_data_t));
     group_data->num_children = 0;
-    group_data->self = NULL;
     group_data->first_child = NULL;
     group_data->last_child = NULL;
     rsc->variant_opaque = group_data;
@@ -56,17 +53,6 @@ group_unpack(resource_t * rsc, pe_working_set_t * data_set)
     }
     if (group_colocated != NULL) {
         crm_str_to_boolean(group_colocated, &(group_data->colocated));
-    }
-
-    /* this is a bit of a hack - but simplifies everything else */
-    xmlNodeSetName(xml_self, ((const xmlChar *)XML_CIB_TAG_RESOURCE));
-    if (common_unpack(xml_self, &self, NULL, data_set)) {
-        group_data->self = self;
-        self->restart_type = pe_restart_restart;
-
-    } else {
-        crm_log_xml_err(xml_self, "Couldnt unpack dummy child");
-        return FALSE;
     }
 
     clone_id = crm_element_value(rsc->xml, XML_RSC_ATTR_INCARNATION);
@@ -91,7 +77,7 @@ group_unpack(resource_t * rsc, pe_working_set_t * data_set)
                 group_data->first_child = new_rsc;
             }
             group_data->last_child = new_rsc;
-            print_resource(LOG_DEBUG_3, "Added", new_rsc, FALSE);
+            print_resource(LOG_DEBUG_3, "Added ", new_rsc, FALSE);
         }
     }
 
@@ -182,15 +168,20 @@ group_print(resource_t * rsc, const char *pre_text, long options, void *print_da
         status_print("\n");
     }
 
-    for (; gIter != NULL; gIter = gIter->next) {
-        resource_t *child_rsc = (resource_t *) gIter->data;
+    if (options & pe_print_brief) {
+        print_rscs_brief(rsc->children, child_text, options, print_data, TRUE);
 
-        if (options & pe_print_html) {
-            status_print("<li>\n");
-        }
-        child_rsc->fns->print(child_rsc, child_text, options, print_data);
-        if (options & pe_print_html) {
-            status_print("</li>\n");
+    } else {
+        for (; gIter != NULL; gIter = gIter->next) {
+            resource_t *child_rsc = (resource_t *) gIter->data;
+
+            if (options & pe_print_html) {
+                status_print("<li>\n");
+            }
+            child_rsc->fns->print(child_rsc, child_text, options, print_data);
+            if (options & pe_print_html) {
+                status_print("</li>\n");
+            }
         }
     }
 
@@ -204,27 +195,21 @@ void
 group_free(resource_t * rsc)
 {
     GListPtr gIter = rsc->children;
-    group_variant_data_t *group_data = NULL;
 
     CRM_CHECK(rsc != NULL, return);
-    get_group_variant_data(group_data, rsc);
 
     pe_rsc_trace(rsc, "Freeing %s", rsc->id);
 
     for (; gIter != NULL; gIter = gIter->next) {
         resource_t *child_rsc = (resource_t *) gIter->data;
 
+        CRM_ASSERT(child_rsc);
         pe_rsc_trace(child_rsc, "Freeing child %s", child_rsc->id);
         child_rsc->fns->free(child_rsc);
     }
 
     pe_rsc_trace(rsc, "Freeing child list");
     g_list_free(rsc->children);
-
-    if (group_data->self != NULL) {
-        free_xml(group_data->self->xml);
-        group_data->self->fns->free(group_data->self);
-    }
 
     common_free(rsc);
 }

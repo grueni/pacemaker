@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -33,6 +33,7 @@
 #include <crm/msg_xml.h>
 
 #include <crm/common/xml.h>
+#include <crm/common/ipcs.h>
 #include <crm/cluster/internal.h>
 
 #include <cibio.h>
@@ -54,7 +55,7 @@ int revision_check(xmlNode * cib_update, xmlNode * cib_copy, int flags);
 int get_revision(xmlNode * xml_obj, int cur_revision);
 
 int updateList(xmlNode * local_cib, xmlNode * update_command, xmlNode * failed,
-                           int operation, const char *section);
+               int operation, const char *section);
 
 gboolean check_generation(xmlNode * newCib, xmlNode * oldCib);
 
@@ -131,7 +132,7 @@ cib_process_quit(const char *op, int options, const char *section, xmlNode * req
     crm_trace("Processing \"%s\" event", op);
 
     crm_warn("The CRMd has asked us to exit... complying");
-    exit(0);
+    crm_exit(pcmk_ok);
     return result;
 }
 
@@ -175,6 +176,23 @@ cib_process_readwrite(const char *op, int options, const char *section, xmlNode 
 #endif
 }
 
+int sync_in_progress = 0;
+void
+send_sync_request(const char *host)
+{
+    xmlNode *sync_me = create_xml_node(NULL, "sync-me");
+
+    crm_info("Requesting re-sync from peer");
+    sync_in_progress++;
+
+    crm_xml_add(sync_me, F_TYPE, "cib");
+    crm_xml_add(sync_me, F_CIB_OPERATION, CIB_OP_SYNC_ONE);
+    crm_xml_add(sync_me, F_CIB_DELEGATED, cib_our_uname);
+
+    send_cluster_message(host ? crm_get_peer(0, host) : NULL, crm_msg_cib, sync_me, FALSE);
+    free_xml(sync_me);
+}
+
 int
 cib_process_ping(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,
                  xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)
@@ -182,15 +200,47 @@ cib_process_ping(const char *op, int options, const char *section, xmlNode * req
 #ifdef CIBPIPE
     return -EINVAL;
 #else
-    int result = pcmk_ok;
+    const char *host = crm_element_value(req, F_ORIG);
+    const char *seq = crm_element_value(req, F_CIB_PING_ID);
+    char *digest = calculate_xml_versioned_digest(the_cib, FALSE, TRUE, CRM_FEATURE_SET);
 
-    crm_trace("Processing \"%s\" event", op);
+    static struct qb_log_callsite *cs = NULL;
+
+    crm_trace("Processing \"%s\" event %s from %s", op, seq, host);
     *answer = create_xml_node(NULL, XML_CRM_TAG_PING);
 
-    crm_xml_add(*answer, XML_PING_ATTR_STATUS, "ok");
-    crm_xml_add(*answer, XML_PING_ATTR_SYSFROM, CRM_SYSTEM_CIB);
+    crm_xml_add(*answer, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
+    crm_xml_add(*answer, XML_ATTR_DIGEST, digest);
+    crm_xml_add(*answer, F_CIB_PING_ID, seq);
 
-    return result;
+    if (cs == NULL) {
+        cs = qb_log_callsite_get(__func__, __FILE__, __FUNCTION__, LOG_TRACE, __LINE__, crm_trace_nonlog);
+    }
+    if (cs && cs->targets) {
+        /* Append additional detail so the reciever can log the differences */
+        add_message_xml(*answer, F_CIB_CALLDATA, the_cib);
+
+    } else {
+        /* Always include at least the version details */
+        const char *tag = TYPE(the_cib);
+        xmlNode *shallow = create_xml_node(NULL, tag);
+
+        copy_in_properties(shallow, the_cib);
+        add_message_xml(*answer, F_CIB_CALLDATA, shallow);
+        free_xml(shallow);
+    }
+
+    crm_info("Reporting our current digest to %s: %s for %s.%s.%s (%p %d)",
+             host, digest,
+             crm_element_value(existing_cib, XML_ATTR_GENERATION_ADMIN),
+             crm_element_value(existing_cib, XML_ATTR_GENERATION),
+             crm_element_value(existing_cib, XML_ATTR_NUMUPDATES),
+             existing_cib,
+             cs && cs->targets);
+
+    free(digest);
+
+    return pcmk_ok;
 #endif
 }
 
@@ -206,6 +256,56 @@ cib_process_sync(const char *op, int options, const char *section, xmlNode * req
 }
 
 int
+cib_process_upgrade_server(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,
+                           xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)
+{
+#ifdef CIBPIPE
+    return -EINVAL;
+#else
+    int rc = pcmk_ok;
+
+    *answer = NULL;
+
+    if(crm_element_value(req, F_CIB_SCHEMA_MAX)) {
+        return cib_process_upgrade(
+            op, options, section, req, input, existing_cib, result_cib, answer);
+
+    } else {
+        int new_version = 0;
+        int current_version = 0;
+        xmlNode *scratch = copy_xml(existing_cib);
+        const char *host = crm_element_value(req, F_ORIG);
+        const char *value = crm_element_value(existing_cib, XML_ATTR_VALIDATION);
+
+        crm_trace("Processing \"%s\" event", op);
+        if (value != NULL) {
+            current_version = get_schema_version(value);
+        }
+
+        rc = update_validation(&scratch, &new_version, 0, TRUE, TRUE);
+        if (new_version > current_version) {
+            xmlNode *up = create_xml_node(NULL, __FUNCTION__);
+
+            rc = pcmk_ok;
+            crm_notice("Upgrade request from %s verified", host);
+
+            crm_xml_add(up, F_TYPE, "cib");
+            crm_xml_add(up, F_CIB_OPERATION, CIB_OP_UPGRADE);
+            crm_xml_add(up, F_CIB_SCHEMA_MAX, get_schema_name(new_version));
+            send_cluster_message(NULL, crm_msg_cib, up, FALSE);
+            free_xml(up);
+
+        } else if(rc == pcmk_ok) {
+            rc = -pcmk_err_schema_unchanged;
+        }
+
+        free_xml(scratch);
+    }
+    return rc;
+#endif
+}
+
+int
 cib_process_sync_one(const char *op, int options, const char *section, xmlNode * req,
                      xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,
                      xmlNode ** answer)
@@ -216,8 +316,6 @@ cib_process_sync_one(const char *op, int options, const char *section, xmlNode *
     return sync_our_cib(req, FALSE);
 #endif
 }
-
-int sync_in_progress = 0;
 
 int
 cib_server_process_diff(const char *op, int options, const char *section, xmlNode * req,
@@ -261,21 +359,9 @@ cib_server_process_diff(const char *op, int options, const char *section, xmlNod
     rc = cib_process_diff(op, options, section, req, input, existing_cib, result_cib, answer);
 
     if (rc == -pcmk_err_diff_resync && cib_is_master == FALSE) {
-        xmlNode *sync_me = create_xml_node(NULL, "sync-me");
-
         free_xml(*result_cib);
         *result_cib = NULL;
-        crm_info("Requesting re-sync from peer");
-        sync_in_progress++;
-
-        crm_xml_add(sync_me, F_TYPE, "cib");
-        crm_xml_add(sync_me, F_CIB_OPERATION, CIB_OP_SYNC_ONE);
-        crm_xml_add(sync_me, F_CIB_DELEGATED, cib_our_uname);
-
-        if (send_cluster_message(NULL, crm_msg_cib, sync_me, FALSE) == FALSE) {
-            rc = -ENOTCONN;
-        }
-        free_xml(sync_me);
+        send_sync_request(NULL);
 
     } else if (rc == -pcmk_err_diff_resync) {
         rc = -pcmk_err_diff_failed;
@@ -446,6 +532,10 @@ sync_our_cib(xmlNode * request, gboolean all)
     if (host != NULL) {
         crm_xml_add(replace_request, F_CIB_ISREPLY, host);
     }
+    if (all) {
+        xml_remove_prop(replace_request, F_CIB_HOST);
+    }
+
     crm_xml_add(replace_request, F_CIB_OPERATION, CIB_OP_REPLACE);
     crm_xml_add(replace_request, "original_" F_CIB_OPERATION, op);
     crm_xml_add(replace_request, F_CIB_GLOBAL_UPDATE, XML_BOOLEAN_TRUE);
@@ -456,7 +546,8 @@ sync_our_cib(xmlNode * request, gboolean all)
 
     add_message_xml(replace_request, F_CIB_CALLDATA, the_cib);
 
-    if (send_cluster_message(all ? NULL : crm_get_peer(0, host), crm_msg_cib, replace_request, FALSE) == FALSE) {
+    if (send_cluster_message
+        (all ? NULL : crm_get_peer(0, host), crm_msg_cib, replace_request, FALSE) == FALSE) {
         result = -ENOTCONN;
     }
     free_xml(replace_request);

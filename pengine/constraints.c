@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -19,12 +19,13 @@
 #include <crm_internal.h>
 
 #include <sys/param.h>
+#include <sys/types.h>
+#include <regex.h>
 
 #include <crm/crm.h>
 #include <crm/cib.h>
 #include <crm/msg_xml.h>
 #include <crm/common/xml.h>
-
 
 #include <glib.h>
 
@@ -41,7 +42,7 @@ enum pe_order_kind {
 };
 
 #define EXPAND_CONSTRAINT_IDREF(__set, __rsc, __name) do {				\
-	__rsc = pe_find_resource(data_set->resources, __name);		\
+	__rsc = pe_find_constraint_resource(data_set->resources, __name);		\
 	if(__rsc == NULL) {						\
 	    crm_config_err("%s: No resource found for %s", __set, __name); \
 	    return FALSE;						\
@@ -86,7 +87,7 @@ unpack_constraints(xmlNode * xml_constraints, pe_working_set_t * data_set)
             unpack_rsc_colocation(xml_obj, data_set);
 
         } else if (safe_str_eq(XML_CONS_TAG_RSC_LOCATION, crm_element_name(xml_obj))) {
-            unpack_rsc_location(xml_obj, data_set);
+            unpack_location(xml_obj, data_set);
 
         } else if (safe_str_eq(XML_CONS_TAG_RSC_TICKET, crm_element_name(xml_obj))) {
             unpack_rsc_ticket(xml_obj, data_set);
@@ -169,50 +170,80 @@ get_ordering_type(xmlNode * xml_obj)
     return kind_e;
 }
 
-enum contains_stonith_res {
-    contains_stonith_unknown = -1,
-    contains_stonith_false,
-    contains_stonith_true,
-    contains_stonith_mixed,
-};
-
-static enum contains_stonith_res
-contains_stonith(resource_t * rsc)
+static resource_t *
+pe_find_constraint_resource(GListPtr rsc_list, const char *id)
 {
-    enum contains_stonith_res res = contains_stonith_unknown;
-    GListPtr gIter = rsc->children;
+    GListPtr rIter = NULL;
 
-    if (gIter == FALSE) {
-        const char *class = crm_element_value(rsc->xml, XML_AGENT_ATTR_CLASS);
+    for (rIter = rsc_list; id && rIter; rIter = rIter->next) {
+        resource_t *parent = rIter->data;
 
-        if (safe_str_eq(class, "stonith")) {
-            return contains_stonith_true;
-        }
-        return contains_stonith_false;
-    }
+        resource_t *match =
+            parent->fns->find_rsc(parent, id, NULL, pe_find_renamed | pe_find_current);
 
-    for (; gIter != NULL; gIter = gIter->next) {
-        resource_t *child = (resource_t *) gIter->data;
-        enum contains_stonith_res tmp = contains_stonith(child);
-
-        if (tmp != contains_stonith_unknown) {
-            switch (res) {
-                case contains_stonith_unknown:
-                    res = tmp;
-                    break;
-                case contains_stonith_false:
-                case contains_stonith_true:
-                    if(tmp != res) {
-                        return contains_stonith_mixed;
-                    }
-                    break;
-                case contains_stonith_mixed:
-                    return contains_stonith_mixed;
+        if (match != NULL) {
+            if(safe_str_neq(match->id, id)) {
+                /* We found an instance of a clone instead */
+                match = uber_parent(match);
+                crm_debug("Found %s for %s", match->id, id);
             }
+            return match;
+        }
+    }
+    crm_trace("No match for %s", id);
+    return NULL;
+}
+
+static gboolean
+pe_find_constraint_tag(pe_working_set_t * data_set, const char * id, tag_t ** tag)
+{
+    gboolean rc = FALSE;
+
+    *tag = NULL;
+    rc = g_hash_table_lookup_extended(data_set->template_rsc_sets, id,
+                                       NULL, (gpointer*) tag);
+
+    if (rc == FALSE) {
+        rc = g_hash_table_lookup_extended(data_set->tags, id,
+                                          NULL, (gpointer*) tag);
+
+        if (rc == FALSE) {
+            crm_config_warn("No template/tag named '%s'", id);
+            return FALSE;
+
+        } else if (*tag == NULL) {
+            crm_config_warn("No resource is tagged with '%s'", id);
+            return FALSE;
+        }
+
+    } else if (*tag == NULL) {
+        crm_config_warn("No resource is derived from template '%s'", id);
+        return FALSE;
+    }
+
+    return rc;
+}
+
+static gboolean
+valid_resource_or_tag(pe_working_set_t * data_set, const char * id,
+                      resource_t ** rsc, tag_t ** tag)
+{
+    gboolean rc = FALSE;
+
+    if (rsc) {
+        *rsc = NULL;
+        *rsc = pe_find_constraint_resource(data_set->resources, id);
+        if (*rsc) {
+            return TRUE;
         }
     }
 
-    return res;
+    if (tag) {
+        *tag = NULL;
+        rc = pe_find_constraint_tag(data_set, id, tag);
+    }
+
+    return rc;
 }
 
 static gboolean
@@ -268,8 +299,8 @@ unpack_simple_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
         return FALSE;
     }
 
-    rsc_then = pe_find_resource(data_set->resources, id_then);
-    rsc_first = pe_find_resource(data_set->resources, id_first);
+    rsc_then = pe_find_constraint_resource(data_set->resources, id_then);
+    rsc_first = pe_find_constraint_resource(data_set->resources, id_first);
 
     if (rsc_then == NULL) {
         crm_config_err("Constraint %s: no resource found for name '%s'", id, id_then);
@@ -326,7 +357,7 @@ unpack_simple_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
     order_id = new_rsc_order(rsc_first, action_first, rsc_then, action_then, cons_weight, data_set);
 
     pe_rsc_trace(rsc_first, "order-%d (%s): %s_%s before %s_%s flags=0x%.6x",
-                order_id, id, rsc_first->id, action_first, rsc_then->id, action_then, cons_weight);
+                 order_id, id, rsc_first->id, action_first, rsc_then->id, action_then, cons_weight);
 
     if (invert_bool == FALSE) {
         return TRUE;
@@ -357,42 +388,288 @@ unpack_simple_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
     order_id = new_rsc_order(rsc_then, action_then, rsc_first, action_first, cons_weight, data_set);
 
     pe_rsc_trace(rsc_then, "order-%d (%s): %s_%s before %s_%s flags=0x%.6x",
-                order_id, id, rsc_then->id, action_then, rsc_first->id, action_first, cons_weight);
+                 order_id, id, rsc_then->id, action_then, rsc_first->id, action_first, cons_weight);
 
     return TRUE;
 }
 
+static gboolean
+expand_tags_in_sets(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)
+{
+    xmlNode *new_xml = NULL;
+    xmlNode *set = NULL;
+    gboolean any_refs = FALSE;
+    const char *cons_id = NULL;
+
+    *expanded_xml = NULL;
+
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
+    }
+
+    new_xml = copy_xml(xml_obj);
+    cons_id = ID(new_xml);
+
+    for (set = __xml_first_child(new_xml); set != NULL; set = __xml_next(set)) {
+        xmlNode *xml_rsc = NULL;
+        GListPtr tag_refs = NULL;
+        GListPtr gIter = NULL;
+
+        if (safe_str_neq((const char *)set->name, XML_CONS_TAG_RSC_SET)) {
+            continue;
+        }
+
+        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
+            resource_t *rsc = NULL;
+            tag_t *tag = NULL;
+            const char *id = ID(xml_rsc);
+
+            if (safe_str_neq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF)) {
+                continue;
+            }
+
+            if (valid_resource_or_tag(data_set, id, &rsc, &tag) == FALSE) {
+                crm_config_err("Constraint '%s': Invalid reference to '%s'", cons_id, id);
+                free_xml(new_xml);
+                return FALSE;
+
+            } else if (rsc) {
+                continue;
+
+            } else if (tag) {
+                /* The resource_ref under the resource_set references a template/tag */
+                xmlNode *last_ref = xml_rsc;
+
+                /* A sample:
+
+                   Original XML:
+
+                   <resource_set id="tag1-colocation-0" sequential="true">
+                     <resource_ref id="rsc1"/>
+                     <resource_ref id="tag1"/>
+                     <resource_ref id="rsc4"/>
+                   </resource_set>
+
+                   Now we are appending rsc2 and rsc3 which are tagged with tag1 right after it:
+
+                   <resource_set id="tag1-colocation-0" sequential="true">
+                     <resource_ref id="rsc1"/>
+                     <resource_ref id="tag1"/>
+                     <resource_ref id="rsc2"/>
+                     <resource_ref id="rsc3"/>
+                     <resource_ref id="rsc4"/>
+                   </resource_set>
+
+                 */
+
+                for (gIter = tag->refs; gIter != NULL; gIter = gIter->next) {
+                    const char *obj_ref = (const char *) gIter->data;
+                    xmlNode *new_rsc_ref = NULL;
+
+                    new_rsc_ref = xmlNewDocRawNode(getDocPtr(set), NULL,
+                                                   (const xmlChar *)XML_TAG_RESOURCE_REF, NULL);
+                    crm_xml_add(new_rsc_ref, XML_ATTR_ID, obj_ref);
+                    xmlAddNextSibling(last_ref, new_rsc_ref);
+
+                    last_ref = new_rsc_ref;
+                }
+
+                any_refs = TRUE;
+
+                /* Do not directly free '<resource_ref id="tag1"/>'.
+                   That would break the further __xml_next(xml_rsc)) and cause "Invalid read" seen by valgrind.
+                   So just record it into a hash table for freeing it later.
+                 */
+                tag_refs = g_list_append(tag_refs, xml_rsc);
+            }
+        }
+
+        /* Now free '<resource_ref id="tag1"/>', and finally get:
+
+           <resource_set id="tag1-colocation-0" sequential="true">
+             <resource_ref id="rsc1"/>
+             <resource_ref id="rsc2"/>
+             <resource_ref id="rsc3"/>
+             <resource_ref id="rsc4"/>
+           </resource_set>
+
+         */
+        for (gIter = tag_refs; gIter != NULL; gIter = gIter->next) {
+            xmlNode *tag_ref = gIter->data;
+
+            free_xml(tag_ref);
+        }
+        g_list_free(tag_refs);
+    }
+
+    if (any_refs) {
+        *expanded_xml = new_xml;
+    } else {
+        free_xml(new_xml);
+    }
+
+    return TRUE;
+}
+
+static gboolean
+tag_to_set(xmlNode * xml_obj, xmlNode ** rsc_set, const char * attr,
+                gboolean convert_rsc, pe_working_set_t * data_set)
+{
+    const char *cons_id = NULL;
+    const char *id = NULL;
+
+    resource_t *rsc = NULL;
+    tag_t *tag = NULL;
+
+    *rsc_set = NULL;
+
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
+    }
+
+    if (attr == NULL) {
+        crm_config_err("No attribute name to process.");
+        return FALSE;
+    }
+
+    cons_id = crm_element_value(xml_obj, XML_ATTR_ID);
+    if (cons_id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
+    }
+
+    id = crm_element_value(xml_obj, attr);
+    if (id == NULL) {
+        return TRUE;
+    }
+
+    if (valid_resource_or_tag(data_set, id, &rsc, &tag) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", cons_id, id);
+        return FALSE;
+
+    } else if (tag) {
+        GListPtr gIter = NULL;
+
+        /* A template/tag is referenced by the "attr" attribute (first, then, rsc or with-rsc).
+           Add the template/tag's corresponding "resource_set" which contains the resources derived
+           from it or tagged with it under the constraint. */
+        *rsc_set = create_xml_node(xml_obj, XML_CONS_TAG_RSC_SET);
+        crm_xml_add(*rsc_set, XML_ATTR_ID, id);
+
+        for (gIter = tag->refs; gIter != NULL; gIter = gIter->next) {
+            const char *obj_ref = (const char *) gIter->data;
+            xmlNode *rsc_ref = NULL;
+
+            rsc_ref = create_xml_node(*rsc_set, XML_TAG_RESOURCE_REF);
+            crm_xml_add(rsc_ref, XML_ATTR_ID, obj_ref);
+        }
+
+        /* Set sequential="false" for the resource_set */
+        crm_xml_add(*rsc_set, "sequential", XML_BOOLEAN_FALSE);
+
+    } else if (rsc && convert_rsc) {
+        /* Even a regular resource is referenced by "attr", convert it into a resource_set.
+           Because the other side of the constraint could be a template/tag reference. */
+        xmlNode *rsc_ref = NULL;
+
+        *rsc_set = create_xml_node(xml_obj, XML_CONS_TAG_RSC_SET);
+        crm_xml_add(*rsc_set, XML_ATTR_ID, id);
+
+        rsc_ref = create_xml_node(*rsc_set, XML_TAG_RESOURCE_REF);
+        crm_xml_add(rsc_ref, XML_ATTR_ID, id);
+
+    } else {
+        return TRUE;
+    }
+
+    /* Remove the "attr" attribute referencing the template/tag */
+    if (*rsc_set) {
+        xml_remove_prop(xml_obj, attr);
+    }
+
+    return TRUE;
+}
+
+gboolean unpack_rsc_location(xmlNode * xml_obj, resource_t * rsc_lh, const char * role,
+                             const char * score, pe_working_set_t * data_set);
+
+static gboolean
+unpack_simple_location(xmlNode * xml_obj, pe_working_set_t * data_set)
+{
+    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);
+    const char *value = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);
+
+    if(value) {
+        resource_t *rsc_lh = pe_find_constraint_resource(data_set->resources, value);
+
+        return unpack_rsc_location(xml_obj, rsc_lh, NULL, NULL, data_set);
+    }
+
+    value = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE"-pattern");
+    if(value) {
+        regex_t *r_patt = calloc(1, sizeof(regex_t));
+        bool invert = FALSE;
+        GListPtr rIter = NULL;
+
+        if(value[0] == '!') {
+            value++;
+            invert = TRUE;
+        }
+
+        if (regcomp(r_patt, value, REG_EXTENDED)) {
+            crm_config_err("Bad regex '%s' for constraint '%s'\n", value, id);
+            regfree(r_patt);
+            free(r_patt);
+            return FALSE;
+        }
+
+        for (rIter = data_set->resources; rIter; rIter = rIter->next) {
+            resource_t *r = rIter->data;
+            int status = regexec(r_patt, r->id, 0, NULL, 0);
+
+            if(invert == FALSE && status == 0) {
+                crm_debug("'%s' matched '%s' for %s", r->id, value, id);
+                unpack_rsc_location(xml_obj, r, NULL, NULL, data_set);
+
+            } if(invert && status != 0) {
+                crm_debug("'%s' is an inverted match of '%s' for %s", r->id, value, id);
+                unpack_rsc_location(xml_obj, r, NULL, NULL, data_set);
+
+            } else {
+                crm_trace("'%s' does not match '%s' for %s", r->id, value, id);
+            }
+        }
+
+        regfree(r_patt);
+        free(r_patt);
+    }
+
+    return FALSE;
+}
+
 gboolean
-unpack_rsc_location(xmlNode * xml_obj, pe_working_set_t * data_set)
+unpack_rsc_location(xmlNode * xml_obj, resource_t * rsc_lh, const char * role,
+                    const char * score, pe_working_set_t * data_set)
 {
     gboolean empty = TRUE;
     rsc_to_node_t *location = NULL;
-    const char *id_lh = crm_element_value(xml_obj, "rsc");
+    const char *id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);
     const char *id = crm_element_value(xml_obj, XML_ATTR_ID);
-    resource_t *rsc_lh = pe_find_resource(data_set->resources, id_lh);
-    const char *node = crm_element_value(xml_obj, "node");
-    const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);
-    const char *domain = crm_element_value(xml_obj, XML_CIB_TAG_DOMAIN);
-    const char *role = crm_element_value(xml_obj, XML_RULE_ATTR_ROLE);
+    const char *node = crm_element_value(xml_obj, XML_CIB_TAG_NODE);
 
     if (rsc_lh == NULL) {
         /* only a warn as BSC adds the constraint then the resource */
         crm_config_warn("No resource (con=%s, rsc=%s)", id, id_lh);
         return FALSE;
     }
+    
+    if (score == NULL) {
+        score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);
+    }
 
-    if (domain) {
-        GListPtr nodes = g_hash_table_lookup(data_set->domains, domain);
-
-        if (domain == NULL) {
-            crm_config_err("Invalid constraint %s: Domain %s does not exist", id, domain);
-            return FALSE;
-        }
-
-        location = rsc2node_new(id, rsc_lh, 0, NULL, data_set);
-        location->node_list_rh = node_list_dup(nodes, FALSE, FALSE);
-
-    } else if (node != NULL && score != NULL) {
+    if (node != NULL && score != NULL) {
         int score_i = char2score(score);
         node_t *match = pe_find_node(data_set->nodes, node);
 
@@ -419,22 +696,194 @@ unpack_rsc_location(xmlNode * xml_obj, pe_working_set_t * data_set)
         }
     }
 
+    if (role == NULL) {
+        role = crm_element_value(xml_obj, XML_RULE_ATTR_ROLE);
+    }
+
     if (location && role) {
         if (text2role(role) == RSC_ROLE_UNKNOWN) {
             pe_err("Invalid constraint %s: Bad role %s", id, role);
             return FALSE;
 
         } else {
-            location->role_filter = text2role(role);
-            if (location->role_filter == RSC_ROLE_SLAVE) {
-                /* Fold slave back into Started for simplicity
-                 * At the point Slave location constraints are evaluated,
-                 * all resources are still either stopped or started
-                 */
-                location->role_filter = RSC_ROLE_STARTED;
+            enum rsc_role_e r = text2role(role);
+            switch(r) {
+                case RSC_ROLE_UNKNOWN:
+                case RSC_ROLE_STARTED:
+                case RSC_ROLE_SLAVE:
+                    /* Applies to all */
+                    location->role_filter = RSC_ROLE_UNKNOWN;
+                    break;
+                default:
+                    location->role_filter = r;
+                    break;
             }
         }
     }
+    return TRUE;
+}
+
+static gboolean
+unpack_location_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)
+{
+    const char *id = NULL;
+    const char *id_lh = NULL;
+    const char *state_lh = NULL;
+
+    resource_t *rsc_lh = NULL;
+
+    tag_t *tag_lh = NULL;
+
+    xmlNode *new_xml = NULL;
+    xmlNode *rsc_set_lh = NULL;
+    gboolean any_sets = FALSE;
+
+    *expanded_xml = NULL;
+
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
+    }
+
+    id = crm_element_value(xml_obj, XML_ATTR_ID);
+    if (id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
+    }
+
+    /* Attempt to expand any template/tag references in possible resource sets. */
+    expand_tags_in_sets(xml_obj, &new_xml, data_set);
+    if (new_xml) {
+        /* There are resource sets referencing templates. Return with the expanded XML. */
+        crm_log_xml_trace(new_xml, "Expanded rsc_location...");
+        *expanded_xml = new_xml;
+        return TRUE;
+    }
+
+    id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);
+    if (id_lh == NULL) {
+        return TRUE;
+    }
+
+    if (valid_resource_or_tag(data_set, id_lh, &rsc_lh, &tag_lh) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_lh);
+        return FALSE;
+
+    } else if (rsc_lh) {
+        /* No template is referenced. */
+        return TRUE;
+    }
+
+    state_lh = crm_element_value(xml_obj, XML_RULE_ATTR_ROLE);
+
+    new_xml = copy_xml(xml_obj);
+
+    /* Convert the template/tag reference in "rsc" into a resource_set under the rsc_location constraint. */
+    if (tag_to_set(new_xml, &rsc_set_lh, XML_COLOC_ATTR_SOURCE, FALSE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
+    }
+
+    if (rsc_set_lh) {
+        if (state_lh) {
+            /* A "rsc-role" is specified.
+               Move it into the converted resource_set as a "role"" attribute. */
+            crm_xml_add(rsc_set_lh, "role", state_lh);
+            xml_remove_prop(new_xml, XML_RULE_ATTR_ROLE);
+        }
+        any_sets = TRUE;
+    }
+
+    if (any_sets) {
+        crm_log_xml_trace(new_xml, "Expanded rsc_location...");
+        *expanded_xml = new_xml;
+    } else {
+        free_xml(new_xml);
+    }
+
+    return TRUE;
+}
+
+static gboolean
+unpack_location_set(xmlNode * location, xmlNode * set, pe_working_set_t * data_set)
+{
+    xmlNode *xml_rsc = NULL;
+    resource_t *resource = NULL;
+    const char *set_id = ID(set);
+    const char *role = crm_element_value(set, "role");
+    const char *local_score = crm_element_value(set, XML_RULE_ATTR_SCORE);
+
+    if (set == NULL) {
+        crm_config_err("No resource_set object to process.");
+        return FALSE;
+    }
+
+    if (set_id == NULL) {
+        crm_config_err("resource_set must have an id");
+        return FALSE;
+    }
+
+    for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
+        if (crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
+            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
+            unpack_rsc_location(location, resource, role, local_score, data_set);
+        }
+    }
+
+    return TRUE;
+}
+
+gboolean
+unpack_location(xmlNode * xml_obj, pe_working_set_t * data_set)
+{
+    xmlNode *set = NULL;
+    gboolean any_sets = FALSE;
+
+    xmlNode *orig_xml = NULL;
+    xmlNode *expanded_xml = NULL;
+
+    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);
+
+    gboolean rc = TRUE;
+
+    if (xml_obj == NULL) {
+        crm_config_err("No rsc_location constraint object to process.");
+        return FALSE;
+    }
+
+    if (id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
+    }
+
+    rc = unpack_location_tags(xml_obj, &expanded_xml, data_set);
+    if (expanded_xml) {
+        orig_xml = xml_obj;
+        xml_obj = expanded_xml;
+
+    } else if (rc == FALSE) {
+        return FALSE;
+    }
+
+    for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next(set)) {
+        if (crm_str_eq((const char *)set->name, XML_CONS_TAG_RSC_SET, TRUE)) {
+            any_sets = TRUE;
+            set = expand_idref(set, data_set->input);
+            if (unpack_location_set(xml_obj, set, data_set) == FALSE) {
+                return FALSE;
+            }
+        }
+    }
+
+    if (expanded_xml) {
+        free_xml(expanded_xml);
+        xml_obj = orig_xml;
+    }
+
+    if (any_sets == FALSE) {
+        return unpack_simple_location(xml_obj, data_set);
+    }
+
     return TRUE;
 }
 
@@ -477,7 +926,6 @@ generate_location_rule(resource_t * rsc, xmlNode * rule_xml, pe_working_set_t * 
     GListPtr gIter = NULL;
     GListPtr match_L = NULL;
 
-    int score_f = 0;
     gboolean do_and = TRUE;
     gboolean accept = TRUE;
     gboolean raw_score = TRUE;
@@ -497,10 +945,7 @@ generate_location_rule(resource_t * rsc, xmlNode * rule_xml, pe_working_set_t * 
     }
 
     score = crm_element_value(rule_xml, XML_RULE_ATTR_SCORE);
-    if (score != NULL) {
-        score_f = char2score(score);
-
-    } else {
+    if (score == NULL) {
         score = crm_element_value(rule_xml, XML_RULE_ATTR_SCORE_ATTRIBUTE);
         if (score == NULL) {
             score = crm_element_value(rule_xml, XML_RULE_ATTR_SCORE_MANGLED);
@@ -522,11 +967,10 @@ generate_location_rule(resource_t * rsc, xmlNode * rule_xml, pe_working_set_t * 
         crm_trace("Setting role filter: %s", role);
         location_rule->role_filter = text2role(role);
         if (location_rule->role_filter == RSC_ROLE_SLAVE) {
-            /* Fold slave back into Started for simplicity
-             * At the point Slave location constraints are evaluated,
-             * all resources are still either stopped or started
+            /* Any master/slave cannot be promoted without being a slave first
+             * Ergo, any constraint for the slave role applies to every role
              */
-            location_rule->role_filter = RSC_ROLE_STARTED;
+            location_rule->role_filter = RSC_ROLE_UNKNOWN;
         }
     }
     if (do_and) {
@@ -541,12 +985,13 @@ generate_location_rule(resource_t * rsc, xmlNode * rule_xml, pe_working_set_t * 
     }
 
     for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
+        int score_f = 0;
         node_t *node = (node_t *) gIter->data;
 
         accept = test_rule(rule_xml, node->details->attrs, RSC_ROLE_UNKNOWN, data_set->now);
 
         crm_trace("Rule %s %s on %s", ID(rule_xml), accept ? "passed" : "failed",
-                    node->details->uname);
+                  node->details->uname);
 
         score_f = get_node_score(rule_id, score, raw_score, node);
 /* 			if(accept && score_f == -INFINITY) { */
@@ -709,34 +1154,14 @@ rsc_colocation_new(const char *id, const char *node_attr, int score,
 
     data_set->colocation_constraints = g_list_append(data_set->colocation_constraints, new_con);
 
-    return TRUE;
-}
-
-static int
-validate_order_resources(resource_t *lh_rsc, resource_t *rh_rsc)
-{
-    enum contains_stonith_res lh_flag = contains_stonith(lh_rsc);
-    enum contains_stonith_res rh_flag = contains_stonith(rh_rsc);
-
-    if (lh_flag == contains_stonith_mixed) {
-        crm_config_err("Order constraint, LH (%s) then RH (%s), can not be applied.  LH contains stonith resources mixed with other resource classes.",
-            lh_rsc->id, rh_rsc->id);
-        return -1;
-    } else if (rh_flag == contains_stonith_mixed) {
-        crm_config_err("Order constraint, LH (%s) then RH (%s), can not be applied.  RH contains stonith resources mixed with other resource classes.",
-            lh_rsc->id, rh_rsc->id);
-        return -1;
-    } else if (lh_flag == contains_stonith_true && (lh_flag != rh_flag)) {
-        crm_config_err("Order constraint, LH (%s) then RH (%s), can not be applied. LH is of class stonith and RH is not.",
-            lh_rsc->id, rh_rsc->id);
-        return -1;
-    } else if (rh_flag == contains_stonith_true && (rh_flag != lh_flag)) {
-        crm_config_err("Order constraint, LH (%s) then RH (%s), can not be applied. RH is of class stonith and LH is not.",
-            lh_rsc->id, rh_rsc->id);
-        return -1;
+    if (score <= -INFINITY) {
+        new_rsc_order(rsc_lh, CRMD_ACTION_STOP, rsc_rh, CRMD_ACTION_START,
+                      pe_order_anti_colocation, data_set);
+        new_rsc_order(rsc_rh, CRMD_ACTION_STOP, rsc_lh, CRMD_ACTION_START,
+                      pe_order_anti_colocation, data_set);
     }
 
-    return 0;
+    return TRUE;
 }
 
 /* LHS before RHS */
@@ -753,14 +1178,136 @@ new_rsc_order(resource_t * lh_rsc, const char *lh_task,
     CRM_CHECK(rh_rsc != NULL, return -1);
     CRM_CHECK(rh_task != NULL, return -1);
 
-    if (validate_order_resources(lh_rsc, rh_rsc)) {
+    /* We no longer need to test if these reference stonith resources
+     * now that stonithd has access to them even when they're not "running"
+     *
+    if (validate_order_resources(lh_rsc, lh_task, rh_rsc, rh_task)) {
         return -1;
     }
+    */
 
     lh_key = generate_op_key(lh_rsc->id, lh_task, 0);
     rh_key = generate_op_key(rh_rsc->id, rh_task, 0);
 
     return custom_action_order(lh_rsc, lh_key, NULL, rh_rsc, rh_key, NULL, type, data_set);
+}
+
+static char *
+task_from_action_or_key(action_t *action, const char *key)
+{
+    char *res = NULL;
+    char *rsc_id = NULL;
+    char *op_type = NULL;
+    int interval = 0;
+
+    if (action) {
+        res = strdup(action->task);
+    } else if (key) {
+        int rc = 0;
+        rc = parse_op_key(key, &rsc_id, &op_type, &interval);
+        if (rc == TRUE) {
+            res = op_type;
+            op_type = NULL;
+        }
+        free(rsc_id);
+        free(op_type);
+    }
+
+    return res;
+}
+
+/* when order constraints are made between two resources start and stop actions
+ * those constraints have to be mirrored against the corresponding
+ * migration actions to ensure start/stop ordering is preserved during
+ * a migration */
+static void
+handle_migration_ordering(order_constraint_t *order, pe_working_set_t *data_set)
+{
+    char *lh_task = NULL;
+    char *rh_task = NULL;
+    gboolean rh_migratable;
+    gboolean lh_migratable;
+
+    if (order->lh_rsc == NULL || order->rh_rsc == NULL) {
+        return;
+    } else if (order->lh_rsc == order->rh_rsc) {
+        return;
+    /* don't mess with those constraints built between parent
+     * resources and the children */
+    } else if (is_parent(order->lh_rsc, order->rh_rsc)) {
+        return;
+    } else if (is_parent(order->rh_rsc, order->lh_rsc)) {
+        return;
+    }
+
+    lh_migratable = is_set(order->lh_rsc->flags, pe_rsc_allow_migrate);
+    rh_migratable = is_set(order->rh_rsc->flags, pe_rsc_allow_migrate);
+
+    /* one of them has to be migratable for
+     * the migrate ordering logic to be applied */
+    if (lh_migratable == FALSE && rh_migratable == FALSE) {
+        return;
+    }
+
+    /* at this point we have two resources which allow migrations that have an
+     * order dependency set between them.  If those order dependencies involve
+     * start/stop actions, we need to mirror the corresponding migrate actions
+     * so order will be preserved. */
+    lh_task = task_from_action_or_key(order->lh_action, order->lh_action_task);
+    rh_task = task_from_action_or_key(order->rh_action, order->rh_action_task);
+    if (lh_task == NULL || rh_task == NULL) {
+        goto cleanup_order;
+    }
+
+    if (safe_str_eq(lh_task, RSC_START) && safe_str_eq(rh_task, RSC_START)) {
+        int flags = pe_order_optional;
+
+        if (lh_migratable && rh_migratable) {
+            /* A start then B start
+             * A migrate_from then B migrate_to */
+            custom_action_order(order->lh_rsc, generate_op_key(order->lh_rsc->id, RSC_MIGRATED, 0), NULL,
+                                order->rh_rsc, generate_op_key(order->rh_rsc->id, RSC_MIGRATE, 0), NULL,
+                                flags, data_set);
+        }
+
+        if (rh_migratable) {
+            if (lh_migratable) {
+                flags |= pe_order_apply_first_non_migratable;
+            }
+
+            /* A start then B start
+             * A start then B migrate_to... only if A start is not a part of a migration*/
+            custom_action_order(order->lh_rsc, generate_op_key(order->lh_rsc->id, RSC_START, 0), NULL,
+                                order->rh_rsc, generate_op_key(order->rh_rsc->id, RSC_MIGRATE, 0), NULL,
+                                flags, data_set);
+        }
+
+    } else if (rh_migratable == TRUE && safe_str_eq(lh_task, RSC_STOP) && safe_str_eq(rh_task, RSC_STOP)) {
+        int flags = pe_order_optional;
+
+        if (lh_migratable) {
+            flags |= pe_order_apply_first_non_migratable;
+        }
+
+        /* rh side is at the bottom of the stack during a stop. If we have a constraint
+         * stop B then stop A, if B is migrating via stop/start, and A is migrating using migration actions,
+         * we need to enforce that A's migrate_to action occurs after B's stop action. */
+        custom_action_order(order->lh_rsc, generate_op_key(order->lh_rsc->id, RSC_STOP, 0), NULL,
+                            order->rh_rsc, generate_op_key(order->rh_rsc->id, RSC_MIGRATE, 0), NULL,
+                            flags, data_set);
+
+        /* We need to build the stop constraint against migrate_from as well
+         * to account for partial migrations. */
+        if (order->rh_rsc->partial_migration_target) {
+            custom_action_order(order->lh_rsc, generate_op_key(order->lh_rsc->id, RSC_STOP, 0), NULL,
+                                order->rh_rsc, generate_op_key(order->rh_rsc->id, RSC_MIGRATED, 0), NULL,
+                                flags, data_set);
+        }
+    }
+
+cleanup_order:
+    free(lh_task);
+    free(rh_task);
 }
 
 /* LHS before RHS */
@@ -814,6 +1361,7 @@ custom_action_order(resource_t * lh_rsc, char *lh_action_task, action_t * lh_act
     }
 
     data_set->ordering_constraints = g_list_prepend(data_set->ordering_constraints, order);
+    handle_migration_ordering(order, data_set);
 
     return order->id;
 }
@@ -929,7 +1477,7 @@ unpack_order_set(xmlNode * set, enum pe_order_kind kind, resource_t ** rsc,
     *rsc = NULL;
     /*
      *end = get_pseudo_op(end_id, data_set);
-     *begin = get_pseudo_op(begin_id, data_set);    
+     *begin = get_pseudo_op(begin_id, data_set);
 
      free(pseudo_id);
      free(begin_id);
@@ -1064,6 +1612,14 @@ order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kin
         action_2 = invert_action(action_2);
     }
 
+    if(safe_str_eq(RSC_STOP, action_1) || safe_str_eq(RSC_DEMOTE, action_1)) {
+        /* Assuming: A -> ( B || C) -> D
+         * The one-or-more logic only applies during the start/promote phase
+         * During shutdown neither B nor can shutdown until D is down, so simply turn require_all back on.
+         */
+        require_all = TRUE;
+    }
+
     if (symmetrical == FALSE) {
         flags = get_asymmetrical_flags(kind);
     } else {
@@ -1080,6 +1636,7 @@ order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kin
 
         for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
             xmlNode *xml_rsc_2 = NULL;
+
             if (!crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
                 continue;
             }
@@ -1089,10 +1646,11 @@ order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kin
             /* Add an ordering constraint between every element in set1 and the pseudo action.
              * If any action in set1 is runnable the pseudo action will be runnable. */
             custom_action_order(rsc_1, generate_op_key(rsc_1->id, action_1, 0), NULL,
-                                NULL,NULL, unordered_action,
-                                pe_order_one_or_more|pe_order_implies_then_printed, data_set);
+                                NULL, NULL, unordered_action,
+                                pe_order_one_or_more | pe_order_implies_then_printed, data_set);
 
-            for (xml_rsc_2 = __xml_first_child(set2); xml_rsc_2 != NULL; xml_rsc_2 = __xml_next(xml_rsc_2)) {
+            for (xml_rsc_2 = __xml_first_child(set2); xml_rsc_2 != NULL;
+                 xml_rsc_2 = __xml_next(xml_rsc_2)) {
                 if (!crm_str_eq((const char *)xml_rsc_2->name, XML_TAG_RESOURCE_REF, TRUE)) {
                     continue;
                 }
@@ -1102,8 +1660,8 @@ order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kin
                 /* Add an ordering constraint between the pseudo action and every element in set2.
                  * If the pseudo action is runnable, every action in set2 will be runnable */
                 custom_action_order(NULL, NULL, unordered_action,
-                    rsc_2, generate_op_key(rsc_2->id, action_2, 0), NULL,
-                    flags|pe_order_runnable_left, data_set);
+                                    rsc_2, generate_op_key(rsc_2->id, action_2, 0), NULL,
+                                    flags | pe_order_runnable_left, data_set);
             }
         }
 
@@ -1199,191 +1757,18 @@ order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kin
 }
 
 static gboolean
-expand_templates_in_sets(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_set_t *data_set)
-{
-    xmlNode *new_xml = NULL;
-    xmlNode *set = NULL;
-    gboolean any_refs = FALSE;
-
-    *expanded_xml = NULL;
-
-    if(xml_obj == NULL) {
-	crm_config_err("No constraint object to process.");
-	return FALSE;
-    }
-
-    new_xml = copy_xml(xml_obj);
-
-    for (set = __xml_first_child(new_xml); set != NULL; set = __xml_next(set)) {
-        xmlNode *xml_rsc = NULL;
-        GListPtr template_refs = NULL;
-        GListPtr gIter = NULL;
-
-        if (safe_str_neq((const char *)set->name, XML_CONS_TAG_RSC_SET)) {
-            continue;
-        }
-
-        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
-            xmlNode *template_rsc_set = NULL;
-
-            if (safe_str_neq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF)) {
-                continue;
-            }
-
-            template_rsc_set = g_hash_table_lookup(data_set->template_rsc_sets, ID(xml_rsc));
-            if (template_rsc_set) {
-                /* The resource_ref under the resource_set references a template */
-                xmlNode *rsc_ref = NULL;
-                xmlNode *new_rsc_ref = NULL;
-                xmlNode *last_ref = xml_rsc;
-
-                /* A sample: 
-
-                   Original XML:
-                 
-                   <resource_set id="template1-order-0" sequential="true">
-                     <resource_ref id="rsc1"/>
-                     <resource_ref id="template1"/>
-                     <resource_ref id="rsc4"/>
-                   </resource_set>
-
-                   Now we are appending rsc2 and rsc3 which are derived from template1 right after it:
-
-                   <resource_set id="template1-order-0" sequential="true">
-                     <resource_ref id="rsc1"/>
-                     <resource_ref id="template1"/>
-                     <resource_ref id="rsc2"/>
-                     <resource_ref id="rsc3"/>
-                     <resource_ref id="rsc4"/>
-                   </resource_set>
-
-                 */
-                for (rsc_ref = __xml_first_child(template_rsc_set); rsc_ref != NULL; rsc_ref = __xml_next(rsc_ref)) {
-                    new_rsc_ref = xmlDocCopyNode(rsc_ref, getDocPtr(set), 1);
-                    xmlAddNextSibling(last_ref, new_rsc_ref);
-
-                    last_ref = new_rsc_ref;
-                }
-
-                any_refs = TRUE;
-
-                /* Do not directly free '<resource_ref id="template1"/>'.
-                   That would break the further __xml_next(xml_rsc)) and cause "Invalid read" seen by valgrind.
-                   So just record it into a hash table for freeing it later.
-                 */
-                template_refs = g_list_append(template_refs, xml_rsc);
-            }
-        }
-
-        /* Now free '<resource_ref id="template1"/>', and finally get:
-
-           <resource_set id="template1-order-0" sequential="true">
-             <resource_ref id="rsc1"/>
-             <resource_ref id="rsc2"/>
-             <resource_ref id="rsc3"/>
-             <resource_ref id="rsc4"/>
-           </resource_set>
-
-         */
-        for (gIter = template_refs; gIter != NULL; gIter = gIter->next) {
-            xmlNode *template_ref = gIter->data;
-            free_xml(template_ref);
-        }
-        g_list_free(template_refs);
-    }
-
-    if (any_refs) {
-        *expanded_xml = new_xml;
-    } else {
-	free_xml(new_xml);
-    }
-
-    return TRUE;
-}
-
-static gboolean
-template_to_set(xmlNode *xml_obj, xmlNode **rsc_set, const char *attr,
-		gboolean convert_rsc, pe_working_set_t *data_set)
-{
-    const char *cons_id = NULL;
-    const char *id = NULL;
-
-    resource_t *rsc = NULL;
-    
-    *rsc_set = NULL;
-
-    if(xml_obj == NULL) {
-	crm_config_err("No constraint object to process.");
-	return FALSE;
-    }
-
-    if(attr == NULL) {
-	crm_config_err("No attribute name to process.");
-	return FALSE;
-    }
-    
-    cons_id = crm_element_value(xml_obj, XML_ATTR_ID);
-    if(cons_id == NULL) {
-	crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
-	return FALSE;
-    }
-
-    id = crm_element_value(xml_obj, attr);
-    if(id == NULL) {
-	return TRUE;
-    }
-
-    rsc = pe_find_resource(data_set->resources, id);
-    if(rsc == NULL) {
-	xmlNode *template_rsc_set = g_hash_table_lookup(data_set->template_rsc_sets, id);
-
-	if(template_rsc_set == NULL) {
-	    crm_config_err("Invalid constraint '%s': No template named '%s'", cons_id, id);
-	    return FALSE;
-	}
-
-        /* A template is referenced by the "attr" attribute (first, then, rsc or with-rsc).
-           Add the template's corresponding "resource_set" which contains the primitives derived
-           from it under the constraint. */
-	*rsc_set = add_node_copy(xml_obj, template_rsc_set);
-
-        /* Set sequential="false" for the resource_set */
-	crm_xml_add(*rsc_set, "sequential", XML_BOOLEAN_FALSE);
-
-    } else if(convert_rsc) {
-        /* Even a regular resource is referenced by "attr", convert it into a resource_set.
-           Because the other side of the constraint could be a template reference. */
-	xmlNode *rsc_ref = NULL;
-
-	*rsc_set = create_xml_node(xml_obj, XML_CONS_TAG_RSC_SET);
-	crm_xml_add(*rsc_set, XML_ATTR_ID, id);
-
-	rsc_ref = create_xml_node(*rsc_set, XML_TAG_RESOURCE_REF);
-	crm_xml_add(rsc_ref, XML_ATTR_ID, id);
-
-    } else {
-	return TRUE;
-    }
-
-    /* Remove the "attr" attribute referencing the template */
-    if(*rsc_set) {
-	xml_remove_prop(xml_obj, attr);
-    }
-
-    return TRUE;
-}
-
-static gboolean
-unpack_order_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_set_t *data_set)
+unpack_order_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)
 {
     const char *id = NULL;
-    const char *id_first  = NULL;
-    const char *id_then  = NULL;
+    const char *id_first = NULL;
+    const char *id_then = NULL;
     const char *action_first = NULL;
     const char *action_then = NULL;
 
     resource_t *rsc_first = NULL;
     resource_t *rsc_then = NULL;
+    tag_t *tag_first = NULL;
+    tag_t *tag_then = NULL;
 
     xmlNode *new_xml = NULL;
     xmlNode *rsc_set_first = NULL;
@@ -1392,113 +1777,89 @@ unpack_order_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_set_t
 
     *expanded_xml = NULL;
 
-    if(xml_obj == NULL) {
-	crm_config_err("No constraint object to process.");
-	return FALSE;
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
     }
 
     id = crm_element_value(xml_obj, XML_ATTR_ID);
-    if(id == NULL) {
-	crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
-	return FALSE;
+    if (id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
     }
 
-    /* Attempt to expand any template references in possible resource sets. */
-    expand_templates_in_sets(xml_obj, &new_xml, data_set);
+    /* Attempt to expand any template/tag references in possible resource sets. */
+    expand_tags_in_sets(xml_obj, &new_xml, data_set);
     if (new_xml) {
-        /* There are resource sets referencing templates. Return with the expanded XML. */
-	crm_log_xml_trace(new_xml, "Expanded rsc_order...");
-	*expanded_xml = new_xml;
-	return TRUE;
+        /* There are resource sets referencing templates/tags. Return with the expanded XML. */
+        crm_log_xml_trace(new_xml, "Expanded rsc_order...");
+        *expanded_xml = new_xml;
+        return TRUE;
     }
 
     id_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST);
-    id_then  = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN);
-    if(id_first == NULL || id_then == NULL) {
-	return TRUE;
+    id_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN);
+    if (id_first == NULL || id_then == NULL) {
+        return TRUE;
     }
 
-    rsc_first = pe_find_resource(data_set->resources, id_first);
-    rsc_then = pe_find_resource(data_set->resources, id_then);
-    if(rsc_first && rsc_then) {
-        /* Neither side references any template. */
-	return TRUE;
+    if (valid_resource_or_tag(data_set, id_first, &rsc_first, &tag_first) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_first);
+        return FALSE;
     }
 
-    if (rsc_first == NULL) {
-        xmlNode *template_rsc_set_first = NULL;
-        gboolean rc = g_hash_table_lookup_extended(data_set->template_rsc_sets, id_first,
-                                                   NULL, (gpointer) &template_rsc_set_first);
-
-        if (rc == FALSE) {
-            crm_config_err("Invalid constraint '%s': No resource or template named '%s'", id, id_first);
-            return FALSE;
-
-        } else if (template_rsc_set_first == NULL) {
-            crm_config_warn("Constraint '%s': No resource is derived from template '%s'", id, id_first);
-            return FALSE;
-        }
+    if (valid_resource_or_tag(data_set, id_then, &rsc_then, &tag_then) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_then);
+        return FALSE;
     }
 
-    if (rsc_then == NULL) {
-        xmlNode *template_rsc_set_then = NULL;
-        gboolean rc = g_hash_table_lookup_extended(data_set->template_rsc_sets, id_then,
-                                                   NULL, (gpointer) &template_rsc_set_then);
-
-        if (rc == FALSE) {
-            crm_config_err("Invalid constraint '%s': No resource or template named '%s'", id, id_then);
-            return FALSE;
-
-        } else if (template_rsc_set_then == NULL) {
-            crm_config_warn("Constraint '%s': No resource is derived from template '%s'", id, id_then);
-            return FALSE;
-        }
+    if (rsc_first && rsc_then) {
+        /* Neither side references any template/tag. */
+        return TRUE;
     }
 
     action_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST_ACTION);
-    action_then  = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN_ACTION);
+    action_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN_ACTION);
 
     new_xml = copy_xml(xml_obj);
 
-    /* Convert the template reference in "first" into a resource_set under the order constraint. */
-    if(template_to_set(new_xml, &rsc_set_first, XML_ORDER_ATTR_FIRST,
-			    TRUE, data_set) == FALSE) {
-	free_xml(new_xml);
-	return FALSE;
+    /* Convert the template/tag reference in "first" into a resource_set under the order constraint. */
+    if (tag_to_set(new_xml, &rsc_set_first, XML_ORDER_ATTR_FIRST, TRUE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
     }
 
-    if(rsc_set_first) {
-	if(action_first) {
+    if (rsc_set_first) {
+        if (action_first) {
             /* A "first-action" is specified.
                Move it into the converted resource_set as an "action" attribute. */
-	    crm_xml_add(rsc_set_first, "action", action_first);
-	    xml_remove_prop(new_xml, XML_ORDER_ATTR_FIRST_ACTION);
-	}
-	any_sets = TRUE;
+            crm_xml_add(rsc_set_first, "action", action_first);
+            xml_remove_prop(new_xml, XML_ORDER_ATTR_FIRST_ACTION);
+        }
+        any_sets = TRUE;
     }
 
-    /* Convert the template reference in "then" into a resource_set under the order constraint. */
-    if(template_to_set(new_xml, &rsc_set_then, XML_ORDER_ATTR_THEN,
-			    TRUE, data_set) == FALSE) {
-	free_xml(new_xml);
-	return FALSE;
+    /* Convert the template/tag reference in "then" into a resource_set under the order constraint. */
+    if (tag_to_set(new_xml, &rsc_set_then, XML_ORDER_ATTR_THEN, TRUE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
     }
 
-    if(rsc_set_then) {
-	if(action_then) {
+    if (rsc_set_then) {
+        if (action_then) {
             /* A "then-action" is specified.
                Move it into the converted resource_set as an "action" attribute. */
-	    crm_xml_add(rsc_set_then, "action", action_then);
-	    xml_remove_prop(new_xml, XML_ORDER_ATTR_THEN_ACTION);
-	}
-	any_sets = TRUE;
+            crm_xml_add(rsc_set_then, "action", action_then);
+            xml_remove_prop(new_xml, XML_ORDER_ATTR_THEN_ACTION);
+        }
+        any_sets = TRUE;
     }
 
-    if(any_sets) {
-	crm_log_xml_trace(new_xml, "Expanded rsc_order...");
-	*expanded_xml = new_xml;
+    if (any_sets) {
+        crm_log_xml_trace(new_xml, "Expanded rsc_order...");
+        *expanded_xml = new_xml;
     } else {
-	free_xml(new_xml);
+        free_xml(new_xml);
     }
 
     return TRUE;
@@ -1547,10 +1908,10 @@ unpack_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
 
     invert_bool = crm_is_true(invert);
 
-    rc = unpack_order_template(xml_obj, &expanded_xml, data_set);
-    if(expanded_xml) {
-	orig_xml = xml_obj;
-	xml_obj = expanded_xml;
+    rc = unpack_order_tags(xml_obj, &expanded_xml, data_set);
+    if (expanded_xml) {
+        orig_xml = xml_obj;
+        xml_obj = expanded_xml;
 
     } else if (rc == FALSE) {
         return FALSE;
@@ -1600,13 +1961,14 @@ unpack_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
                    }
                  */
 
-            } else if ( /* never called -- Now call it for supporting clones in resource sets */
-                       last) {
+            } else if (         /* never called -- Now call it for supporting clones in resource sets */
+                          last) {
                 if (order_rsc_sets(id, last, set, kind, data_set, FALSE, invert_bool) == FALSE) {
                     return FALSE;
                 }
 
-                if (invert_bool && order_rsc_sets(id, set, last, kind, data_set, TRUE, invert_bool) == FALSE) {
+                if (invert_bool
+                    && order_rsc_sets(id, set, last, kind, data_set, TRUE, invert_bool) == FALSE) {
                     return FALSE;
                 }
 
@@ -1622,9 +1984,9 @@ unpack_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)
         }
     }
 
-    if(expanded_xml) {
-	free_xml(expanded_xml);
-	xml_obj = orig_xml;
+    if (expanded_xml) {
+        free_xml(expanded_xml);
+        xml_obj = orig_xml;
     }
 
     if (any_sets == FALSE) {
@@ -1643,6 +2005,7 @@ unpack_colocation_set(xmlNode * set, int score, pe_working_set_t * data_set)
     const char *set_id = ID(set);
     const char *role = crm_element_value(set, "role");
     const char *sequential = crm_element_value(set, "sequential");
+    const char *ordering = crm_element_value(set, "ordering");
     int local_score = score;
 
     const char *score_s = crm_element_value(set, XML_RULE_ATTR_SCORE);
@@ -1651,10 +2014,14 @@ unpack_colocation_set(xmlNode * set, int score, pe_working_set_t * data_set)
         local_score = char2score(score_s);
     }
 
+    if(ordering == NULL) {
+        ordering = "group";
+    }
+
     if (sequential != NULL && crm_is_true(sequential) == FALSE) {
         return TRUE;
 
-    } else if (local_score >= 0) {
+    } else if (local_score >= 0 && safe_str_eq(ordering, "group")) {
         for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
             if (crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
                 EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
@@ -1665,6 +2032,20 @@ unpack_colocation_set(xmlNode * set, int score, pe_working_set_t * data_set)
                 }
 
                 with = resource;
+            }
+        }
+    } else if (local_score >= 0) {
+        resource_t *last = NULL;
+        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
+            if (crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
+                EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
+                if (last != NULL) {
+                    pe_rsc_trace(resource, "Colocating %s with %s", last->id, resource->id);
+                    rsc_colocation_new(set_id, NULL, local_score, last, resource, role, role,
+                                       data_set);
+                }
+
+                last = resource;
             }
         }
 
@@ -1692,7 +2073,8 @@ unpack_colocation_set(xmlNode * set, int score, pe_working_set_t * data_set)
                             return FALSE;
                         }
                         EXPAND_CONSTRAINT_IDREF(set_id, with, ID(xml_rsc_with));
-                        pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id, with->id);
+                        pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id,
+                                     with->id);
                         rsc_colocation_new(set_id, NULL, local_score, resource, with, role, role,
                                            data_set);
                     }
@@ -1718,7 +2100,7 @@ colocate_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, int score,
     const char *sequential_1 = crm_element_value(set1, "sequential");
     const char *sequential_2 = crm_element_value(set2, "sequential");
 
-    if (crm_is_true(sequential_1)) {
+    if (sequential_1 == NULL || crm_is_true(sequential_1)) {
         /* get the first one */
         for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
             if (crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
@@ -1728,7 +2110,7 @@ colocate_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, int score,
         }
     }
 
-    if (crm_is_true(sequential_2)) {
+    if (sequential_2 == NULL || crm_is_true(sequential_2)) {
         /* get the last one */
         const char *rid = NULL;
 
@@ -1798,8 +2180,8 @@ unpack_simple_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)
 
     const char *symmetrical = crm_element_value(xml_obj, XML_CONS_ATTR_SYMMETRICAL);
 
-    resource_t *rsc_lh = pe_find_resource(data_set->resources, id_lh);
-    resource_t *rsc_rh = pe_find_resource(data_set->resources, id_rh);
+    resource_t *rsc_lh = pe_find_constraint_resource(data_set->resources, id_lh);
+    resource_t *rsc_rh = pe_find_constraint_resource(data_set->resources, id_rh);
 
     if (rsc_lh == NULL) {
         crm_config_err("Invalid constraint '%s': No resource named '%s'", id, id_lh);
@@ -1854,7 +2236,7 @@ unpack_simple_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)
 }
 
 static gboolean
-unpack_colocation_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_set_t *data_set)
+unpack_colocation_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)
 {
     const char *id = NULL;
     const char *id_lh = NULL;
@@ -1865,8 +2247,8 @@ unpack_colocation_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_
     resource_t *rsc_lh = NULL;
     resource_t *rsc_rh = NULL;
 
-    xmlNode *template_rsc_set_lh = NULL;
-    xmlNode *template_rsc_set_rh = NULL;
+    tag_t *tag_lh = NULL;
+    tag_t *tag_rh = NULL;
 
     xmlNode *new_xml = NULL;
     xmlNode *rsc_set_lh = NULL;
@@ -1875,71 +2257,52 @@ unpack_colocation_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_
 
     *expanded_xml = NULL;
 
-    if(xml_obj == NULL) {
-	crm_config_err("No constraint object to process.");
-	return FALSE;
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
     }
 
     id = crm_element_value(xml_obj, XML_ATTR_ID);
-    if(id == NULL) {
-	crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
-	return FALSE;
+    if (id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
     }
 
-    /* Attempt to expand any template references in possible resource sets. */
-    expand_templates_in_sets(xml_obj, &new_xml, data_set);
+    /* Attempt to expand any template/tag references in possible resource sets. */
+    expand_tags_in_sets(xml_obj, &new_xml, data_set);
     if (new_xml) {
-        /* There are resource sets referencing templates. Return with the expanded XML. */
-	crm_log_xml_trace(new_xml, "Expanded rsc_colocation...");
-	*expanded_xml = new_xml;
-	return TRUE;
+        /* There are resource sets referencing templates/tags. Return with the expanded XML. */
+        crm_log_xml_trace(new_xml, "Expanded rsc_colocation...");
+        *expanded_xml = new_xml;
+        return TRUE;
     }
 
     id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);
     id_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET);
-    if(id_lh == NULL || id_rh == NULL) {
-	return TRUE;
+    if (id_lh == NULL || id_rh == NULL) {
+        return TRUE;
     }
 
-    rsc_lh = pe_find_resource(data_set->resources, id_lh);
-    rsc_rh = pe_find_resource(data_set->resources, id_rh);
-    if(rsc_lh && rsc_rh) {
-        /* Neither side references any template. */
-	return TRUE;
+    if (valid_resource_or_tag(data_set, id_lh, &rsc_lh, &tag_lh) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_lh);
+        return FALSE;
     }
 
-    if (rsc_lh == NULL) {
-        gboolean rc = g_hash_table_lookup_extended(data_set->template_rsc_sets, id_lh,
-                                                   NULL, (gpointer) &template_rsc_set_lh);
-
-        if (rc == FALSE) {
-            crm_config_err("Invalid constraint '%s': No resource or template named '%s'", id, id_lh);
-            return FALSE;
-
-        } else if (template_rsc_set_lh == NULL) {
-            crm_config_warn("Constraint '%s': No resource is derived from template '%s'", id, id_lh);
-            return FALSE;
-        }
+    if (valid_resource_or_tag(data_set, id_rh, &rsc_rh, &tag_rh) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_rh);
+        return FALSE;
     }
 
-    if (rsc_rh == NULL) {
-        gboolean rc = g_hash_table_lookup_extended(data_set->template_rsc_sets, id_rh,
-                                                   NULL, (gpointer) &template_rsc_set_rh);
-
-        if (rc == FALSE) {
-            crm_config_err("Invalid constraint '%s': No resource or template named '%s'", id, id_rh);
-            return FALSE;
-
-        } else if (template_rsc_set_rh == NULL) {
-            crm_config_warn("Constraint '%s': No resource is derived from template '%s'", id, id_rh);
-            return FALSE;
-        }
+    if (rsc_lh && rsc_rh) {
+        /* Neither side references any template/tag. */
+        return TRUE;
     }
 
-    if(template_rsc_set_lh && template_rsc_set_rh) {
-        /* A colocation constraint between two templates makes no sense. */
-	crm_config_err("Either LHS or RHS of %s should be a normal resource instead of a template",  id);
-	return FALSE;
+    if (tag_lh && tag_rh) {
+        /* A colocation constraint between two templates/tags makes no sense. */
+        crm_config_err("Either LHS or RHS of %s should be a normal resource instead of a template/tag",
+                       id);
+        return FALSE;
     }
 
     state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);
@@ -1947,45 +2310,43 @@ unpack_colocation_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_
 
     new_xml = copy_xml(xml_obj);
 
-    /* Convert the template reference in "rsc" into a resource_set under the colocation constraint. */
-    if(template_to_set(new_xml, &rsc_set_lh, XML_COLOC_ATTR_SOURCE,
-			    TRUE, data_set) == FALSE) {
-	free_xml(new_xml);
-	return FALSE;
+    /* Convert the template/tag reference in "rsc" into a resource_set under the colocation constraint. */
+    if (tag_to_set(new_xml, &rsc_set_lh, XML_COLOC_ATTR_SOURCE, TRUE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
     }
 
-    if(rsc_set_lh) {
-	if(state_lh) {
+    if (rsc_set_lh) {
+        if (state_lh) {
             /* A "rsc-role" is specified.
                Move it into the converted resource_set as a "role"" attribute. */
-	    crm_xml_add(rsc_set_lh, "role", state_lh);
-	    xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);
-	}
-	any_sets = TRUE;
+            crm_xml_add(rsc_set_lh, "role", state_lh);
+            xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);
+        }
+        any_sets = TRUE;
     }
 
-    /* Convert the template reference in "with-rsc" into a resource_set under the colocation constraint. */
-    if(template_to_set(new_xml, &rsc_set_rh, XML_COLOC_ATTR_TARGET,
-			    TRUE, data_set) == FALSE) {
-	free_xml(new_xml);
-	return FALSE;
+    /* Convert the template/tag reference in "with-rsc" into a resource_set under the colocation constraint. */
+    if (tag_to_set(new_xml, &rsc_set_rh, XML_COLOC_ATTR_TARGET, TRUE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
     }
 
-    if(rsc_set_rh) {
-	if(state_rh) {
+    if (rsc_set_rh) {
+        if (state_rh) {
             /* A "with-rsc-role" is specified.
                Move it into the converted resource_set as a "role"" attribute. */
-	    crm_xml_add(rsc_set_rh, "role", state_rh);
-	    xml_remove_prop(new_xml, XML_COLOC_ATTR_TARGET_ROLE);
-	}
-	any_sets = TRUE;
+            crm_xml_add(rsc_set_rh, "role", state_rh);
+            xml_remove_prop(new_xml, XML_COLOC_ATTR_TARGET_ROLE);
+        }
+        any_sets = TRUE;
     }
 
-    if(any_sets) {
-	crm_log_xml_trace(new_xml, "Expanded rsc_colocation...");
-	*expanded_xml = new_xml;
+    if (any_sets) {
+        crm_log_xml_trace(new_xml, "Expanded rsc_colocation...");
+        *expanded_xml = new_xml;
     } else {
-	free_xml(new_xml);
+        free_xml(new_xml);
     }
 
     return TRUE;
@@ -2011,15 +2372,15 @@ unpack_rsc_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)
         score_i = char2score(score);
     }
 
-    rc = unpack_colocation_template(xml_obj, &expanded_xml, data_set);
-    if(expanded_xml) {
-	orig_xml = xml_obj;
-	xml_obj = expanded_xml;
+    rc = unpack_colocation_tags(xml_obj, &expanded_xml, data_set);
+    if (expanded_xml) {
+        orig_xml = xml_obj;
+        xml_obj = expanded_xml;
 
     } else if (rc == FALSE) {
         return FALSE;
     }
- 
+
     for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next(set)) {
         if (crm_str_eq((const char *)set->name, XML_CONS_TAG_RSC_SET, TRUE)) {
             any_sets = TRUE;
@@ -2034,9 +2395,9 @@ unpack_rsc_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)
         }
     }
 
-    if(expanded_xml) {
-	free_xml(expanded_xml);
-	xml_obj = orig_xml;
+    if (expanded_xml) {
+        free_xml(expanded_xml);
+        xml_obj = orig_xml;
     }
 
     if (any_sets == FALSE) {
@@ -2110,11 +2471,16 @@ rsc_ticket_new(const char *id, resource_t * rsc_lh, ticket_t * ticket,
         }
     }
 
-    pe_rsc_trace(rsc_lh, "%s (%s) ==> %s", rsc_lh->id, role2text(new_rsc_ticket->role_lh), ticket->id);
+    pe_rsc_trace(rsc_lh, "%s (%s) ==> %s", rsc_lh->id, role2text(new_rsc_ticket->role_lh),
+                 ticket->id);
 
     rsc_lh->rsc_tickets = g_list_append(rsc_lh->rsc_tickets, new_rsc_ticket);
 
     data_set->ticket_constraints = g_list_append(data_set->ticket_constraints, new_rsc_ticket);
+
+    if (new_rsc_ticket->ticket->granted == FALSE || new_rsc_ticket->ticket->standby) {
+        rsc_ticket_constraint(rsc_lh, new_rsc_ticket, data_set);
+    }
 
     return TRUE;
 }
@@ -2146,7 +2512,8 @@ unpack_rsc_ticket_set(xmlNode * set, ticket_t * ticket, const char *loss_policy,
     for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next(xml_rsc)) {
         if (crm_str_eq((const char *)xml_rsc->name, XML_TAG_RESOURCE_REF, TRUE)) {
             EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
-            pe_rsc_trace(resource, "Resource '%s' depends on ticket '%s'", resource->id, ticket->id);
+            pe_rsc_trace(resource, "Resource '%s' depends on ticket '%s'", resource->id,
+                         ticket->id);
             rsc_ticket_new(set_id, resource, ticket, role, loss_policy, data_set);
         }
     }
@@ -2195,7 +2562,7 @@ unpack_simple_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)
         crm_config_err("Invalid constraint '%s': No resource specified", id);
         return FALSE;
     } else {
-        rsc_lh = pe_find_resource(data_set->resources, id_lh);
+        rsc_lh = pe_find_constraint_resource(data_set->resources, id_lh);
     }
 
     if (rsc_lh == NULL) {
@@ -2223,15 +2590,14 @@ unpack_simple_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)
 }
 
 static gboolean
-unpack_rsc_ticket_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_set_t *data_set)
+unpack_rsc_ticket_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)
 {
     const char *id = NULL;
     const char *id_lh = NULL;
     const char *state_lh = NULL;
 
     resource_t *rsc_lh = NULL;
-
-    xmlNode *template_rsc_set_lh = NULL;
+    tag_t *tag_lh = NULL;
 
     xmlNode *new_xml = NULL;
     xmlNode *rsc_set_lh = NULL;
@@ -2239,73 +2605,65 @@ unpack_rsc_ticket_template(xmlNode *xml_obj, xmlNode **expanded_xml, pe_working_
 
     *expanded_xml = NULL;
 
-    if(xml_obj == NULL) {
-	crm_config_err("No constraint object to process.");
-	return FALSE;
+    if (xml_obj == NULL) {
+        crm_config_err("No constraint object to process.");
+        return FALSE;
     }
 
     id = crm_element_value(xml_obj, XML_ATTR_ID);
-    if(id == NULL) {
-	crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
-	return FALSE;
+    if (id == NULL) {
+        crm_config_err("%s constraint must have an id", crm_element_name(xml_obj));
+        return FALSE;
     }
 
-    /* Attempt to expand any template references in possible resource sets. */
-    expand_templates_in_sets(xml_obj, &new_xml, data_set);
+    /* Attempt to expand any template/tag references in possible resource sets. */
+    expand_tags_in_sets(xml_obj, &new_xml, data_set);
     if (new_xml) {
-        /* There are resource sets referencing templates. Return with the expanded XML. */
-	crm_log_xml_trace(new_xml, "Expanded rsc_ticket...");
-	*expanded_xml = new_xml;
-	return TRUE;
+        /* There are resource sets referencing templates/tags. Return with the expanded XML. */
+        crm_log_xml_trace(new_xml, "Expanded rsc_ticket...");
+        *expanded_xml = new_xml;
+        return TRUE;
     }
 
     id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);
-    if(id_lh == NULL) {
-	return TRUE;
+    if (id_lh == NULL) {
+        return TRUE;
     }
 
-    rsc_lh = pe_find_resource(data_set->resources, id_lh);
-    if(rsc_lh) {
-        /* No template is referenced. */
-	return TRUE;
-    }
-
-    if(g_hash_table_lookup_extended(data_set->template_rsc_sets, id_lh,
-                                    NULL, (gpointer) &template_rsc_set_lh) == FALSE) {
-        crm_config_err("Invalid constraint '%s': No resource or template named '%s'", id, id_lh);
-	return FALSE;
-
-    } else if (template_rsc_set_lh == NULL) {
-        crm_config_warn("Constraint '%s': No resource is derived from template '%s'", id, id_lh);
+    if (valid_resource_or_tag(data_set, id_lh, &rsc_lh, &tag_lh) == FALSE) {
+        crm_config_err("Constraint '%s': Invalid reference to '%s'", id, id_lh);
         return FALSE;
+
+    } else if (rsc_lh) {
+        /* No template/tag is referenced. */
+        return TRUE;
     }
 
     state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);
 
     new_xml = copy_xml(xml_obj);
 
-    /* Convert the template reference in "rsc" into a resource_set under the rsc_ticket constraint. */
-    if(template_to_set(new_xml, &rsc_set_lh, XML_COLOC_ATTR_SOURCE,
-			    FALSE, data_set) == FALSE) {
-	free_xml(new_xml);
-	return FALSE;
+    /* Convert the template/tag reference in "rsc" into a resource_set under the rsc_ticket constraint. */
+    if (tag_to_set(new_xml, &rsc_set_lh, XML_COLOC_ATTR_SOURCE, FALSE, data_set) == FALSE) {
+        free_xml(new_xml);
+        return FALSE;
     }
 
-    if(rsc_set_lh) {
-	if(state_lh) {
+    if (rsc_set_lh) {
+        if (state_lh) {
             /* A "rsc-role" is specified.
                Move it into the converted resource_set as a "role"" attribute. */
-	    crm_xml_add(rsc_set_lh, "role", state_lh);
-	    xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);
-	}
-	any_sets = TRUE;
+            crm_xml_add(rsc_set_lh, "role", state_lh);
+            xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);
+        }
+        any_sets = TRUE;
     }
 
-    if(any_sets) {
-	crm_log_xml_trace(new_xml, "Expanded rsc_ticket...");
-	*expanded_xml = new_xml;
+    if (any_sets) {
+        crm_log_xml_trace(new_xml, "Expanded rsc_ticket...");
+        *expanded_xml = new_xml;
     } else {
-	free_xml(new_xml);
+        free_xml(new_xml);
     }
 
     return TRUE;
@@ -2338,6 +2696,11 @@ unpack_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)
         return FALSE;
     }
 
+    if (data_set->tickets == NULL) {                                                                  
+        data_set->tickets =                                                                           
+            g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, destroy_ticket);
+    }  
+
     if (ticket_str == NULL) {
         crm_config_err("Invalid constraint '%s': No ticket specified", id);
         return FALSE;
@@ -2352,10 +2715,10 @@ unpack_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)
         }
     }
 
-    rc = unpack_rsc_ticket_template(xml_obj, &expanded_xml, data_set);
-    if(expanded_xml) {
-	orig_xml = xml_obj;
-	xml_obj = expanded_xml;
+    rc = unpack_rsc_ticket_tags(xml_obj, &expanded_xml, data_set);
+    if (expanded_xml) {
+        orig_xml = xml_obj;
+        xml_obj = expanded_xml;
 
     } else if (rc == FALSE) {
         return FALSE;
@@ -2371,9 +2734,9 @@ unpack_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)
         }
     }
 
-    if(expanded_xml) {
-	free_xml(expanded_xml);
-	xml_obj = orig_xml;
+    if (expanded_xml) {
+        free_xml(expanded_xml);
+        xml_obj = orig_xml;
     }
 
     if (any_sets == FALSE) {

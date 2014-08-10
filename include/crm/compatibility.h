@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2012 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -32,6 +32,9 @@
 #  define CRMD_STATE_ACTIVE            CRMD_JOINSTATE_MEMBER
 #  define CRMD_STATE_INACTIVE          CRMD_JOINSTATE_DOWN
 
+#define pcmk_err_dtd_validation pcmk_err_schema_validation
+
+/* *INDENT-OFF* */
 enum cib_errors {
     cib_ok			=  pcmk_ok,
     cib_operation		= -EINVAL,
@@ -66,7 +69,7 @@ enum cib_errors {
     cib_diff_failed		= -pcmk_err_diff_failed,
     cib_diff_resync		= -pcmk_err_diff_resync,
     cib_old_data		= -pcmk_err_old_data,
-    cib_dtd_validation  	= -pcmk_err_dtd_validation,
+    cib_dtd_validation  	= -pcmk_err_schema_validation,
     cib_bad_section		= -EINVAL,
     cib_bad_permissions         = -EACCES,
     cib_invalid_argument	= -EINVAL,
@@ -112,10 +115,11 @@ enum lrmd_errors {
     lrmd_err_stonith_connection  = -EUNATCH,
     lrmd_err_provider_required   = -EINVAL,
 };
+/* *INDENT-ON* */
 
-#define stonith_error2string pcmk_strerror
-#define lrmd_error2string    pcmk_strerror
-#define cib_error2string     pcmk_strerror
+#  define stonith_error2string pcmk_strerror
+#  define lrmd_error2string    pcmk_strerror
+#  define cib_error2string     pcmk_strerror
 
 static inline void
 slist_basic_destroy(GListPtr list)
@@ -154,7 +158,7 @@ slist_basic_destroy(GListPtr list)
 	CRM_ASSERT(realloc_obj != NULL);				\
     } while(0)
 
-#define crm_free(free_obj) do { free(free_obj); free_obj=NULL; } while(0)
+#  define crm_free(free_obj) do { free(free_obj); free_obj=NULL; } while(0)
 
 /* These two child iterator macros are no longer to be used
  * They exist for compatability reasons and will be removed in a
@@ -223,11 +227,18 @@ slist_basic_destroy(GListPtr list)
 
 #  define zap_xml_from_parent(parent, xml_obj) free_xml(xml_obj); xml_obj = NULL
 
-static inline void free_xml_from_parent(xmlNode * parent, xmlNode * a_node)
+/* For ABI compatability with version < 1.1.4 */
+static inline char *
+calculate_xml_digest(xmlNode * input, gboolean sort, gboolean do_filter)
+{
+    return calculate_xml_digest_v1(input, sort, do_filter);
+}
+
+static inline void
+free_xml_from_parent(xmlNode * parent, xmlNode * a_node)
 {
     free_xml(a_node);
 }
-
 
 /* Use something like this instead of the next macro:
 
@@ -250,18 +261,18 @@ static inline void free_xml_from_parent(xmlNode * parent, xmlNode * a_node)
 
 #  ifdef CRM_ATTRD__H
 static inline gboolean
-attrd_update(crm_ipc_t *cluster, char command, const char *host, const char *name,
+attrd_update(crm_ipc_t * cluster, char command, const char *host, const char *name,
              const char *value, const char *section, const char *set, const char *dampen)
 {
-    return attrd_update_delegate(cluster, command, host, name, value, section, set, dampen, NULL) > 0;
+    return attrd_update_delegate(cluster, command, host, name, value, section, set, dampen,
+                                 NULL, FALSE) > 0;
 }
 
 static inline gboolean
 attrd_lazy_update(char command, const char *host, const char *name,
-                  const char *value, const char *section, const char *set,
-                  const char *dampen)
+                  const char *value, const char *section, const char *set, const char *dampen)
 {
-    return attrd_update_delegate(NULL, command, host, name, value, section, set, dampen, NULL) > 0;
+    return attrd_update_delegate(NULL, command, host, name, value, section, set, dampen, NULL, FALSE) > 0;
 }
 
 static inline gboolean
@@ -269,18 +280,18 @@ attrd_update_no_mainloop(int *connection, char command, const char *host,
                          const char *name, const char *value, const char *section,
                          const char *set, const char *dampen)
 {
-    return attrd_update_delegate(NULL, command, host, name, value, section, set, dampen, NULL) > 0;
+    return attrd_update_delegate(NULL, command, host, name, value, section, set, dampen, NULL, FALSE) > 0;
 }
 #  endif
 
-# ifdef CIB_UTIL__H
+#  ifdef CIB_UTIL__H
 static inline int
 update_attr(cib_t * the_cib, int call_options,
             const char *section, const char *node_uuid, const char *set_type, const char *set_name,
             const char *attr_id, const char *attr_name, const char *attr_value, gboolean to_console)
 {
     return update_attr_delegate(the_cib, call_options, section, node_uuid, set_type, set_name,
-                                attr_id, attr_name, attr_value, to_console, NULL);
+                                attr_id, attr_name, attr_value, to_console, NULL, NULL);
 }
 
 static inline int
@@ -308,6 +319,28 @@ delete_attr(cib_t * the_cib, int options,
 {
     return delete_attr_delegate(the_cib, options, section, node_uuid, set_type, set_name,
                                 attr_id, attr_name, attr_value, to_console, NULL);
+}
+
+static inline void
+log_cib_diff(int log_level, xmlNode * diff, const char *function)
+{
+    xml_log_patchset(log_level, function, diff);
+}
+
+static inline gboolean
+apply_cib_diff(xmlNode * old, xmlNode * diff, xmlNode ** new)
+{
+    *new = copy_xml(old);
+    return (xml_apply_patchset(*new, diff, TRUE) == pcmk_ok);
+}
+
+#  endif
+
+#  ifdef CRM_COMMON_XML__H
+void
+log_xml_diff(uint8_t log_level, xmlNode * diff, const char *function)
+{
+    xml_log_patchset(log_level, function, diff);
 }
 #  endif
 

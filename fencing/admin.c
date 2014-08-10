@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2009 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -62,6 +62,7 @@ static struct crm_option long_options[] = {
     {"reboot",      1, 0, 'B', "Reboot the named host"},
     {"confirm",     1, 0, 'C', "Confirm the named host is now safely down"},
     {"history",     1, 0, 'H', "Retrieve last fencing operation"},
+    {"last",        1, 0, 'h', "Indicate when the named node was last fenced. Optional: --as-node-id"},
 
     {"-spacer-",    0, 0, '-', ""},
     {"register",    1, 0, 'R', "Register the named stonith device. Requires: --agent, optional: --option"},
@@ -75,12 +76,15 @@ static struct crm_option long_options[] = {
     {"agent",       1, 0, 'a', "The agent (eg. fence_xvm) to instantiate when calling with --register"},
     {"env-option",  1, 0, 'e'},
     {"option",      1, 0, 'o'},
+    {"tag",         1, 0, 'T', "Identify fencing operations with the specified tag.\n\t"
+     "Useful when there are multiple entities that might be invoking stonith_admin(8)"},
 
     {"device",      1, 0, 'v', "A device to associate with a given host and stonith level"},
     {"index",       1, 0, 'i', "The stonith level (1-9)"},
 
     {"timeout",     1, 0, 't', "Operation timeout in seconds"},
-    {"tolerance",   1, 0, 0, "(Advanced) Do nothing if an equivalent --fence request succeeded less than N seconds earlier" },
+    {"as-node-id",  0, 0, 'n', "(Advanced) The supplied node is the corosync nodeid (Only for use with --last)" },
+    {"tolerance",   1, 0,   0, "(Advanced) Do nothing if an equivalent --fence request succeeded less than N seconds earlier" },
 
     {"list-all",    0, 0, 'L', "legacy alias for --list-registered"},
 
@@ -88,13 +92,14 @@ static struct crm_option long_options[] = {
 };
 /* *INDENT-ON* */
 
-int st_opts = st_opt_sync_call|st_opt_allow_suicide;
+int st_opts = st_opt_sync_call | st_opt_allow_suicide;
 
 GMainLoop *mainloop = NULL;
 struct {
     stonith_t *st;
     const char *target;
     const char *action;
+    char *name;
     int timeout;
     int tolerance;
     int rc;
@@ -109,7 +114,8 @@ try_mainloop_connect(void)
     int rc = 0;
 
     for (i = 0; i < tries; i++) {
-        rc = st->cmds->connect(st, crm_system_name, NULL);
+        crm_debug("Connecting as %s", async_fence_data.name);
+        rc = st->cmds->connect(st, async_fence_data.name, NULL);
 
         if (!rc) {
             crm_debug("stonith client connection established");
@@ -125,7 +131,7 @@ try_mainloop_connect(void)
 }
 
 static void
-notify_callback(stonith_t *st, stonith_event_t *e)
+notify_callback(stonith_t * st, stonith_event_t * e)
 {
     if (e->result != pcmk_ok) {
         return;
@@ -140,7 +146,7 @@ notify_callback(stonith_t *st, stonith_event_t *e)
 }
 
 static void
-fence_callback(stonith_t * stonith, stonith_callback_data_t *data)
+fence_callback(stonith_t * stonith, stonith_callback_data_t * data)
 {
     async_fence_data.rc = data->rc;
 
@@ -161,32 +167,26 @@ async_fence_helper(gpointer user_data)
     st->cmds->register_notification(st, T_STONITH_NOTIFY_FENCE, notify_callback);
 
     call_id = st->cmds->fence(st,
-        st_opt_allow_suicide,
-        async_fence_data.target,
-        async_fence_data.action,
-        async_fence_data.timeout,
-        async_fence_data.tolerance
-        );
+                              st_opt_allow_suicide,
+                              async_fence_data.target,
+                              async_fence_data.action,
+                              async_fence_data.timeout, async_fence_data.tolerance);
 
     if (call_id < 0) {
         g_main_loop_quit(mainloop);
         return TRUE;
     }
 
-    st->cmds->register_callback(
-            st,
-            call_id,
-            async_fence_data.timeout,
-            st_opt_timeout_updates,
-            NULL,
-            "callback",
-            fence_callback);
+    st->cmds->register_callback(st,
+                                call_id,
+                                async_fence_data.timeout,
+                                st_opt_timeout_updates, NULL, "callback", fence_callback);
 
     return TRUE;
 }
 
 static int
-mainloop_fencing(stonith_t *st, const char *target, const char *action, int timeout, int tolerance)
+mainloop_fencing(stonith_t * st, const char *target, const char *action, int timeout, int tolerance)
 {
     crm_trigger_t *trig;
 
@@ -207,7 +207,7 @@ mainloop_fencing(stonith_t *st, const char *target, const char *action, int time
 }
 
 int
-main(int argc, char ** argv)
+main(int argc, char **argv)
 {
     int flag;
     int rc = 0;
@@ -219,9 +219,10 @@ main(int argc, char ** argv)
     int fence_level = 0;
     int no_connect = 0;
     int tolerance = 0;
+    int as_nodeid = FALSE;
 
-    char name[512];
-    char value[512];
+    char *name = NULL;
+    char *value = NULL;
     const char *agent = NULL;
     const char *device = NULL;
     const char *target = NULL;
@@ -235,109 +236,121 @@ main(int argc, char ** argv)
 
     crm_log_cli_init("stonith_admin");
     crm_set_options(NULL, "mode [options]", long_options,
-        "Provides access to the stonith-ng API.\n"
-        "\nAllows the administrator to add/remove/list devices, check device and host status and fence hosts\n");
+                    "Provides access to the stonith-ng API.\n"
+                    "\nAllows the administrator to add/remove/list devices, check device and host status and fence hosts\n");
+
+    async_fence_data.name = strdup(crm_system_name);
 
     while (1) {
         flag = crm_get_option_long(argc, argv, &option_index, &longname);
         if (flag == -1)
             break;
 
-        switch(flag) {
-        case 'V':
-            verbose = 1;
-            crm_bump_log_level(argc, argv);
-            break;
-        case '$':
-        case '?':
-            crm_help(flag, EX_OK);
-            break;
-        case 'I':
-            no_connect = 1;
-            /* fall through */
-        case 'L':
-            action = flag;
-            break;
-        case 'q':
-            quiet = 1;
-            break;
-        case 'Q':
-        case 'R':
-        case 'D':
-            action = flag;
-            device = optarg;
-            break;
-        case 'a':
-            agent = optarg;
-            break;
-        case 'l':
-            target = optarg;
-            action = 'L';
-            break;
-        case 'M':
-            no_connect = 1;
-            action = flag;
-            break;
-        case 't':
-            timeout = crm_atoi(optarg, NULL);
-            break;
-        case 'B':
-        case 'F':
-        case 'U':
-            /* using mainloop here */
-            no_connect = 1;
-            /* fall through */
-        case 'C':
-            /* Always log the input arguments */
-            crm_log_args(argc, argv);
-            target = optarg;
-            action = flag;
-            break;
-        case 'H':
-        case 'r':
-        case 'd':
-            target = optarg;
-            action = flag;
-            break;
-        case 'i':
-            fence_level = crm_atoi(optarg, NULL);
-            break;
-        case 'v':
-            devices = stonith_key_value_add(devices, NULL, optarg);
-            break;
-        case 'o':
-            crm_info("Scanning: -o %s", optarg);
-            rc = sscanf(optarg, "%[^=]=%[^=]", name, value);
-            if(rc != 2) {
-                crm_err("Invalid option: -o %s", optarg);
-                ++argerr;
-            } else {
-                crm_info("Got: '%s'='%s'", name, value);
-                params = stonith_key_value_add(params, name, value);
-            }
-            break;
-        case 'e':
-            {
-                char *key = crm_concat("OCF_RESKEY", optarg, '_');
-                const char *env = getenv(key);
-
-                if(env == NULL) {
-                    crm_err("Invalid option: -e %s", optarg);
+        switch (flag) {
+            case 'V':
+                verbose = 1;
+                crm_bump_log_level(argc, argv);
+                break;
+            case '$':
+            case '?':
+                crm_help(flag, EX_OK);
+                break;
+            case 'I':
+                no_connect = 1;
+                /* fall through */
+            case 'L':
+                action = flag;
+                break;
+            case 'q':
+                quiet = 1;
+                break;
+            case 'Q':
+            case 'R':
+            case 'D':
+                action = flag;
+                device = optarg;
+                break;
+            case 'T':
+                free(async_fence_data.name);
+                async_fence_data.name = g_strdup_printf("%s.%s", crm_system_name, optarg);
+                break;
+            case 'a':
+                agent = optarg;
+                break;
+            case 'l':
+                target = optarg;
+                action = 'L';
+                break;
+            case 'M':
+                no_connect = 1;
+                action = flag;
+                break;
+            case 't':
+                timeout = crm_atoi(optarg, NULL);
+                break;
+            case 'B':
+            case 'F':
+            case 'U':
+                /* using mainloop here */
+                no_connect = 1;
+                /* fall through */
+            case 'C':
+                /* Always log the input arguments */
+                crm_log_args(argc, argv);
+                target = optarg;
+                action = flag;
+                break;
+            case 'n':
+                as_nodeid = TRUE;
+                break;
+            case 'h':
+            case 'H':
+            case 'r':
+            case 'd':
+                target = optarg;
+                action = flag;
+                break;
+            case 'i':
+                fence_level = crm_atoi(optarg, NULL);
+                break;
+            case 'v':
+                devices = stonith_key_value_add(devices, NULL, optarg);
+                break;
+            case 'o':
+                crm_info("Scanning: -o %s", optarg);
+                rc = sscanf(optarg, "%m[^=]=%m[^=]", &name, &value);
+                if (rc != 2) {
+                    crm_err("Invalid option: -o %s", optarg);
                     ++argerr;
                 } else {
-                    crm_info("Got: '%s'='%s'", optarg, env);
-                    params = stonith_key_value_add( params, optarg, env);
+                    crm_info("Got: '%s'='%s'", name, value);
+                    params = stonith_key_value_add(params, name, value);
                 }
-            }
-            break;
-        case 0:
-            if(safe_str_eq("tolerance", longname)) {
-                tolerance = crm_get_msec(optarg) / 1000; /* Send in seconds */
-            }
-            break;
-        default:
-            ++argerr;
-            break;
+                free(value); value = NULL;
+                free(name); name = NULL;
+                break;
+            case 'e':
+                {
+                    char *key = crm_concat("OCF_RESKEY", optarg, '_');
+                    const char *env = getenv(key);
+
+                    if (env == NULL) {
+                        crm_err("Invalid option: -e %s", optarg);
+                        ++argerr;
+                    } else {
+                        crm_info("Got: '%s'='%s'", optarg, env);
+                        params = stonith_key_value_add(params, optarg, env);
+                    }
+                }
+                break;
+            case 0:
+                if (safe_str_eq("tolerance", longname)) {
+                    tolerance = crm_get_msec(optarg) / 1000;    /* Send in seconds */
+                }
+                break;
+            default:
+                ++argerr;
+                break;
         }
     }
 
@@ -351,158 +364,182 @@ main(int argc, char ** argv)
 
     crm_debug("Create");
     st = stonith_api_new();
+    crm_debug("Created");
 
-    if(!no_connect) {
-        rc = st->cmds->connect(st, crm_system_name, NULL);
+    if (!no_connect) {
+        crm_debug("Connecting as %s", async_fence_data.name);
+        rc = st->cmds->connect(st, async_fence_data.name, NULL);
+
         crm_debug("Connect: %d", rc);
 
-        if(rc < 0) {
+        if (rc < 0) {
             goto done;
         }
     }
 
-    switch(action) {
-    case 'I':
-        rc = st->cmds->list_agents(st, st_opt_sync_call, NULL, &devices, timeout);
-        for(dIter = devices; dIter; dIter = dIter->next ) {
-            fprintf( stdout, " %s\n", dIter->value );
-        }
-        if(rc == 0) {
-            fprintf(stderr, "No devices found\n");
-
-        } else if(rc > 0) {
-            fprintf(stderr, "%d devices found\n", rc);
-            rc = 0;
-        }
-        stonith_key_value_freeall(devices, 1, 1);
-        break;
-    case 'L':
-        rc = st->cmds->query(st, st_opts, target, &devices, timeout);
-        for(dIter = devices; dIter; dIter = dIter->next ) {
-            fprintf( stdout, " %s\n", dIter->value );
-        }
-        if(rc == 0) {
-            fprintf(stderr, "No devices found\n");
-        } else if(rc > 0) {
-            fprintf(stderr, "%d devices found\n", rc);
-            rc = 0;
-        }
-        stonith_key_value_freeall(devices, 1, 1);
-        break;
-    case 'Q':
-        rc = st->cmds->monitor(st, st_opts, device, timeout);
-        if(rc < 0) {
-            rc = st->cmds->list(st, st_opts, device, NULL, timeout);
-        }
-        break;
-    case 'R':
-        rc = st->cmds->register_device(st, st_opts, device, "stonith-ng",
-                agent, params);
-        break;
-    case 'D':
-        rc = st->cmds->remove_device(st, st_opts, device);
-        break;
-    case 'r':
-        rc = st->cmds->register_level(st, st_opts, target, fence_level, devices);
-        break;
-    case 'd':
-        rc = st->cmds->remove_level(st, st_opts, target, fence_level);
-        break;
-    case 'M':
-        if (agent == NULL) {
-            printf("Please specify an agent to query using -a,--agent [value]\n");
-            return -1;
-        } else {
-            char *buffer = NULL;
-            rc = st->cmds->metadata(st, st_opt_sync_call, agent, NULL, &buffer, timeout);
-            if(rc == pcmk_ok) {
-                printf("%s\n", buffer);
+    switch (action) {
+        case 'I':
+            rc = st->cmds->list_agents(st, st_opt_sync_call, NULL, &devices, timeout);
+            for (dIter = devices; dIter; dIter = dIter->next) {
+                fprintf(stdout, " %s\n", dIter->value);
             }
-            free(buffer);
-        }
-        break;
-    case 'C':
-        rc = st->cmds->confirm(st, st_opts, target);
-        break;
-    case 'B':
-        rc = mainloop_fencing(st, target, "reboot", timeout, tolerance);
-        break;
-    case 'F':
-        rc = mainloop_fencing(st, target, "off", timeout, tolerance);
-        break;
-    case 'U':
-        rc = mainloop_fencing(st, target, "on", timeout, tolerance);
-        break;
-    case 'H':
-    {
-        stonith_history_t *history, *hp, *latest = NULL;
-        rc = st->cmds->history(st, st_opts, target, &history, timeout);
-        for(hp = history; hp; hp = hp->next) {
-            char *action_s = NULL;
-            time_t complete = hp->completed;
+            if (rc == 0) {
+                fprintf(stderr, "No devices found\n");
 
-            if(hp->state == st_done) {
-                latest = hp;
+            } else if (rc > 0) {
+                fprintf(stderr, "%d devices found\n", rc);
+                rc = 0;
             }
-
-            if(quiet || !verbose) {
-                continue;
-            } else if(hp->action == NULL) {
-                action_s = strdup("unknown");
-            } else if(hp->action[0] != 'r') {
-                action_s = crm_concat("turn", hp->action, ' ');
+            stonith_key_value_freeall(devices, 1, 1);
+            break;
+        case 'L':
+            rc = st->cmds->query(st, st_opts, target, &devices, timeout);
+            for (dIter = devices; dIter; dIter = dIter->next) {
+                fprintf(stdout, " %s\n", dIter->value);
+            }
+            if (rc == 0) {
+                fprintf(stderr, "No devices found\n");
+            } else if (rc > 0) {
+                fprintf(stderr, "%d devices found\n", rc);
+                rc = 0;
+            }
+            stonith_key_value_freeall(devices, 1, 1);
+            break;
+        case 'Q':
+            rc = st->cmds->monitor(st, st_opts, device, timeout);
+            if (rc < 0) {
+                rc = st->cmds->list(st, st_opts, device, NULL, timeout);
+            }
+            break;
+        case 'R':
+            rc = st->cmds->register_device(st, st_opts, device, "stonith-ng", agent, params);
+            break;
+        case 'D':
+            rc = st->cmds->remove_device(st, st_opts, device);
+            break;
+        case 'r':
+            rc = st->cmds->register_level(st, st_opts, target, fence_level, devices);
+            break;
+        case 'd':
+            rc = st->cmds->remove_level(st, st_opts, target, fence_level);
+            break;
+        case 'M':
+            if (agent == NULL) {
+                printf("Please specify an agent to query using -a,--agent [value]\n");
+                return -1;
             } else {
-                action_s = strdup(hp->action);
+                char *buffer = NULL;
+
+                rc = st->cmds->metadata(st, st_opt_sync_call, agent, NULL, &buffer, timeout);
+                if (rc == pcmk_ok) {
+                    printf("%s\n", buffer);
+                }
+                free(buffer);
             }
+            break;
+        case 'C':
+            rc = st->cmds->confirm(st, st_opts, target);
+            break;
+        case 'B':
+            rc = mainloop_fencing(st, target, "reboot", timeout, tolerance);
+            break;
+        case 'F':
+            rc = mainloop_fencing(st, target, "off", timeout, tolerance);
+            break;
+        case 'U':
+            rc = mainloop_fencing(st, target, "on", timeout, tolerance);
+            break;
+        case 'h':
+            {
+                time_t when = 0;
 
-            if(hp->state == st_failed) {
-                printf("%s failed to %s node %s on behalf of %s at %s\n",
-                   hp->delegate?hp->delegate:"We", action_s, hp->target, hp->origin,
-                   ctime(&complete));
-
-            } else if(hp->state == st_done && hp->delegate) {
-                printf("%s was able to %s node %s on behalf of %s at %s\n",
-                   hp->delegate, action_s, hp->target, hp->origin, ctime(&complete));
-
-            } else if(hp->state == st_done) {
-                printf("We were able to %s node %s on behalf of %s at %s\n",
-                   action_s, hp->target, hp->origin, ctime(&complete));
-            } else {
-                printf("%s wishes to %s node %s - %d %d\n",
-                   hp->origin, action_s, hp->target, hp->state, hp->completed);
-            }
-
-            free(action_s);
-        }
-
-        if(latest) {
-            if(quiet) {
-                printf("%d\n", latest->completed);
-            } else {
-                char *action_s = NULL;
-                time_t complete = latest->completed;
-                if(latest->action == NULL) {
-                    action_s = strdup("unknown");
-                } else if(latest->action[0] != 'r') {
-                    action_s = crm_concat("turn", latest->action, ' ');
+                if(as_nodeid) {
+                    uint32_t nodeid = atol(target);
+                    when = stonith_api_time(nodeid, NULL, FALSE);
                 } else {
-                    action_s = strdup(latest->action);
+                    when = stonith_api_time(0, target, FALSE);
+                }
+                if(when) {
+                    printf("Node %s last kicked at: %s\n", target, ctime(&when));
+                } else {
+                    printf("Node %s has never been kicked\n", target);
+                }
+            }
+            break;
+        case 'H':
+            {
+                stonith_history_t *history, *hp, *latest = NULL;
+
+                rc = st->cmds->history(st, st_opts, target, &history, timeout);
+                for (hp = history; hp; hp = hp->next) {
+                    char *action_s = NULL;
+                    time_t complete = hp->completed;
+
+                    if (hp->state == st_done) {
+                        latest = hp;
+                    }
+
+                    if (quiet || !verbose) {
+                        continue;
+                    } else if (hp->action == NULL) {
+                        action_s = strdup("unknown");
+                    } else if (hp->action[0] != 'r') {
+                        action_s = crm_concat("turn", hp->action, ' ');
+                    } else {
+                        action_s = strdup(hp->action);
+                    }
+
+                    if (hp->state == st_failed) {
+                        printf("%s failed to %s node %s on behalf of %s from %s at %s\n",
+                               hp->delegate ? hp->delegate : "We", action_s, hp->target,
+                               hp->client, hp->origin, ctime(&complete));
+
+                    } else if (hp->state == st_done && hp->delegate) {
+                        printf("%s was able to %s node %s on behalf of %s from %s at %s\n",
+                               hp->delegate, action_s, hp->target,
+                               hp->client, hp->origin, ctime(&complete));
+
+                    } else if (hp->state == st_done) {
+                        printf("We were able to %s node %s on behalf of %s from %s at %s\n",
+                               action_s, hp->target, hp->client, hp->origin, ctime(&complete));
+                    } else {
+                        printf("%s at %s wishes to %s node %s - %d %d\n",
+                               hp->client, hp->origin, action_s, hp->target, hp->state, hp->completed);
+                    }
+
+                    free(action_s);
                 }
 
-                printf("%s was able to %s node %s on behalf of %s at %s\n",
-                   latest->delegate?latest->delegate:"We", action_s, latest->target,
-                   latest->origin, ctime(&complete));
+                if (latest) {
+                    if (quiet) {
+                        printf("%d\n", latest->completed);
+                    } else {
+                        char *action_s = NULL;
+                        time_t complete = latest->completed;
 
-                free(action_s);
-            }
-        }
-        break;
-    } /* closing bracket for -H case */
-    } /* closing bracket for switch case */
+                        if (latest->action == NULL) {
+                            action_s = strdup("unknown");
+                        } else if (latest->action[0] != 'r') {
+                            action_s = crm_concat("turn", latest->action, ' ');
+                        } else {
+                            action_s = strdup(latest->action);
+                        }
 
-done:
+                        printf("%s was able to %s node %s on behalf of %s from %s at %s\n",
+                               latest->delegate ? latest->delegate : "We", action_s, latest->target,
+                               latest->client, latest->origin, ctime(&complete));
+
+                        free(action_s);
+                    }
+                }
+                break;
+            }                   /* closing bracket for -H case */
+    }                           /* closing bracket for switch case */
+
+  done:
+    free(async_fence_data.name);
     crm_info("Command returned: %s (%d)", pcmk_strerror(rc), rc);
-    if(rc < 0) {
+    if (rc < 0) {
         printf("Command failed: %s\n", pcmk_strerror(rc));
     }
 

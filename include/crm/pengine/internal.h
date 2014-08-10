@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -51,12 +51,14 @@ typedef struct notify_data_s {
 
 } notify_data_t;
 
+bool pe_can_fence(pe_working_set_t *data_set, node_t *node);
+
 int merge_weights(int w1, int w2);
 void add_hash_param(GHashTable * hash, const char *name, const char *value);
 void append_hashtable(gpointer key, gpointer value, gpointer user_data);
 
 char *native_parameter(resource_t * rsc, node_t * node, gboolean create, const char *name,
-                              pe_working_set_t * data_set);
+                       pe_working_set_t * data_set);
 node_t *native_location(resource_t * rsc, GListPtr * list, gboolean current);
 
 void pe_metadata(void);
@@ -93,18 +95,21 @@ enum rsc_role_e group_resource_state(const resource_t * rsc, gboolean current);
 enum rsc_role_e clone_resource_state(const resource_t * rsc, gboolean current);
 enum rsc_role_e master_resource_state(const resource_t * rsc, gboolean current);
 
-gboolean common_unpack(
-    xmlNode * xml_obj, resource_t ** rsc, resource_t * parent, pe_working_set_t * data_set);
+gboolean common_unpack(xmlNode * xml_obj, resource_t ** rsc, resource_t * parent,
+                       pe_working_set_t * data_set);
 void common_print(resource_t * rsc, const char *pre_text, long options, void *print_data);
 void common_free(resource_t * rsc);
-
 
 extern pe_working_set_t *pe_dataset;
 
 extern node_t *node_copy(node_t * this_node);
-extern time_t get_timet_now(pe_working_set_t * data_set);
-extern int get_failcount(node_t * node, resource_t * rsc, int *last_failure,
+extern time_t get_effective_time(pe_working_set_t * data_set);
+extern int get_failcount(node_t * node, resource_t * rsc, time_t *last_failure,
                          pe_working_set_t * data_set);
+extern int get_failcount_full(node_t * node, resource_t * rsc, time_t *last_failure,
+                              bool effective, xmlNode * xml_op, pe_working_set_t * data_set);
+extern int get_failcount_all(node_t * node, resource_t * rsc, time_t *last_failure,
+                             pe_working_set_t * data_set);
 
 /* Binary like operators for lists of nodes */
 extern void node_list_exclude(GHashTable * list, GListPtr list2, gboolean merge_scores);
@@ -124,6 +129,7 @@ pe_hash_table_lookup(GHashTable * hash, gconstpointer key)
 extern action_t *get_pseudo_op(const char *name, pe_working_set_t * data_set);
 extern gboolean order_actions(action_t * lh_action, action_t * rh_action, enum pe_ordering order);
 
+GHashTable *node_hash_dup(GHashTable * hash);
 extern GListPtr node_list_and(GListPtr list1, GListPtr list2, gboolean filter);
 
 extern GListPtr node_list_xor(GListPtr list1, GListPtr list2, gboolean filter);
@@ -132,9 +138,6 @@ extern GListPtr node_list_minus(GListPtr list1, GListPtr list2, gboolean filter)
 
 extern void pe_free_shallow(GListPtr alist);
 extern void pe_free_shallow_adv(GListPtr alist, gboolean with_data);
-
-/* For creating the transition graph */
-extern xmlNode *action2xml(action_t * action, gboolean as_input);
 
 /* Printing functions for debug */
 extern void print_node(const char *pre_text, node_t * node, gboolean details);
@@ -216,8 +219,8 @@ extern GListPtr find_recurring_actions(GListPtr input, node_t * not_on_node);
 
 extern void pe_free_action(action_t * action);
 
-extern void resource_location(
-    resource_t * rsc, node_t * node, int score, const char *tag, pe_working_set_t * data_set);
+extern void resource_location(resource_t * rsc, node_t * node, int score, const char *tag,
+                              pe_working_set_t * data_set);
 
 extern gint sort_op_by_callid(gconstpointer a, gconstpointer b);
 extern gboolean get_target_role(resource_t * rsc, enum rsc_role_e *role);
@@ -226,11 +229,55 @@ extern resource_t *find_clone_instance(resource_t * rsc, const char *sub_id,
                                        pe_working_set_t * data_set);
 
 extern void destroy_ticket(gpointer data);
-extern ticket_t *ticket_new(const char * ticket_id, pe_working_set_t * data_set);
+extern ticket_t *ticket_new(const char *ticket_id, pe_working_set_t * data_set);
 
 char *clone_strip(const char *last_rsc_id);
 char *clone_zero(const char *last_rsc_id);
 
+int get_target_rc(xmlNode * xml_op);
+
 gint sort_node_uname(gconstpointer a, gconstpointer b);
+bool is_set_recursive(resource_t * rsc, long long flag, bool any);
+
+enum rsc_digest_cmp_val {
+    /*! Digests are the same */
+    RSC_DIGEST_MATCH = 0,
+    /*! Params that require a restart changed */
+    RSC_DIGEST_RESTART,
+    /*! Some parameter changed.  */
+    RSC_DIGEST_ALL,
+    /*! rsc op didn't have a digest associated with it, so
+     *  it is unknown if parameters changed or not. */
+    RSC_DIGEST_UNKNOWN,
+};
+
+typedef struct op_digest_cache_s {
+    enum rsc_digest_cmp_val rc;
+    xmlNode *params_all;
+    xmlNode *params_restart;
+    char *digest_all_calc;
+    char *digest_restart_calc;
+} op_digest_cache_t;
+
+op_digest_cache_t *rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, node_t * node,
+                                         pe_working_set_t * data_set);
+
+action_t *pe_fence_op(node_t * node, const char *op, bool optional, pe_working_set_t * data_set);
+void trigger_unfencing(
+    resource_t * rsc, node_t *node, const char *reason, action_t *dependancy, pe_working_set_t * data_set);
+
+void set_bit_recursive(resource_t * rsc, unsigned long long flag);
+void clear_bit_recursive(resource_t * rsc, unsigned long long flag);
+gboolean xml_contains_remote_node(xmlNode *xml);
+gboolean is_baremetal_remote_node(node_t *node);
+gboolean is_container_remote_node(node_t *node);
+gboolean is_remote_node(node_t *node);
+resource_t * rsc_contains_remote_node(pe_working_set_t * data_set, resource_t *rsc);
+
+gboolean add_tag_ref(GHashTable * tags, const char * tag_name,  const char * obj_ref);
+
+void print_rscs_brief(GListPtr rsc_list, const char * pre_text, long options,
+                      void * print_data, gboolean print_all);
+void pe_fence_node(pe_working_set_t * data_set, node_t * node, const char *reason);
 
 #endif

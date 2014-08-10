@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <grammar xmlns="http://relaxng.org/ns/structure/1.0" 
          datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
   <start>
@@ -6,6 +6,7 @@
   </start>
 
   <define name="element-constraints">
+    <element name="constraints">
       <zeroOrMore>
 	<choice>
 	  <ref name="element-location"/>
@@ -14,12 +15,25 @@
 	  <ref name="element-rsc_ticket"/>
 	</choice>
       </zeroOrMore>
+    </element>
   </define>
 
   <define name="element-location">
     <element name="rsc_location">
       <attribute name="id"><data type="ID"/></attribute>
-      <attribute name="rsc"><data type="IDREF"/></attribute>
+      <choice>
+	<group>
+	  <attribute name="rsc"><data type="IDREF"/></attribute>
+	  <optional>
+	    <attribute name="role">
+	      <ref name="attribute-roles"/>
+	    </attribute>
+	  </optional>
+	</group>
+	<oneOrMore>
+	  <ref name="element-resource-set"/>
+	</oneOrMore>
+      </choice>
       <choice>
 	<group>
 	  <externalRef href="score.rng"/>

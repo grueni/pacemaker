@@ -45,7 +45,8 @@
 gboolean do_force = FALSE;
 gboolean BE_QUIET = FALSE;
 const char *ticket_id = NULL;
-const char *attr_name = "granted";
+const char *get_attr_name = NULL;
+const char *attr_name = NULL;
 const char *attr_value = NULL;
 const char *attr_id = NULL;
 const char *set_name = NULL;
@@ -62,9 +63,10 @@ extern void cleanup_alloc_calculations(pe_working_set_t * data_set);
     } while(0)
 
 static ticket_t *
-find_ticket(const char *ticket_id , pe_working_set_t * data_set)
+find_ticket(const char *ticket_id, pe_working_set_t * data_set)
 {
     ticket_t *ticket = NULL;
+
     ticket = g_hash_table_lookup(data_set->tickets, ticket_id);
 
     return ticket;
@@ -82,20 +84,20 @@ print_date(time_t time)
             date_str[lpc] = 0;
         }
     }
-    fprintf(stdout,"'%s'", date_str);
+    fprintf(stdout, "'%s'", date_str);
 }
 
 static int
-print_ticket(ticket_t *ticket, gboolean raw, gboolean details)
+print_ticket(ticket_t * ticket, gboolean raw, gboolean details)
 {
     if (raw) {
-        fprintf(stdout, "%s\n", ticket->id); 
+        fprintf(stdout, "%s\n", ticket->id);
         return pcmk_ok;
     }
 
     fprintf(stdout, "%s\t%s %s",
-            ticket->id, ticket->granted?"granted":"revoked", 
-            ticket->standby?"[standby]":"         ");
+            ticket->id, ticket->granted ? "granted" : "revoked",
+            ticket->standby ? "[standby]" : "         ");
 
     if (details && g_hash_table_size(ticket->state) > 0) {
         GHashTableIter iter;
@@ -124,8 +126,8 @@ print_ticket(ticket_t *ticket, gboolean raw, gboolean details)
 
     } else {
         if (ticket->last_granted > -1) {
-             fprintf(stdout, " last-granted=");
-             print_date(ticket->last_granted);
+            fprintf(stdout, " last-granted=");
+            print_date(ticket->last_granted);
         }
         fprintf(stdout, "\n");
     }
@@ -149,7 +151,7 @@ print_ticket_list(pe_working_set_t * data_set, gboolean raw, gboolean details)
 }
 
 static int
-find_ticket_state(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_state_xml)
+find_ticket_state(cib_t * the_cib, const char *ticket_id, xmlNode ** ticket_state_xml)
 {
     int offset = 0;
     static int xpath_max = 1024;
@@ -162,14 +164,14 @@ find_ticket_state(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_sta
     *ticket_state_xml = NULL;
 
     xpath_string = calloc(1, xpath_max);
-    offset +=
-        snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
+    offset += snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
 
     if (ticket_id) {
         offset += snprintf(xpath_string + offset, xpath_max - offset, "/%s[@id=\"%s\"]",
-                       XML_CIB_TAG_TICKET_STATE, ticket_id);
+                           XML_CIB_TAG_TICKET_STATE, ticket_id);
     }
 
+    CRM_LOG_ASSERT(offset > 0);
     rc = the_cib->cmds->query(the_cib, xpath_string, &xml_search,
                               cib_sync_call | cib_scope_local | cib_xpath);
 
@@ -193,7 +195,7 @@ find_ticket_state(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_sta
 }
 
 static int
-find_ticket_constraints(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_cons_xml)
+find_ticket_constraints(cib_t * the_cib, const char *ticket_id, xmlNode ** ticket_cons_xml)
 {
     int offset = 0;
     static int xpath_max = 1024;
@@ -212,9 +214,10 @@ find_ticket_constraints(cib_t * the_cib, const char * ticket_id, xmlNode ** tick
 
     if (ticket_id) {
         offset += snprintf(xpath_string + offset, xpath_max - offset, "[@ticket=\"%s\"]",
-                       ticket_id);
+                           ticket_id);
     }
 
+    CRM_LOG_ASSERT(offset > 0);
     rc = the_cib->cmds->query(the_cib, xpath_string, &xml_search,
                               cib_sync_call | cib_scope_local | cib_xpath);
 
@@ -234,7 +237,7 @@ static int
 dump_ticket_xml(cib_t * the_cib, const char *ticket_id)
 {
     int rc = pcmk_ok;
-    xmlNode * state_xml = NULL;
+    xmlNode *state_xml = NULL;
 
     rc = find_ticket_state(the_cib, ticket_id, &state_xml);
 
@@ -256,10 +259,10 @@ dump_ticket_xml(cib_t * the_cib, const char *ticket_id)
 }
 
 static int
-dump_constraints(cib_t * the_cib, const char * ticket_id)
+dump_constraints(cib_t * the_cib, const char *ticket_id)
 {
     int rc = pcmk_ok;
-    xmlNode * cons_xml = NULL;
+    xmlNode *cons_xml = NULL;
     char *cons_xml_str = NULL;
 
     rc = find_ticket_constraints(the_cib, ticket_id, &cons_xml);
@@ -277,8 +280,9 @@ dump_constraints(cib_t * the_cib, const char * ticket_id)
 }
 
 static int
-find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *ticket_id, const char *set_type,
-                   const char *set_name, const char *attr_id, const char *attr_name, char **value)
+find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *ticket_id,
+                              const char *set_type, const char *set_name, const char *attr_id,
+                              const char *attr_name, char **value)
 {
     int offset = 0;
     static int xpath_max = 1024;
@@ -291,8 +295,7 @@ find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *tic
     *value = NULL;
 
     xpath_string = calloc(1, xpath_max);
-    offset +=
-        snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
+    offset += snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
 
     if (set_type) {
         offset += snprintf(xpath_string + offset, xpath_max - offset, "/%s", set_type);
@@ -325,6 +328,7 @@ find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *tic
         free(long_key);
     }
     offset += snprintf(xpath_string + offset, xpath_max - offset, "]");
+    CRM_LOG_ASSERT(offset > 0);
 
     rc = the_cib->cmds->query(the_cib, xpath_string, &xml_search,
                               cib_sync_call | cib_scope_local | cib_xpath);
@@ -342,7 +346,7 @@ find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *tic
 
         for (child = __xml_first_child(xml_search); child != NULL; child = __xml_next(child)) {
             fprintf(stdout, "  Value: %s \t(id=%s)\n",
-                   crm_element_value(child, XML_NVPAIR_ATTR_VALUE), ID(child));
+                    crm_element_value(child, XML_NVPAIR_ATTR_VALUE), ID(child));
         }
 
     } else {
@@ -361,15 +365,15 @@ find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *tic
 
 static int
 delete_ticket_state_attr_legacy(const char *ticket_id, const char *set_name, const char *attr_id,
-                     const char *attr_name, cib_t * cib)
+                                const char *attr_name, cib_t * cib)
 {
     xmlNode *xml_obj = NULL;
 
     int rc = pcmk_ok;
     char *local_attr_id = NULL;
 
-    rc = find_ticket_state_attr_legacy(cib, XML_ATTR_ID, ticket_id, XML_TAG_ATTR_SETS, set_name, attr_id, attr_name,
-                            &local_attr_id);
+    rc = find_ticket_state_attr_legacy(cib, XML_ATTR_ID, ticket_id, XML_TAG_ATTR_SETS, set_name,
+                                       attr_id, attr_name, &local_attr_id);
 
     if (rc == -ENXIO) {
         return pcmk_ok;
@@ -384,16 +388,16 @@ delete_ticket_state_attr_legacy(const char *ticket_id, const char *set_name, con
 
     xml_obj = create_xml_node(NULL, XML_CIB_TAG_NVPAIR);
     crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);
-    /*crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name);*/
+    /*crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name); */
 
     crm_log_xml_debug(xml_obj, "Delete");
 
     rc = cib->cmds->delete(cib, XML_CIB_TAG_STATUS, xml_obj, cib_options);
 
     if (rc == pcmk_ok) {
-        fprintf(stdout, "Deleted legacy %s state attribute: id=%s%s%s%s%s\n", ticket_id, local_attr_id,
-               set_name ? " set=" : "", set_name ? set_name : "",
-               attr_name ? " name=" : "", attr_name ? attr_name : "");
+        fprintf(stdout, "Deleted legacy %s state attribute: id=%s%s%s%s%s\n", ticket_id,
+                local_attr_id, set_name ? " set=" : "", set_name ? set_name : "",
+                attr_name ? " name=" : "", attr_name ? attr_name : "");
     }
 
     free_xml(xml_obj);
@@ -402,7 +406,8 @@ delete_ticket_state_attr_legacy(const char *ticket_id, const char *set_name, con
 }
 
 static int
-get_ticket_state_attr(const char *ticket_id, const char *attr_name, const char **attr_value, pe_working_set_t * data_set)
+get_ticket_state_attr(const char *ticket_id, const char *attr_name, const char **attr_value,
+                      pe_working_set_t * data_set)
 {
     ticket_t *ticket = NULL;
 
@@ -422,49 +427,120 @@ get_ticket_state_attr(const char *ticket_id, const char *attr_name, const char *
     return pcmk_ok;
 }
 
-static int
-delete_ticket_state_attr(const char *ticket_id, const char *attr_name, cib_t * cib)
+static gboolean
+ticket_warning(const char *ticket_id, const char *action)
 {
-    xmlNode *ticket_state_xml = NULL;
+    gboolean rc = FALSE;
+    int offset = 0;
+    static int text_max = 1024;
 
-    int rc = pcmk_ok;
+    char *warning = NULL;
+    const char *word = NULL;
 
-    rc = find_ticket_state(cib, ticket_id, &ticket_state_xml);
+    warning = calloc(1, text_max);
+    if (safe_str_eq(action, "grant")) {
+        offset += snprintf(warning + offset, text_max - offset,
+                           "This command cannot help you verify whether '%s' has been already granted elsewhere.\n",
+                           ticket_id);
+        word = "to";
 
-    if (rc == -ENXIO) {
-        return pcmk_ok;
+    } else {
+        offset += snprintf(warning + offset, text_max - offset,
+                           "Revoking '%s' can trigger the specified 'loss-policy'(s) relating to '%s'.\n\n",
+                           ticket_id, ticket_id);
 
-    } else if (rc != pcmk_ok) {
-        return rc;
+        offset += snprintf(warning + offset, text_max - offset,
+                           "You can check that with:\ncrm_ticket --ticket %s --constraints\n\n",
+                           ticket_id);
+
+        offset += snprintf(warning + offset, text_max - offset,
+                           "Otherwise before revoking '%s', you may want to make '%s' standby with:\ncrm_ticket --ticket %s --standby\n\n",
+                           ticket_id, ticket_id, ticket_id);
+        word = "from";
     }
 
-    xml_remove_prop(ticket_state_xml, attr_name);
-    rc = cib->cmds->replace(cib, XML_CIB_TAG_STATUS, ticket_state_xml, cib_options);
+    offset += snprintf(warning + offset, text_max - offset,
+                       "If you really want to %s '%s' %s this site now, and you know what you are doing,\n",
+                       action, ticket_id, word);
 
-    if (rc == pcmk_ok) {
-        fprintf(stdout, "Deleted %s state attribute: %s%s\n", ticket_id,
-               attr_name ? " name=" : "", attr_name ? attr_name : "");
-    }
+    offset += snprintf(warning + offset, text_max - offset, 
+                       "please specify --force.");
 
-    free_xml(ticket_state_xml);
+    CRM_LOG_ASSERT(offset > 0);
+    fprintf(stdout, "%s\n", warning);
+
+    free(warning);
     return rc;
 }
 
+static gboolean
+allow_modification(const char *ticket_id, GListPtr attr_delete,
+                   GHashTable *attr_set)
+{
+    const char *value = NULL;
+    GListPtr list_iter = NULL;
+
+    if (do_force) {
+        return TRUE;
+    }
+
+    if (g_hash_table_lookup_extended(attr_set, "granted", NULL, (gpointer *) & value)) {
+        if (crm_is_true(value)) {
+            ticket_warning(ticket_id, "grant");
+            return FALSE;
+
+        } else {
+            ticket_warning(ticket_id, "revoke");
+            return FALSE;
+        }
+    }
+
+    for(list_iter = attr_delete; list_iter; list_iter = list_iter->next) {
+        const char *key = (const char *)list_iter->data;
+
+        if (safe_str_eq(key, "granted")) {
+            ticket_warning(ticket_id, "revoke");
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 static int
-set_ticket_state_attr(const char *ticket_id, const char *attr_name,
-                      const char *attr_value, cib_t * cib)
+modify_ticket_state(const char * ticket_id, GListPtr attr_delete, GHashTable * attr_set,
+                    cib_t * cib, pe_working_set_t * data_set)
 {
     int rc = pcmk_ok;
     xmlNode *xml_top = NULL;
     xmlNode *ticket_state_xml = NULL;
+    gboolean found = FALSE;
+
+    GListPtr list_iter = NULL;
+    GHashTableIter hash_iter;
+
+    char *key = NULL;
+    char *value = NULL;
+
+    ticket_t *ticket = NULL;
+    gboolean is_granting = FALSE;
+
+    for(list_iter = attr_delete; list_iter; list_iter = list_iter->next) {
+        const char *key = (const char *)list_iter->data;
+        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, key, cib);
+    }
 
     rc = find_ticket_state(cib, ticket_id, &ticket_state_xml);
     if (rc == pcmk_ok) {
         crm_debug("Found a match state for ticket: id=%s", ticket_id);
         xml_top = ticket_state_xml;
+        found = TRUE;
 
     } else if (rc != -ENXIO) {
         return rc;
+
+    } else if (g_hash_table_size(attr_set) == 0){
+        return pcmk_ok;
 
     } else {
         xmlNode *xml_obj = NULL;
@@ -475,13 +551,49 @@ set_ticket_state_attr(const char *ticket_id, const char *attr_name,
         crm_xml_add(ticket_state_xml, XML_ATTR_ID, ticket_id);
     }
 
-    crm_xml_add(ticket_state_xml, attr_name, attr_value);
+    for(list_iter = attr_delete; list_iter; list_iter = list_iter->next) {
+        const char *key = (const char *)list_iter->data;
+        xml_remove_prop(ticket_state_xml, key);
+    }
 
-    crm_log_xml_debug(xml_top, "Update");
+    ticket = find_ticket(ticket_id, data_set);
 
-    rc = cib->cmds->modify(cib, XML_CIB_TAG_STATUS, xml_top, cib_options);
+    g_hash_table_iter_init(&hash_iter, attr_set);
+    while (g_hash_table_iter_next(&hash_iter, (gpointer *) & key, (gpointer *) & value)) {
+        crm_xml_add(ticket_state_xml, key, value);
+
+        if (safe_str_eq(key, "granted")
+            && (ticket == NULL || ticket->granted == FALSE)
+            && crm_is_true(value)) {
+
+            is_granting = TRUE;
+            crm_xml_add(ticket_state_xml, "last-granted", crm_itoa(time(NULL)));
+        }
+    }
+
+    if (found && g_list_length(attr_delete)) {
+        crm_log_xml_debug(xml_top, "Replace");
+        rc = cib->cmds->replace(cib, XML_CIB_TAG_STATUS, ticket_state_xml, cib_options);
+
+    } else {
+        crm_log_xml_debug(xml_top, "Update");
+        rc = cib->cmds->modify(cib, XML_CIB_TAG_STATUS, xml_top, cib_options);
+    }
 
     free_xml(xml_top);
+
+    if (rc != pcmk_ok) {
+        return rc;
+    }
+
+    g_hash_table_iter_init(&hash_iter, attr_set);
+    while (g_hash_table_iter_next(&hash_iter, (gpointer *) & key, (gpointer *) & value)) {
+        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, key, cib);
+    }
+
+    if (is_granting == TRUE) {
+        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, "last-granted", cib);
+    }
 
     return rc;
 }
@@ -511,70 +623,6 @@ delete_ticket_state(const char *ticket_id, cib_t * cib)
     }
 
     free_xml(ticket_state_xml);
-    return rc;
-}
-
-static gboolean
-confirm(const char *ticket_id, const char *action)
-{
-    gboolean rc = FALSE;
-    int offset = 0;
-    static int text_max = 1024;
-
-    char *warning = NULL;
-    const char * word = NULL;
-
-    warning = calloc(1, text_max);
-    if (safe_str_eq(action, "grant")) {
-        offset += snprintf(warning + offset, text_max - offset,
-                "The command cannot help you verify if '%s' is already granted elsewhere.\n",
-                ticket_id);
-        word = "to";
-
-    } else {
-        offset += snprintf(warning + offset, text_max - offset,
-                "Revoking '%s' can trigger the specified 'loss-policy'(s) relating to '%s'.\n\n",
-                ticket_id, ticket_id);
-
-        offset += snprintf(warning + offset, text_max - offset,
-                "You can check that with:\ncrm_ticket --ticket %s --constraints\n\n",
-                ticket_id);
-
-        offset += snprintf(warning + offset, text_max - offset,
-                "Otherwise before revoking '%s', you may want to make '%s' standby with:\ncrm_ticket --ticket %s --standby\n",
-                ticket_id, ticket_id, ticket_id);
-        word = "from";
-    }
-
-    fprintf(stdout, "%s\n", warning);
-
-    while (TRUE) {
-        char *answer = NULL;
-
-        answer = calloc(1, text_max);
-        fprintf(stdout, "Are you sure you want to %s '%s' %s this site now? (y/n)",
-                action, ticket_id, word);
-
-        rc = scanf("%s", answer);
-
-        if (strchr(answer, 'y') == answer || strchr(answer, 'Y') == answer) {
-            rc = TRUE;
-            free(answer);
-            goto bail;
-
-        } else if (strchr(answer, 'n') == answer || strchr(answer, 'N') == answer) {
-            rc = FALSE;
-            free(answer);
-            goto bail;
-
-        } else {
-            free(answer);
-            fprintf(stdout, "Please answer with y or n\n");
-        }
-    }
-
-bail:
-    free(warning);
     return rc;
 }
 
@@ -665,6 +713,11 @@ main(int argc, char **argv)
     int option_index = 0;
     int argerr = 0;
     int flag;
+    guint modified = 0;
+
+    GListPtr attr_delete = NULL;
+    GHashTable *attr_set = g_hash_table_new_full(crm_str_hash, g_str_equal,
+                                                 g_hash_destroy_str, g_hash_destroy_str);
 
     crm_log_init(NULL, LOG_CRIT, FALSE, FALSE, argc, argv, FALSE);
     crm_set_options(NULL, "(query|command) [options]", long_options,
@@ -701,22 +754,49 @@ main(int argc, char **argv)
                 ticket_cmd = flag;
                 break;
             case 'g':
+                g_hash_table_insert(attr_set, strdup("granted"), strdup("true"));
+                modified++;
+                break;
             case 'r':
+                g_hash_table_insert(attr_set, strdup("granted"), strdup("false"));
+                modified++;
+                break;
             case 's':
+                g_hash_table_insert(attr_set, strdup("standby"), strdup("true"));
+                modified++;
+                break;
             case 'a':
-                ticket_cmd = flag;
+                g_hash_table_insert(attr_set, strdup("standby"), strdup("false"));
+                modified++;
                 break;
             case 'G':
-            case 'S':
-            case 'D':
-                attr_name = optarg;
+                get_attr_name = optarg;
                 ticket_cmd = flag;
+                break;
+            case 'S':
+                attr_name = optarg;
+                if (attr_name && attr_value) {
+                    g_hash_table_insert(attr_set, strdup(attr_name), strdup(attr_value));
+                    attr_name = NULL;
+                    attr_value = NULL;
+                    modified++;
+                }
+                break;
+            case 'D':
+                attr_delete = g_list_append(attr_delete, optarg);
+                modified++;
                 break;
             case 'C':
                 ticket_cmd = flag;
                 break;
             case 'v':
                 attr_value = optarg;
+                if (attr_name && attr_value) {
+                    g_hash_table_insert(attr_set, strdup(attr_name), strdup(attr_value));
+                    attr_name = NULL;
+                    attr_value = NULL;
+                    modified++;
+                }
                 break;
             case 'd':
                 attr_default = optarg;
@@ -763,8 +843,7 @@ main(int argc, char **argv)
     cib_conn = cib_new();
     if (cib_conn == NULL) {
         rc = -ENOTCONN;
-        CMD_ERR("Error initiating the connection to the CIB service: %s\n",
-                pcmk_strerror(rc));
+        CMD_ERR("Error initiating the connection to the CIB service: %s\n", pcmk_strerror(rc));
         return rc;
     }
 
@@ -778,10 +857,13 @@ main(int argc, char **argv)
         cib_xml_copy = filename2xml(xml_file);
 
     } else {
-        cib_xml_copy = get_cib_copy(cib_conn);
+        rc = cib_conn->cmds->query(cib_conn, NULL, &cib_xml_copy, cib_scope_local | cib_sync_call);
     }
 
-    if (cli_config_update(&cib_xml_copy, NULL, FALSE) == FALSE) {
+    if (rc != pcmk_ok) {
+        goto bail;
+
+    } else if (cli_config_update(&cib_xml_copy, NULL, FALSE) == FALSE) {
         rc = -ENOKEY;
         goto bail;
     }
@@ -799,7 +881,6 @@ main(int argc, char **argv)
     if (ticket_cmd == 'l' || ticket_cmd == 'L' || ticket_cmd == 'w') {
         gboolean raw = FALSE;
         gboolean details = FALSE;
-        rc = pcmk_ok;
 
         if (ticket_cmd == 'L') {
             details = TRUE;
@@ -809,6 +890,7 @@ main(int argc, char **argv)
 
         if (ticket_id) {
             ticket_t *ticket = find_ticket(ticket_id, &data_set);
+
             if (ticket == NULL) {
                 rc = -ENXIO;
                 goto bail;
@@ -834,7 +916,7 @@ main(int argc, char **argv)
             goto bail;
         }
 
-        rc = get_ticket_state_attr(ticket_id, attr_name, &value, &data_set);
+        rc = get_ticket_state_attr(ticket_id, get_attr_name, &value, &data_set);
         if (rc == pcmk_ok) {
             fprintf(stdout, "%s\n", value);
         } else if (rc == -ENXIO && attr_default) {
@@ -842,97 +924,13 @@ main(int argc, char **argv)
             rc = pcmk_ok;
         }
 
-    } else if (ticket_cmd == 'S' 
-               || ticket_cmd == 'g' || ticket_cmd == 'r'
-               || ticket_cmd == 's' || ticket_cmd == 'a') {
-        gboolean is_granting = FALSE;
-
-        if (ticket_id == NULL) {
-            CMD_ERR("Must supply a ticket id with -t\n");
-            rc = -ENXIO;
-            goto bail;
-        }
-
-        if (ticket_cmd == 'g') {
-            attr_name = "granted";
-            attr_value = "true";
-
-        } else if (ticket_cmd == 'r') {
-            attr_name = "granted";
-            attr_value = "false";
-
-        } else if (ticket_cmd == 's') {
-            attr_name = "standby";
-            attr_value = "true";
-
-        } else if (ticket_cmd == 'a') {
-            attr_name = "standby";
-            attr_value = "false";
-        }
-
-        if (attr_value == NULL || strlen(attr_value) == 0) {
-            CMD_ERR("You need to supply a value with the -v option\n");
-            rc = -EINVAL;
-            goto bail;
-        }
-
-        if (safe_str_eq(attr_name, "granted") && do_force == FALSE) {
-            if (crm_is_true(attr_value) && confirm(ticket_id, "grant") == FALSE) {
-                CMD_ERR("Cancelled\n");
-                rc = pcmk_ok;
-                goto bail;
-
-            } else if (crm_is_true(attr_value) == FALSE && confirm(ticket_id, "revoke") == FALSE) {
-                CMD_ERR("Cancelled\n");
-                rc = pcmk_ok;
-                goto bail;
-            }
-        }
-
-        if (safe_str_eq(attr_name, "granted") && crm_is_true(attr_value)) {
-            ticket_t *ticket = find_ticket(ticket_id, &data_set);
-
-            if (ticket == NULL || ticket->granted == FALSE) {
-                is_granting = TRUE;
-            }
-        }
-
-        rc = set_ticket_state_attr(ticket_id, attr_name, attr_value, cib_conn);
-        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, attr_name, cib_conn);
-
-        if(rc != pcmk_ok) {
-            goto bail;
-        }
-
-        if (is_granting == TRUE) {
-            set_ticket_state_attr(ticket_id, "last-granted", crm_itoa(time(NULL)), cib_conn);
-            delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, "last-granted", cib_conn);
-        }
-
-    } else if (ticket_cmd == 'D') {
-        if (ticket_id == NULL) {
-            CMD_ERR("Must supply a ticket id with -t\n");
-            rc = -ENXIO;
-            goto bail;
-        }
-
-        if (safe_str_eq(attr_name, "granted") && do_force == FALSE
-            && confirm(ticket_id, "revoke") == FALSE) {
-            CMD_ERR("Cancelled\n");
-            rc = pcmk_ok;
-            goto bail;
-        }
-
-        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, attr_name, cib_conn);
-        rc = delete_ticket_state_attr(ticket_id, attr_name, cib_conn);
-
     } else if (ticket_cmd == 'C') {
         if (ticket_id == NULL) {
             CMD_ERR("Must supply a ticket id with -t\n");
             rc = -ENXIO;
             goto bail;
         }
-        
+
         if (do_force == FALSE) {
             ticket_t *ticket = NULL;
 
@@ -942,28 +940,86 @@ main(int argc, char **argv)
                 goto bail;
             }
 
-            if (ticket->granted && confirm(ticket_id, "revoke") == FALSE) {
-                CMD_ERR("Cancelled\n");
-                rc = pcmk_ok;
+            if (ticket->granted) {
+                ticket_warning(ticket_id, "revoke");
+                rc = -EPERM;
                 goto bail;
             }
         }
 
         rc = delete_ticket_state(ticket_id, cib_conn);
 
+    } else if (modified) {
+        if (ticket_id == NULL) {
+            CMD_ERR("Must supply a ticket id with -t\n");
+            rc = -ENXIO;
+            goto bail;
+        }
+
+        if (attr_value
+            && (attr_name == NULL || strlen(attr_name) == 0)) {
+            CMD_ERR("You need to supply an attribute name with the -S command for -v %s\n", attr_value);
+            rc = -EINVAL;
+            goto bail;
+        }
+
+        if (attr_name
+            && (attr_value == NULL || strlen(attr_value) == 0)) {
+            CMD_ERR("You need to supply a value with the -v option for -S %s\n", attr_name);
+            rc = -EINVAL;
+            goto bail;
+        }
+
+        if (allow_modification(ticket_id, attr_delete, attr_set) == FALSE) {
+            rc = -EPERM;
+            goto bail;
+        }
+
+        rc = modify_ticket_state(ticket_id, attr_delete, attr_set, cib_conn, &data_set);
+        
+        if (rc != pcmk_ok) {
+            goto bail;
+        }
+
+    } else if (ticket_cmd == 'S') {
+        if (ticket_id == NULL) {
+            CMD_ERR("Must supply a ticket id with -t\n");
+            rc = -ENXIO;
+            goto bail;
+        }
+
+        if (attr_name == NULL || strlen(attr_name) == 0) {
+            CMD_ERR("You need to supply a command\n");
+            rc = -EINVAL;
+            goto bail;
+        }
+
+        if (attr_value == NULL || strlen(attr_value) == 0) {
+            CMD_ERR("You need to supply a value with the -v option for -S %s\n", attr_name);
+            rc = -EINVAL;
+            goto bail;
+        }
+
     } else {
         CMD_ERR("Unknown command: %c\n", ticket_cmd);
     }
 
   bail:
+    if (attr_set) {
+        g_hash_table_destroy(attr_set);
+    }
+    attr_set = NULL;
+
+    if (attr_delete) {
+        g_list_free(attr_delete);
+    }
+    attr_delete = NULL;
 
     if (cib_conn != NULL) {
         cleanup_alloc_calculations(&data_set);
         cib_conn->cmds->signoff(cib_conn);
         cib_delete(cib_conn);
     }
-
-    crm_xml_cleanup();
 
     if (rc == -pcmk_err_no_quorum) {
         CMD_ERR("Error performing operation: %s\n", pcmk_strerror(rc));
@@ -973,6 +1029,5 @@ main(int argc, char **argv)
         CMD_ERR("Error performing operation: %s\n", pcmk_strerror(rc));
     }
 
-    qb_log_fini();
-    return rc;
+    return crm_exit(rc);
 }

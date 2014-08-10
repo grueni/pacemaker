@@ -5,12 +5,12 @@
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -95,7 +95,7 @@ cib_native_dispatch_internal(const char *buffer, ssize_t length, gpointer userda
     const char *type = NULL;
     xmlNode *msg = NULL;
 
-    cib_t * cib = userdata;
+    cib_t *cib = userdata;
 
     crm_trace("dispatching %p", userdata);
 
@@ -114,7 +114,7 @@ cib_native_dispatch_internal(const char *buffer, ssize_t length, gpointer userda
     /* do callbacks */
     type = crm_element_value(msg, F_TYPE);
     crm_trace("Activating %s callbacks...", type);
-    crm_log_xml_trace(msg, "cib-reply");
+    crm_log_xml_explicit(msg, "cib-reply");
 
     if (safe_str_eq(type, T_CIB)) {
         cib_native_callback(cib, msg, 0, 0);
@@ -143,14 +143,15 @@ cib_native_dispatch(cib_t * cib)
 
     crm_trace("dispatching %p", cib);
     native = cib->variant_opaque;
-    while(crm_ipc_ready(native->ipc)) {
+    while (crm_ipc_ready(native->ipc)) {
 
-        if(crm_ipc_read(native->ipc) > 0) {
+        if (crm_ipc_read(native->ipc) > 0) {
             const char *msg = crm_ipc_buffer(native->ipc);
+
             cib_native_dispatch_internal(msg, strlen(msg), cib);
         }
 
-        if(crm_ipc_connected(native->ipc) == FALSE) {
+        if (crm_ipc_connected(native->ipc) == FALSE) {
             crm_err("Connection closed");
             stay_connected = FALSE;
         }
@@ -170,7 +171,7 @@ cib_native_destroy(void *userdata)
     native->source = NULL;
     native->ipc = NULL;
 
-    if(native->dnotify_fn) {
+    if (native->dnotify_fn) {
         native->dnotify_fn(userdata);
     }
 }
@@ -182,12 +183,11 @@ cib_native_signon_raw(cib_t * cib, const char *name, enum cib_conn_type type, in
     const char *channel = NULL;
     cib_native_opaque_t *native = cib->variant_opaque;
 
-    static struct ipc_client_callbacks cib_callbacks = 
-        {
-            .dispatch = cib_native_dispatch_internal,
-            .destroy = cib_native_destroy
-        };
-    
+    static struct ipc_client_callbacks cib_callbacks = {
+        .dispatch = cib_native_dispatch_internal,
+        .destroy = cib_native_destroy
+    };
+
     cib->call_timeout = MAX_IPC_DELAY;
 
     if (type == cib_command) {
@@ -207,19 +207,21 @@ cib_native_signon_raw(cib_t * cib, const char *name, enum cib_conn_type type, in
     }
 
     crm_trace("Connecting %s channel", channel);
-    
+
     if (async_fd != NULL) {
         native->ipc = crm_ipc_new(channel, 0);
 
-        if(native->ipc && crm_ipc_connect(native->ipc)) {
+        if (native->ipc && crm_ipc_connect(native->ipc)) {
             *async_fd = crm_ipc_get_fd(native->ipc);
 
-        } else if(native->ipc) {
+        } else if (native->ipc) {
             rc = -ENOTCONN;
         }
 
     } else {
-        native->source = mainloop_add_ipc_client(channel, G_PRIORITY_HIGH, 512*1024 /* 512k */, cib, &cib_callbacks);
+        native->source =
+            mainloop_add_ipc_client(channel, G_PRIORITY_HIGH, 512 * 1024 /* 512k */ , cib,
+                                    &cib_callbacks);
         native->ipc = mainloop_get_ipc_client(native->source);
     }
 
@@ -253,6 +255,7 @@ cib_native_signon_raw(cib_t * cib, const char *name, enum cib_conn_type type, in
                     rc = -EPROTO;
                 }
             }
+            free_xml(reply);
 
         } else {
             rc = -ECOMM;
@@ -284,16 +287,17 @@ cib_native_signoff(cib_t * cib)
         native->source = NULL;
         native->ipc = NULL;
 
-    } else if(native->ipc) {
+    } else if (native->ipc) {
         /* Not attached to mainloop */
         crm_ipc_t *ipc = native->ipc;
+
         native->ipc = NULL;
         crm_ipc_close(ipc);
         crm_ipc_destroy(ipc);
     }
 
     cib->state = cib_disconnected;
-    cib->type = cib_none;
+    cib->type = cib_no_connection;
 
     return pcmk_ok;
 }
@@ -334,7 +338,7 @@ cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, co
 {
     int rc = pcmk_ok;
     int reply_id = 0;
-    enum crm_ipc_flags ipc_flags = crm_ipc_client_none;
+    enum crm_ipc_flags ipc_flags = crm_ipc_flags_none;
 
     xmlNode *op_msg = NULL;
     xmlNode *op_reply = NULL;
@@ -354,7 +358,7 @@ cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, co
         return -EINVAL;
     }
 
-    if(call_options & cib_sync_call) {
+    if (call_options & cib_sync_call) {
         ipc_flags |= crm_ipc_client_response;
     }
 
@@ -367,7 +371,8 @@ cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, co
         cib->call_id = 1;
     }
 
-    CRM_CHECK(native->token != NULL,;);
+    CRM_CHECK(native->token != NULL,;
+        );
     op_msg =
         cib_create_op(cib->call_id, native->token, op, host, section, data, call_options,
                       user_name);
@@ -379,14 +384,15 @@ cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, co
     rc = crm_ipc_send(native->ipc, op_msg, ipc_flags, cib->call_timeout * 1000, &op_reply);
     free_xml(op_msg);
 
-    if(rc < 0) {
-        crm_perror(LOG_ERR, "Couldn't perform %s operation (timeout=%ds): %d", op, cib->call_timeout, rc);
+    if (rc < 0) {
+        crm_err("Couldn't perform %s operation (timeout=%ds): %s (%d)", op,
+                cib->call_timeout, pcmk_strerror(rc), rc);
         rc = -ECOMM;
         goto done;
     }
 
     crm_log_xml_trace(op_reply, "Reply");
-    
+
     if (!(call_options & cib_sync_call)) {
         crm_trace("Async call, returning %d", cib->call_id);
         CRM_CHECK(cib->call_id != 0, return -ENOMSG);
@@ -412,18 +418,18 @@ cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, co
         }
 
     } else if (reply_id <= 0) {
-        crm_err("Recieved bad reply: No id set");
+        crm_err("Received bad reply: No id set");
         crm_log_xml_err(op_reply, "Bad reply");
         rc = -ENOMSG;
         goto done;
-        
+
     } else {
-        crm_err("Recieved bad reply: %d (wanted %d)", reply_id, cib->call_id);
+        crm_err("Received bad reply: %d (wanted %d)", reply_id, cib->call_id);
         crm_log_xml_err(op_reply, "Old reply");
         rc = -ENOMSG;
         goto done;
     }
-    
+
     if (op_reply == NULL && cib->state == cib_disconnected) {
         rc = -ENOTCONN;
 
@@ -493,8 +499,9 @@ cib_native_register_notification(cib_t * cib, const char *callback, int enabled)
         crm_xml_add(notify_msg, F_CIB_OPERATION, T_CIB_NOTIFY);
         crm_xml_add(notify_msg, F_CIB_NOTIFY_TYPE, callback);
         crm_xml_add_int(notify_msg, F_CIB_NOTIFY_ACTIVATE, enabled);
-        rc = crm_ipc_send(native->ipc, notify_msg, crm_ipc_client_response, 1000 * cib->call_timeout, NULL);
-        if(rc <= 0) {
+        rc = crm_ipc_send(native->ipc, notify_msg, crm_ipc_client_response,
+                          1000 * cib->call_timeout, NULL);
+        if (rc <= 0) {
             crm_trace("Notification not registered: %d", rc);
             rc = -ECOMM;
         }

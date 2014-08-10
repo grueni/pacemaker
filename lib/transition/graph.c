@@ -128,7 +128,7 @@ update_graph(crm_graph_t * graph, crm_action_t * action)
 }
 
 static gboolean
-should_fire_synapse(synapse_t * synapse)
+should_fire_synapse(crm_graph_t * graph, synapse_t * synapse)
 {
     GListPtr lpc = NULL;
 
@@ -143,9 +143,23 @@ should_fire_synapse(synapse_t * synapse)
 
         crm_trace("Processing input %d", prereq->id);
         if (prereq->confirmed == FALSE) {
-            crm_trace("Inputs for synapse %d not satisfied", synapse->id);
+            crm_trace("Inputs for synapse %d not satisfied: not confirmed", synapse->id);
             synapse->ready = FALSE;
             break;
+        } else if(prereq->failed && prereq->can_fail == FALSE) {
+            crm_trace("Inputs for synapse %d not satisfied: failed", synapse->id);
+            synapse->ready = FALSE;
+            break;
+        }
+    }
+
+    if(synapse->ready && graph_fns->allowed) {
+        for (lpc = synapse->actions; lpc != NULL; lpc = lpc->next) {
+            crm_action_t *a = (crm_action_t *) lpc->data;
+
+            if(graph_fns->allowed(graph, a) == FALSE) {
+                return FALSE;
+            }
         }
     }
 
@@ -164,11 +178,11 @@ initiate_action(crm_graph_t * graph, crm_action_t * action)
 
     action->executed = TRUE;
     if (action->type == action_type_pseudo) {
-        crm_trace("Executing pseudo-event: %d", action->id);
+        crm_trace("Executing pseudo-event: %s (%d)", id, action->id);
         return graph_fns->pseudo(graph, action);
 
     } else if (action->type == action_type_rsc) {
-        crm_trace("Executing rsc-event: %d", action->id);
+        crm_trace("Executing rsc-event: %s (%d)", id, action->id);
         return graph_fns->rsc(graph, action);
 
     } else if (action->type == action_type_crm) {
@@ -178,17 +192,15 @@ initiate_action(crm_graph_t * graph, crm_action_t * action)
         CRM_CHECK(task != NULL, return FALSE);
 
         if (safe_str_eq(task, CRM_OP_FENCE)) {
-            crm_trace("Executing STONITH-event: %d", action->id);
+            crm_trace("Executing STONITH-event: %s (%d)", id, action->id);
             return graph_fns->stonith(graph, action);
         }
 
-        crm_trace("Executing crm-event: %d", action->id);
+        crm_trace("Executing crm-event: %s (%d)", id, action->id);
         return graph_fns->crmd(graph, action);
     }
 
-    crm_err(
-                  "Failed on unsupported command type: %s (id=%s)",
-                  crm_element_name(action->xml), id);
+    crm_err("Failed on unsupported command type: %s (id=%s)", crm_element_name(action->xml), id);
     return FALSE;
 }
 
@@ -224,78 +236,6 @@ fire_synapse(crm_graph_t * graph, synapse_t * synapse)
     return TRUE;
 }
 
-static gboolean
-count_migrating(crm_graph_t * graph, synapse_t * synapse)
-{
-    GListPtr lpc = NULL;
-
-    CRM_CHECK(synapse != NULL, return FALSE);
-
-    for (lpc = synapse->actions; lpc != NULL; lpc = lpc->next) {
-        crm_action_t *action = (crm_action_t *) lpc->data;
-
-        const char *task = NULL;
-
-        if (action->type != action_type_rsc) {
-            continue;
-        }
-
-        task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
-
-        if (crm_str_eq(task, CRMD_ACTION_MIGRATE, TRUE)
-            || crm_str_eq(task, CRMD_ACTION_MIGRATED, TRUE)) {
-            const char *node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET_UUID);
-
-            int *counter = g_hash_table_lookup(graph->migrating, node);
-
-            if (counter == NULL) {
-                counter = calloc(1, sizeof(int));
-                g_hash_table_insert(graph->migrating, strdup(node), counter);
-            }
-
-            (*counter)++;
-        }
-    }
-    return TRUE;
-}
-
-static gboolean
-migration_overrun(crm_graph_t * graph, synapse_t * synapse)
-{
-    GListPtr lpc = NULL;
-
-    CRM_CHECK(synapse != NULL, return FALSE);
-
-    if (graph->migration_limit < 0) {
-        return FALSE;
-    }
-
-    for (lpc = synapse->actions; lpc != NULL; lpc = lpc->next) {
-        crm_action_t *action = (crm_action_t *) lpc->data;
-
-        const char *task = NULL;
-
-        if (action->type != action_type_rsc) {
-            continue;
-        }
-
-        task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
-
-        if (crm_str_eq(task, CRMD_ACTION_MIGRATE, TRUE)
-            || crm_str_eq(task, CRMD_ACTION_MIGRATED, TRUE)) {
-            const char *node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET_UUID);
-
-            int *counter = g_hash_table_lookup(graph->migrating, node);
-
-            if (counter && *counter >= graph->migration_limit) {
-                return TRUE;
-            }
-
-        }
-    }
-    return FALSE;
-}
-
 int
 run_graph(crm_graph_t * graph)
 {
@@ -317,7 +257,6 @@ run_graph(crm_graph_t * graph)
     graph->skipped = 0;
     graph->completed = 0;
     graph->incomplete = 0;
-    g_hash_table_remove_all(graph->migrating);
     crm_trace("Entering graph %d callback", graph->id);
 
     /* Pre-calculate the number of completed and in-flight operations */
@@ -331,10 +270,6 @@ run_graph(crm_graph_t * graph)
         } else if (synapse->failed == FALSE && synapse->executed) {
             crm_trace("Synapse %d: confirmation pending", synapse->id);
             graph->pending++;
-
-            if (graph->migration_limit >= 0) {
-                count_migrating(graph, synapse);
-            }
         }
     }
 
@@ -345,10 +280,6 @@ run_graph(crm_graph_t * graph)
         if (graph->batch_limit > 0 && graph->pending >= graph->batch_limit) {
             crm_debug("Throttling output: batch limit (%d) reached", graph->batch_limit);
             break;
-        } else if (graph->migration_limit >= 0 && migration_overrun(graph, synapse)) {
-            crm_debug("Throttling output: migration limit (%d) reached", graph->migration_limit);
-            break;
-
         } else if (synapse->failed) {
             graph->skipped++;
             continue;
@@ -362,20 +293,19 @@ run_graph(crm_graph_t * graph)
             crm_trace("Skipping synapse %d: aborting", synapse->id);
             graph->skipped++;
 
-        } else if (should_fire_synapse(synapse)) {
+        } else if (should_fire_synapse(graph, synapse)) {
             crm_trace("Synapse %d fired", synapse->id);
             graph->fired++;
-            CRM_CHECK(fire_synapse(graph, synapse), stat_log_level = LOG_ERR;
-                      graph->abort_priority = INFINITY;
-                      graph->incomplete++;
-                      graph->fired--);
+            if(fire_synapse(graph, synapse) == FALSE) {
+                crm_err("Synapse %d failed to fire", synapse->id);
+                stat_log_level = LOG_ERR;
+                graph->abort_priority = INFINITY;
+                graph->incomplete++;
+                graph->fired--;
+            }
 
             if (synapse->confirmed == FALSE) {
                 graph->pending++;
-
-                if (graph->migration_limit >= 0) {
-                    count_migrating(graph, synapse);
-                }
             }
 
         } else {

@@ -3,53 +3,42 @@
 %global pcmk_docdir %{_docdir}/%{name}
 
 %global specversion 1
-%global upstream_version HEAD
-%global upstream_prefix ClusterLabs-pacemaker
+%global commit HEAD
+%global shortcommit %(c=%{commit}; echo ${c:0:7})
+%global github_owner ClusterLabs
 
-# Compatibility macros for distros (fedora) that don't provide Python macros by default
-# Do this instead of trying to conditionally include {_rpmconfigdir}/macros.python
-%{!?py_ver:     %{expand: %%global py_ver      %%(echo `python -c "import sys; print sys.version[:3]"`)}}
-%{!?py_prefix:  %{expand: %%global py_prefix   %%(echo `python -c "import sys; print sys.prefix"`)}}
-%{!?py_libdir:  %{expand: %%global py_libdir   %%{expand:%%%%{py_prefix}/%%%%{_lib}/python%%%%{py_ver}}}}
-%{!?py_sitedir: %{expand: %%global py_sitedir  %%{expand:%%%%{py_libdir}/site-packages}}}
+# Turn off the auto compilation of python files not in the site-packages directory
+# Needed so that the -devel package is multilib compliant
+%global __os_install_post %(echo '%{__os_install_post}' | sed -e 's!/usr/lib[^[:space:]]*/brp-python-bytecompile[[:space:]].*$!!g')
 
-# Compatibility macro wrappers for legacy RPM versions that do not
-# support conditional builds
-%{!?bcond_without: %{expand: %%global bcond_without() %%{expand:%%%%{!?_without_%%{1}:%%%%global with_%%{1} 1}}}}
-%{!?bcond_with:    %{expand: %%global bcond_with()    %%{expand:%%%%{?_with_%%{1}:%%%%global with_%%{1} 1}}}}
-%{!?with:          %{expand: %%global with()          %%{expand:%%%%{?with_%%{1}:1}%%%%{!?with_%%{1}:0}}}}
-%{!?without:       %{expand: %%global without()       %%{expand:%%%%{?with_%%{1}:0}%%%%{!?with_%%{1}:1}}}}
-
-%global cs_major %(pkg-config corosync --modversion  | awk -F . '{print $1}')
-%global cs_minor %(pkg-config corosync --modversion  | awk -F . '{print $2}')
 %global rawhide  %(test ! -e /etc/yum.repos.d/fedora-rawhide.repo; echo $?)
+%global cs_version %(pkg-config corosync --modversion  | awk -F . '{print $1}')
+%global py_site %(python -c "from distutils.sysconfig import get_python_lib; print(get_python_lib(1))")
 
 # Conditionals
 # Invoke "rpmbuild --without <feature>" or "rpmbuild --with <feature>"
 # to disable or enable specific features
 
-# Supported cluster stacks, must support at least one
-%bcond_without corosync
-%bcond_with heartbeat
-%bcond_with cman
-
 # Legacy stonithd fencing agents
 %bcond_with stonithd
 
-# ESMTP is not available in RHEL, only in EPEL. Allow people to build
-# the RPM without ESMTP in case they choose not to use EPEL packages
-%bcond_with esmtp
-%bcond_with snmp
-
 # Build with/without support for profiling tools
 %bcond_with profiling
-%bcond_with gcov
+
+# Include Build with/without support for performing coverage analysis
+%bcond_with coverage
 
 # We generate docs using Publican, Asciidoc and Inkscape, but they're not available everywhere
 %bcond_without doc
 
 # Use a different versioning scheme
 %bcond_with pre_release
+
+# Ship an Upstart job file
+%bcond_with upstart_job
+
+# Turn off cman support on platforms that normally ship with it
+%bcond_without cman
 
 %if %{with profiling}
 # This disables -debuginfo package creation and also the stripping binaries/libraries
@@ -58,71 +47,56 @@
 %endif
 
 %if %{with pre_release}
-%global pcmk_release 0.%{specversion}.%{upstream_version}.git
+%global pcmk_release 0.%{specversion}.%{shortcommit}.git
 %else
 %global pcmk_release %{specversion}
 %endif
 
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
-Version:       1.1.7
+Version:       1.1.11
 Release:       %{pcmk_release}%{?dist}
 License:       GPLv2+ and LGPLv2+
 Url:           http://www.clusterlabs.org
 Group:         System Environment/Daemons
 
-# export VER={upstream_version}
-# wget --no-check-certificate -O ClusterLabs-pacemaker-${VER}.tar.gz https://github.com/ClusterLabs/pacemaker/tarball/${VER}
-Source0:       %{upstream_prefix}-%{upstream_version}.tar.gz
+Source0:        https://github.com/%{github_owner}/%{name}/archive/%{commit}/%{name}-%{commit}.tar.gz
 BuildRoot:     %(mktemp -ud %{_tmppath}/%{name}-%{version}-%{release}-XXXXXX)
 AutoReqProv:   on
+Requires:      python
 Requires:      resource-agents
 Requires:      %{name}-libs = %{version}-%{release}
 Requires:      %{name}-cluster-libs = %{version}-%{release}
 Requires:      %{name}-cli = %{version}-%{release}
-Requires:      python >= 2.4
-Conflicts:     heartbeat < 2.99
 
-%if %{defined _unitdir}
-# Needed for systemd unit
-Requires(post):   systemd-sysv
-Requires(post):   systemd-units
-Requires(preun):  systemd-units
-Requires(postun): systemd-units
+%if %{defined systemd_requires}
+%systemd_requires
 %endif
 
-%if %{with heartbeat}
-Requires(pre): cluster-glue
+%if 0%{?rhel} > 0
+ExclusiveArch: i386 i686 x86_64
 %endif
 
-%if %{with snmp}
-Requires:      perl(:MODULE_COMPAT_%(eval "`%{__perl} -V:version`"; echo $version))
-%endif
-
-%if 0%{?suse_version}
-# net-snmp-devel on SLES10 does not suck in tcpd-devel automatically
-BuildRequires: tcpd-devel
-# Suse splits this off into a separate package
-Requires:      python-curses python-xml
-BuildRequires: python-curses python-xml
-%endif
 
 # Required for core functionality
 BuildRequires: automake autoconf libtool pkgconfig python libtool-ltdl-devel
-BuildRequires: glib2-devel libxml2-devel libxslt-devel libuuid-devel
+BuildRequires: pkgconfig(glib-2.0) libxml2-devel libxslt-devel libuuid-devel
 BuildRequires: pkgconfig python-devel gcc-c++ bzip2-devel pam-devel
 
-%if 0%{?suse_version} >= 1100
-# Renamed since opensuse-11.0
-BuildRequires:  libgnutls-devel
-%else
-BuildRequires:  gnutls-devel
-%endif
+# Required for agent_config.h which specifies the correct scratch directory
+BuildRequires: resource-agents
 
+# We need reasonably recent versions of libqb
+BuildRequires: libqb-devel > 0.11.0
+Requires:      libqb > 0.11.0
 
 # Enables optional functionality
-BuildRequires: ncurses-devel openssl-devel libselinux-devel docbook-style-xsl libqb-devel
-BuildRequires: bison byacc flex help2man
+BuildRequires: ncurses-devel openssl-devel libselinux-devel docbook-style-xsl
+BuildRequires: bison byacc flex help2man gnutls-devel pkgconfig(dbus-1)
+
+%if %{defined _unitdir}
+BuildRequires: systemd-devel
+%endif
 
 %if %{with cman}
 
@@ -140,27 +114,8 @@ BuildRequires: clusterlib-devel
 
 %endif
 
-%if %{with esmtp}
-BuildRequires: libesmtp-devel
-%endif
-
-%if %{with snmp}
-%ifarch alpha %{ix86} x86_64
-BuildRequires: lm_sensors-devel
-%endif
-
-BuildRequires: net-snmp-devel
-%endif
-
-%if %{with corosync}
 Requires:      corosync
 BuildRequires: corosynclib-devel
-%endif
-
-%if %{with heartbeat}
-# Do not require heartbeat, the admin should select which stack to use and install it
-BuildRequires: cluster-glue-libs-devel heartbeat-devel heartbeat-libs >= 3.0.0
-%endif
 
 %if %{with stonithd}
 BuildRequires: cluster-glue-libs-devel
@@ -179,130 +134,145 @@ BuildRequires: publican inkscape asciidoc
 
 %description
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
+manager for Corosync, CMAN and/or Linux-HA.
 
-It supports "n-node" clusters with significant capabilities for
-managing resources and dependencies.
+It supports more than 16 node clusters with significant capabilities
+for managing resources and dependencies.
 
 It will run scripts at initialization, when machines go up or down,
 when related resources fail and can be configured to periodically check
 resource health.
 
 Available rpmbuild rebuild options:
-  --with(out) : heartbeat cman corosync doc publican snmp esmtp pre_release
+  --with(out) : cman stonithd doc coverage profiling pre_release upstart_job
 
 %package cli
-License:      GPLv2+ and LGPLv2+
-Summary:      Command line tools for controlling Pacemaker clusters
-Group:        System Environment/Daemons
-Requires:     %{name}-libs = %{version}-%{release}
+License:       GPLv2+ and LGPLv2+
+Summary:       Command line tools for controlling Pacemaker clusters
+Group:         System Environment/Daemons
+Requires:      %{name}-libs = %{version}-%{release}
+Requires:      perl-TimeDate
 
 %description cli
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
+manager for Corosync, CMAN and/or Linux-HA.
 
 The %{name}-cli package contains command line tools that can be used
 to query and control the cluster from machines that may, or may not,
 be part of the cluster.
 
 %package -n %{name}-libs
-License:      GPLv2+ and LGPLv2+
-Summary:      Core Pacemaker libraries
-Group:        System Environment/Daemons
+License:       GPLv2+ and LGPLv2+
+Summary:       Core Pacemaker libraries
+Group:         System Environment/Daemons
 
 %description -n %{name}-libs
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
+manager for Corosync, CMAN and/or Linux-HA.
 
 The %{name}-libs package contains shared libraries needed for cluster
 nodes and those just running the CLI tools.
 
 %package -n %{name}-cluster-libs
-License:      GPLv2+ and LGPLv2+
-Summary:      Cluster Libraries used by Pacemaker
-Group:        System Environment/Daemons
-Requires:     %{name}-libs = %{version}-%{release}
+License:       GPLv2+ and LGPLv2+
+Summary:       Cluster Libraries used by Pacemaker
+Group:         System Environment/Daemons
+Requires:      %{name}-libs = %{version}-%{release}
 
 %description -n %{name}-cluster-libs
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
+manager for Corosync, CMAN and/or Linux-HA.
 
 The %{name}-cluster-libs package contains cluster-aware shared
 libraries needed for nodes that will form part of the cluster nodes.
 
-%package -n %{name}-libs-devel 
-License:      GPLv2+ and LGPLv2+
-Summary:      Pacemaker development package
-Group:        Development/Libraries
-Requires:     %{name}-libs = %{version}-%{release}
-Requires:     %{name}-cluster-libs = %{version}-%{release}
-Requires:     libtool-ltdl-devel libxml2-devel libxslt-devel bzip2-devel glib2-devel 
-%if %{with corosync}
-Requires:     corosynclib-devel
+%package remote
+License:       GPLv2+ and LGPLv2+
+Summary:       Pacemaker remote daemon for non-cluster nodes
+Group:         System Environment/Daemons
+Requires:      %{name}-libs = %{version}-%{release}
+Requires:      %{name}-cli = %{version}-%{release}
+Requires:      resource-agents
+%if %{defined systemd_requires}
+%systemd_requires
 %endif
-%if %{with heartbeat}
-Requires:     cluster-glue-libs-devel heartbeat-devel
-%endif
+
+%description remote
+Pacemaker is an advanced, scalable High-Availability cluster resource
+manager for Corosync, CMAN and/or Linux-HA.
+
+The %{name}-remote package contains the Pacemaker Remote daemon
+which is capable of extending pacemaker functionality to remote
+nodes not running the full corosync/cluster stack.
+
+%package -n %{name}-libs-devel
+License:       GPLv2+ and LGPLv2+
+Summary:       Pacemaker development package
+Group:         Development/Libraries
+Requires:      %{name}-cts = %{version}-%{release}
+Requires:      %{name}-libs = %{version}-%{release}
+Requires:      %{name}-cluster-libs = %{version}-%{release}
+Requires:      libtool-ltdl-devel libqb-devel libuuid-devel
+Requires:      libxml2-devel libxslt-devel bzip2-devel glib2-devel
+Requires:      corosynclib-devel
 
 %description -n %{name}-libs-devel
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
+manager for Corosync, CMAN and/or Linux-HA.
 
 The %{name}-libs-devel package contains headers and shared libraries
 for developing tools for Pacemaker.
 
+%package       cts
+License:       GPLv2+ and LGPLv2+
+Summary:       Test framework for cluster-related technologies like Pacemaker
+Group:         System Environment/Daemons
+Requires:      python
+Requires:      %{name}-libs = %{version}-%{release}
 
-%package      cts
-License:      GPLv2+ and LGPLv2+
-Summary:      Test framework for cluster-related technologies like Pacemaker
-Group:        System Environment/Daemons
-Requires:     python
-
-%description  cts
+%description   cts
 Test framework for cluster-related technologies like Pacemaker
 
-%package      doc
-License:      GPLv2+ and LGPLv2+
-Summary:      Documentation for Pacemaker
-Group:        Documentation
+%package       doc
+License:       GPLv2+ and LGPLv2+
+Summary:       Documentation for Pacemaker
+Group:         Documentation
 
-%description  doc
+%description   doc
 Documentation for Pacemaker.
 
 Pacemaker is an advanced, scalable High-Availability cluster resource
-manager for Linux-HA (Heartbeat) and/or Corosync.
-
+manager for Corosync, CMAN and/or Linux-HA.
 
 %prep
-%setup -q -n %{upstream_prefix}-%{upstream_version}
+%setup -q -n %{name}-%{commit}
 
 # Force the local time
 #
-# 'hg archive' sets the file date to the date of the last commit.
+# 'git' sets the file date to the date of the last commit.
 # This can result in files having been created in the future
-# when building on machines in timezones 'behind' the one the 
+# when building on machines in timezones 'behind' the one the
 # commit occurred in - which seriously confuses 'make'
 find . -exec touch \{\} \;
 
 %build
 ./autogen.sh
 
-%if %{with snmp}
-eval `objdump --headers --private-headers /usr/bin/perl | grep RPATH | awk '{print "export LD_LIBRARY_PATH="$2}'`
-%endif
-
 # RHEL <= 5 does not support --docdir
 docdir=%{pcmk_docdir} %{configure}                 \
-        %{!?with_heartbeat:  --without-heartbeat}  \
-        %{!?with_corosync:   --without-ais}        \
-        %{!?with_esmtp:      --without-esmtp}      \
-        %{!?with_snmp:       --without-snmp}       \
-        %{?with_cman:        --with-cman}          \
         %{?with_profiling:   --with-profiling}     \
-        %{?with_gcov:        --with-gcov}          \
+        %{?with_coverage:    --with-coverage}      \
+        %{!?with_cman:       --without-cman}       \
+	--without-heartbeat			   \
         --with-initdir=%{_initrddir}               \
         --localstatedir=%{_var}                    \
         --with-version=%{version}-%{release}
+
+%if 0%{?suse_version} >= 1200
+# Fedora handles rpath removal automagically
+sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
+sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
+%endif
 
 make %{_smp_mflags} V=1 docdir=%{pcmk_docdir} all
 
@@ -314,6 +284,12 @@ mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/sysconfig
 mkdir -p ${RPM_BUILD_ROOT}%{_var}/lib/pacemaker/cores
 install -m 644 mcp/pacemaker.sysconfig ${RPM_BUILD_ROOT}%{_sysconfdir}/sysconfig/pacemaker
 
+%if %{with upstart_job}
+mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/init
+install -m 644 mcp/pacemaker.upstart ${RPM_BUILD_ROOT}%{_sysconfdir}/init/pacemaker.conf
+install -m 644 mcp/pacemaker.combined.upstart ${RPM_BUILD_ROOT}%{_sysconfdir}/init/pacemaker.combined.conf
+%endif
+
 # Scripts that should be executable
 chmod a+x %{buildroot}/%{_datadir}/pacemaker/tests/cts/CTSlab.py
 
@@ -322,7 +298,7 @@ find %{buildroot} -name '*.xml' -type f -print0 | xargs -0 chmod a-x
 find %{buildroot} -name '*.xsl' -type f -print0 | xargs -0 chmod a-x
 find %{buildroot} -name '*.rng' -type f -print0 | xargs -0 chmod a-x
 find %{buildroot} -name '*.dtd' -type f -print0 | xargs -0 chmod a-x
- 
+
 # Dont package static libs
 find %{buildroot} -name '*.a' -type f -print0 | xargs -0 rm -f
 find %{buildroot} -name '*.la' -type f -print0 | xargs -0 rm -f
@@ -330,7 +306,18 @@ find %{buildroot} -name '*.la' -type f -print0 | xargs -0 rm -f
 # Do not package these either
 rm -f %{buildroot}/%{_libdir}/service_crm.so
 
-%if %{with gcov}
+# Don't ship init scripts for systemd based platforms
+%if %{defined _unitdir}
+rm -f %{buildroot}/%{_initrddir}/pacemaker
+rm -f %{buildroot}/%{_initrddir}/pacemaker_remote
+%endif
+
+# Only useful on rhel6
+rm -f %{buildroot}/%{_bindir}/ccs2cib
+rm -f %{buildroot}/%{_bindir}/ccs_flatten
+rm -f %{buildroot}/%{_bindir}/disable_rgmanager
+
+%if %{with coverage}
 GCOV_BASE=%{buildroot}/%{_var}/lib/pacemaker/gcov
 mkdir -p $GCOV_BASE
 find . -name '*.gcno' -type f | while read F ; do
@@ -343,22 +330,54 @@ done
 %clean
 rm -rf %{buildroot}
 
-%post
 %if %{defined _unitdir}
-/bin/systemctl daemon-reload >/dev/null 2>&1 || :
-%endif
+
+%post
+%systemd_post pacemaker.service
+
+%preun
+%systemd_preun pacemaker.service
+
+%postun
+%systemd_postun_with_restart pacemaker.service 
+
+%post remote
+%systemd_post pacemaker_remote.service
+
+%preun remote
+%systemd_preun pacemaker_remote.service
+
+%postun remote
+%systemd_postun_with_restart pacemaker_remote.service 
+
+%else
+
+%post
 /sbin/chkconfig --add pacemaker || :
 
 %preun
+/sbin/service pacemaker stop || :
 if [ $1 -eq 0 ]; then
     # Package removal, not upgrade
-    /sbin/service pacemaker stop &>/dev/null || :
     /sbin/chkconfig --del pacemaker || :
 fi
 
+%post remote
+/sbin/chkconfig --add pacemaker_remote || :
+
+%preun remote
+/sbin/service pacemaker_remote stop &>/dev/null || :
+if [ $1 -eq 0 ]; then
+    # Package removal, not upgrade
+    /sbin/chkconfig --del pacemaker_remote || :
+fi
+
+%endif
+
 %pre -n %{name}-libs
-getent group %{gname} >/dev/null || groupadd -r %{gname}
-getent passwd %{uname} >/dev/null || useradd -r -g %{gname} -s /sbin/nologin -c "heartbeat user" %{uname}
+
+getent group %{gname} >/dev/null || groupadd -r %{gname} -g 189
+getent passwd %{uname} >/dev/null || useradd -r -g %{gname} -u 189 -s /sbin/nologin -c "cluster user" %{uname}
 exit 0
 
 %post -n %{name}-libs -p /sbin/ldconfig
@@ -376,22 +395,20 @@ exit 0
 %exclude %{_datadir}/pacemaker/tests
 
 %config(noreplace) %{_sysconfdir}/sysconfig/pacemaker
-%if %{with corosync}
+%config(noreplace) %{_sysconfdir}/logrotate.d/pacemaker
 %{_sbindir}/pacemakerd
-%{_initrddir}/pacemaker
-%endif
 
 %if %{defined _unitdir}
 %{_unitdir}/pacemaker.service
+%else
+%{_initrddir}/pacemaker
 %endif
 
 %{_datadir}/pacemaker
 %{_datadir}/snmp/mibs/PCMK-MIB.txt
+%exclude %{_libexecdir}/pacemaker/lrmd_test
+%exclude %{_sbindir}/pacemaker_remoted
 %{_libexecdir}/pacemaker/*
-
-%if %{with heartbeat}
-%{_libdir}/heartbeat/*
-%endif
 
 %{_sbindir}/crm_attribute
 %{_sbindir}/crm_master
@@ -399,14 +416,7 @@ exit 0
 %{_sbindir}/attrd_updater
 %{_sbindir}/fence_legacy
 %{_sbindir}/fence_pcmk
-%{_bindir}/ccs2cib
-%{_bindir}/ccs_flatten
-%{_bindir}/disable_rgmanager
 %{_sbindir}/stonith_admin
-
-%if %{with heartbeat}
-%{_sbindir}/crm_uuid
-%endif
 
 %doc %{_mandir}/man7/*
 %doc %{_mandir}/man8/attrd_updater.*
@@ -414,9 +424,8 @@ exit 0
 %doc %{_mandir}/man8/crm_node.*
 %doc %{_mandir}/man8/crm_master.*
 %doc %{_mandir}/man8/fence_pcmk.*
-%if %{with corosync}
+%doc %{_mandir}/man8/fence_legacy.*
 %doc %{_mandir}/man8/pacemakerd.*
-%endif
 %doc %{_mandir}/man8/stonith_admin.*
 
 %doc COPYING
@@ -433,12 +442,15 @@ exit 0
 %dir /usr/lib/ocf/resource.d
 /usr/lib/ocf/resource.d/pacemaker
 
-%if %{with corosync}
-%if 0%{?cs_major} < 2
-%if 0%{?cs_minor} < 8
+%if "%{?cs_version}" != "UNKNOWN"
+%if 0%{?cs_version} < 2
 %{_libexecdir}/lcrso/pacemaker.lcrso
 %endif
 %endif
+
+%if %{with upstart_job}
+%config(noreplace) %{_sysconfdir}/init/pacemaker.conf
+%config(noreplace) %{_sysconfdir}/init/pacemaker.combined.conf
 %endif
 
 %files cli
@@ -463,9 +475,9 @@ exit 0
 %exclude %{_mandir}/man8/crm_node.*
 %exclude %{_mandir}/man8/crm_master.*
 %exclude %{_mandir}/man8/fence_pcmk.*
-%if %{with corosync}
+%exclude %{_mandir}/man8/fence_legacy.*
 %exclude %{_mandir}/man8/pacemakerd.*
-%endif
+%exclude %{_mandir}/man8/pacemaker_remoted.*
 %exclude %{_mandir}/man8/stonith_admin.*
 
 %doc COPYING
@@ -482,6 +494,7 @@ exit 0
 %{_libdir}/libpe_status.so.*
 %{_libdir}/libpe_rules.so.*
 %{_libdir}/libpengine.so.*
+%{_libdir}/libstonithd.so.*
 %{_libdir}/libtransitioner.so.*
 %doc COPYING.LIB
 %doc AUTHORS
@@ -489,7 +502,21 @@ exit 0
 %files -n %{name}-cluster-libs
 %defattr(-,root,root)
 %{_libdir}/libcrmcluster.so.*
-%{_libdir}/libstonithd.so.*
+%doc COPYING.LIB
+%doc AUTHORS
+
+%files remote
+%defattr(-,root,root)
+
+%config(noreplace) %{_sysconfdir}/sysconfig/pacemaker
+%if %{defined _unitdir}
+%{_unitdir}/pacemaker_remote.service
+%else
+%{_initrddir}/pacemaker_remote
+%endif
+
+%{_sbindir}/pacemaker_remoted
+%{_mandir}/man8/pacemaker_remoted.*
 %doc COPYING.LIB
 %doc AUTHORS
 
@@ -499,8 +526,9 @@ exit 0
 
 %files cts
 %defattr(-,root,root)
-%{py_sitedir}/cts
+%{py_site}/cts
 %{_datadir}/pacemaker/tests/cts
+%{_libexecdir}/pacemaker/lrmd_test
 %doc COPYING.LIB
 %doc AUTHORS
 
@@ -510,17 +538,43 @@ exit 0
 %{_datadir}/pacemaker/tests
 %{_includedir}/pacemaker
 %{_libdir}/*.so
-%if %{with gcov}
-%{_var}/lib/pacemaker/gcov
+%if %{with coverage}
+%{_var}/lib/pacemaker
 %endif
 %{_libdir}/pkgconfig/*.pc
 %doc COPYING.LIB
 %doc AUTHORS
 
 %changelog
+* Fri Jul 26 2013 Andrew Beekhof <andrew@beekhof.net> 1.1.10-1
+- Update source tarball to revision: Pacemaker-1.1.10
+- Changesets: 602
+- Diff:       143 files changed, 8162 insertions(+), 5159 deletions(-)
+- See included ChangeLog file or https://raw.github.com/ClusterLabs/pacemaker/master/ChangeLog for full details
 
-* Wed Jun 20 2012 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.8-0.1
-- 1.1.8 pre-releases
+* Thu Jun 20 2013 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.9-2
+- Simplify the spec file
+- Drop uncommon bcond variations: 
+  with-heartbeat, without-cman, without-corosync, with-esmtp, with-snmp
+- Drop bcond compatibility macros (everywhere has them now)
+- Simplify python macros
+- Use macroized systemd pre,post scriptlets
+- Don't install SYSV init scripts if systemd is in use 
+
+* Fri Mar 08 2013 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.9-1
+- Update source tarball to revision: 7e42d77
+- Statistics:
+  Changesets: 731
+  Diff:       1301 files changed, 92909 insertions(+), 57455 deletions(-)
+- See included ChangeLog file or https://github.com/ClusterLabs/pacemaker/blob/master/ChangeLog for details
+
+* Thu Sep 20 2012 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.8-1
+- Update source tarball to revision: 1a5341f
+- Statistics:
+  Changesets: 1019
+  Diff:       2107 files changed, 117258 insertions(+), 73606 deletions(-)
+- See included ChangeLog file or https://github.com/ClusterLabs/pacemaker/blob/master/ChangeLog for details
+
 
 * Wed Mar 28 2012 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.7-1
 - Update source tarball to revision: bc7ff2c
@@ -607,7 +661,7 @@ exit 0
   + High: cib: Prevent use-after-free for remote plaintext connections
   + High: crmd: Bug lf#2201 - Prevent use-of-NULL when running heartbeat
 
-* Wed Oct 13 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.5-3
+* Tue Oct 13 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.5-3
 - Update the tarball from upstream to version 38cd629e5c3c
   + High: Core: Bug lf#2169 - Allow dtd/schema validation to be disabled
   + High: PE: Bug lf#2106 - Not all anonymous clone children are restarted after configuration change
@@ -640,7 +694,7 @@ exit 0
 - No longer remove RPATH data, it prevents us finding libperl.so and no other
   libraries were being hardcoded
 - Compile in support for heartbeat
-- Conditionally add heartbeat-devel and corosynclib-devel to the -devel requirements 
+- Conditionally add heartbeat-devel and corosynclib-devel to the -devel requirements
   depending on which stacks are supported
 
 * Mon Aug 17 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.5-1
@@ -672,7 +726,7 @@ exit 0
 * Fri Jul  24 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.4-3
 - Initial Fedora checkin
 - Include an AUTHORS and license file in each package
-- Change the library package name to pacemaker-libs to be more 
+- Change the library package name to pacemaker-libs to be more
   Fedora compliant
 - Remove execute permissions from xml related files
 - Reference the new cluster-glue devel package name

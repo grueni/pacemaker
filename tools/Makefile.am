@@ -5,44 +5,41 @@
 # modify it under the terms of the GNU General Public License
 # as published by the Free Software Foundation; either version 2
 # of the License, or (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #
-MAINTAINERCLEANFILES    = Makefile.in 
-
-INCLUDES                = -I$(top_builddir)/include -I$(top_srcdir)/include   \
-			  -I$(top_builddir)/libltdl -I$(top_srcdir)/libltdl
+include $(top_srcdir)/Makefile.common
 
 COMMONLIBS	= 							\
 		$(top_builddir)/lib/common/libcrmcommon.la		\
 		$(top_builddir)/lib/cib/libcib.la			\
-		$(CURSESLIBS) $(CLUSTERLIBS) 
+		$(CURSESLIBS) $(CLUSTERLIBS)
 
 headerdir               = $(pkgincludedir)/crm
-header_HEADERS		= 
+header_HEADERS		=
 
 pcmkdir			= $(datadir)/$(PACKAGE)
 pcmk_DATA		= report.common report.collector
 
 sbin_SCRIPTS		= crm_report crm_standby crm_master crm_failcount
+if BUILD_CIBSECRETS
+sbin_SCRIPTS		+= cibsecret
+endif
 EXTRA_DIST		= $(sbin_SCRIPTS)
-
-halibdir		= $(CRM_DAEMON_DIR)
-halib_PROGRAMS		= attrd
 
 sbin_PROGRAMS		= crm_simulate crmadmin cibadmin crm_node crm_attribute crm_resource crm_verify \
 			 crm_shadow attrd_updater crm_diff crm_mon iso8601 crm_ticket crm_error
 
-clidir			= $(datadir)/$(PACKAGE)/tests/cli
-cli_SCRIPTS		= regression.sh
-cli_DATA		= regression.exp cli.supp
+testdir			= $(datadir)/$(PACKAGE)/tests/cli
+test_SCRIPTS		= regression.sh
+test_DATA               = regression.dates.exp regression.tools.exp regression.acls.exp 
 
 if BUILD_HEARTBEAT_SUPPORT
 sbin_PROGRAMS           += crm_uuid
@@ -54,13 +51,11 @@ if BUILD_OPENIPMI_SERVICELOG
 sbin_PROGRAMS		+= ipmiservicelogd
 endif
 
-if BUILD_HELP
-man8_MANS =		$(sbin_PROGRAMS:%=%.8) $(sbin_SCRIPTS:%=%.8)
-endif
-
 ## SOURCES
 
-noinst_HEADERS		= 
+noinst_HEADERS		=
+
+MAN8DEPS		= crm_attribute crm_node
 
 crmadmin_SOURCES	= crmadmin.c
 crmadmin_LDADD		= $(top_builddir)/lib/pengine/libpe_status.la \
@@ -73,10 +68,10 @@ crm_uuid_SOURCES	= crm_uuid.c
 crm_uuid_LDADD		= $(COMMONLIBS) $(top_builddir)/lib/cluster/libcrmcluster.la
 
 cibadmin_SOURCES	= cibadmin.c
-cibadmin_LDADD		= $(COMMONLIBS) 
+cibadmin_LDADD		= $(COMMONLIBS)
 
 crm_shadow_SOURCES	= cib_shadow.c
-crm_shadow_LDADD	= $(COMMONLIBS) 
+crm_shadow_LDADD	= $(COMMONLIBS)
 
 crm_node_SOURCES	= crm_node.c
 crm_node_LDADD		= $(top_builddir)/lib/cluster/libcrmcluster.la \
@@ -108,7 +103,7 @@ crm_verify_LDADD	= $(top_builddir)/lib/pengine/libpe_status.la 	\
 			$(COMMONLIBS)
 
 crm_attribute_SOURCES	= crm_attribute.c
-crm_attribute_LDADD	= $(top_builddir)/lib/cluster/libcrmcluster.la $(COMMONLIBS) 
+crm_attribute_LDADD	= $(top_builddir)/lib/cluster/libcrmcluster.la $(COMMONLIBS)
 
 crm_resource_SOURCES	= crm_resource.c
 crm_resource_LDADD	= $(top_builddir)/lib/pengine/libpe_rules.la  \
@@ -119,13 +114,7 @@ crm_resource_LDADD	= $(top_builddir)/lib/pengine/libpe_rules.la  \
 			$(COMMONLIBS)
 
 iso8601_SOURCES		= test.iso8601.c
-iso8601_LDADD		= $(COMMONLIBS) 
-
-attrd_SOURCES		= attrd.c
-attrd_LDADD		= $(top_builddir)/lib/cluster/libcrmcluster.la $(COMMONLIBS)
-
-#pingd_SOURCES		= pingd.c
-#pingd_LDADD		= $(COMMONLIBS)
+iso8601_LDADD		= $(COMMONLIBS)
 
 attrd_updater_SOURCES	= attrd_updater.c
 attrd_updater_LDADD	= $(COMMONLIBS)
@@ -144,14 +133,9 @@ endif
 
 if BUILD_OPENIPMI_SERVICELOG
 ipmiservicelogd_SOURCES	= ipmiservicelogd.c
-ipmiservicelogd_CFLAGS	= $(OPENIPMI_SERVICELOG_CFLAGS) $(SERVICELOG_CFLAGS) 
+ipmiservicelogd_CFLAGS	= $(OPENIPMI_SERVICELOG_CFLAGS) $(SERVICELOG_CFLAGS)
 ipmiservicelogd_LDFLAGS	= $(top_builddir)/lib/common/libcrmcommon.la $(OPENIPMI_SERVICELOG_LIBS) $(SERVICELOG_LIBS)
 endif
-
-%.8:	% crm_attribute
-	echo Creating $@
-	chmod a+x $(top_builddir)/tools/$<
-	PATH=$(top_builddir)/tools:$$PATH $(HELP2MAN) --output $@ --no-info --section 8 --name "Part of the Pacemaker cluster resource manager" $(top_builddir)/tools/$<
 
 clean-generic:
 	rm -f *.log *.debug *.xml *~

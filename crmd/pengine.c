@@ -84,7 +84,6 @@ save_cib_contents(xmlNode * msg, int call_id, int rc, xmlNode * output, void *us
 static void
 pe_ipc_destroy(gpointer user_data)
 {
-    clear_bit(fsa_input_register, pe_subsystem->flag_connected);
     if (is_set(fsa_input_register, pe_subsystem->flag_required)) {
         int rc = pcmk_ok;
         char *uuid_str = crm_generate_uuid();
@@ -103,13 +102,16 @@ pe_ipc_destroy(gpointer user_data)
          *
          */
         rc = fsa_cib_conn->cmds->query(fsa_cib_conn, NULL, NULL, cib_scope_local);
-        fsa_cib_conn->cmds->register_callback(fsa_cib_conn, rc, 5, FALSE, uuid_str,
-                                              "save_cib_contents", save_cib_contents);
+        fsa_register_cib_callback(rc, FALSE, uuid_str, save_cib_contents);
 
     } else {
+        if (is_heartbeat_cluster()) {
+            stop_subsystem(pe_subsystem, FALSE);
+        }
         crm_info("Connection to the Policy Engine released");
     }
 
+    clear_bit(fsa_input_register, pe_subsystem->flag_connected);
     pe_subsystem->pid = -1;
     pe_subsystem->source = NULL;
     pe_subsystem->client = NULL;
@@ -143,18 +145,17 @@ do_pe_control(long long action,
     long long stop_actions = A_PE_STOP;
     long long start_actions = A_PE_START;
 
-    static struct ipc_client_callbacks pe_callbacks = 
-        {
-            .dispatch = pe_ipc_dispatch,
-            .destroy = pe_ipc_destroy
-        };
-    
+    static struct ipc_client_callbacks pe_callbacks = {
+        .dispatch = pe_ipc_dispatch,
+        .destroy = pe_ipc_destroy
+    };
+
     if (action & stop_actions) {
         clear_bit(fsa_input_register, pe_subsystem->flag_required);
 
         mainloop_del_ipc_client(pe_subsystem->source);
         pe_subsystem->source = NULL;
-        
+
         clear_bit(fsa_input_register, pe_subsystem->flag_connected);
     }
 
@@ -162,7 +163,9 @@ do_pe_control(long long action,
         if (cur_state != S_STOPPING) {
             set_bit(fsa_input_register, pe_subsystem->flag_required);
 
-            pe_subsystem->source = mainloop_add_ipc_client(CRM_SYSTEM_PENGINE, G_PRIORITY_DEFAULT, 5*1024*1024/* 5Mb */, NULL, &pe_callbacks);
+            pe_subsystem->source =
+                mainloop_add_ipc_client(CRM_SYSTEM_PENGINE, G_PRIORITY_DEFAULT,
+                                        5 * 1024 * 1024 /* 5Mb */ , NULL, &pe_callbacks);
 
             if (pe_subsystem->source == NULL) {
                 crm_warn("Setup of client connection failed, not adding channel to mainloop");
@@ -204,13 +207,13 @@ do_pe_invoke(long long action,
 
         } else {
             crm_info("Waiting for the PE to connect");
-            crmd_fsa_stall(NULL);
+            crmd_fsa_stall(FALSE);
             register_fsa_action(A_PE_START);
         }
         return;
     }
 
-    if(cur_state != S_POLICY_ENGINE) {
+    if (cur_state != S_POLICY_ENGINE) {
         crm_notice("No need to invoke the PE in state %s", fsa_state2string(cur_state));
         return;
     }
@@ -224,14 +227,14 @@ do_pe_invoke(long long action,
 
     fsa_pe_query = fsa_cib_conn->cmds->query(fsa_cib_conn, NULL, NULL, cib_scope_local);
 
-    crm_debug("Query %d: Requesting the current CIB: %s", fsa_pe_query, fsa_state2string(fsa_state));
+    crm_debug("Query %d: Requesting the current CIB: %s", fsa_pe_query,
+              fsa_state2string(fsa_state));
 
     /* Make sure any queued calculations are discarded */
     free(fsa_pe_ref);
     fsa_pe_ref = NULL;
 
-    fsa_cib_conn->cmds->register_callback(fsa_cib_conn, fsa_pe_query, 60, FALSE, NULL,
-                                          "do_pe_invoke_callback", do_pe_invoke_callback);
+    fsa_register_cib_callback(fsa_pe_query, FALSE, NULL, do_pe_invoke_callback);
 }
 
 void
@@ -271,6 +274,9 @@ do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
 
     CRM_LOG_ASSERT(output != NULL);
 
+    /* refresh our remote-node cache when the pengine is invoked */
+    crm_remote_peer_cache_refresh(output);
+
     crm_xml_add(output, XML_ATTR_DC_UUID, fsa_our_uuid);
     crm_xml_add_int(output, XML_ATTR_HAVE_QUORUM, fsa_has_quorum);
 
@@ -290,6 +296,6 @@ do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
     }
 
     crm_debug("Invoking the PE: query=%d, ref=%s, seq=%llu, quorate=%d",
-             fsa_pe_query, fsa_pe_ref, crm_peer_seq, fsa_has_quorum);
+              fsa_pe_query, fsa_pe_ref, crm_peer_seq, fsa_has_quorum);
     free_xml(cmd);
 }

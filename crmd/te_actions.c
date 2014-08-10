@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -29,10 +29,12 @@
 #include <crmd_fsa.h>
 #include <crmd_messages.h>
 #include <crm/cluster.h>
+#include <throttle.h>
 
 char *te_uuid = NULL;
-
+GHashTable *te_targets = NULL;
 void send_rsc_command(crm_action_t * action);
+static void te_update_job_count(crm_action_t * action, int offset);
 
 static void
 te_start_action_timer(crm_graph_t * graph, crm_action_t * action)
@@ -51,7 +53,7 @@ static gboolean
 te_pseudo_action(crm_graph_t * graph, crm_action_t * pseudo)
 {
     crm_debug("Pseudo action %d fired and confirmed", pseudo->id);
-    pseudo->confirmed = TRUE;
+    te_action_confirmed(pseudo);
     update_graph(graph, pseudo);
     trigger_graph();
     return TRUE;
@@ -69,22 +71,21 @@ send_stonith_update(crm_action_t * action, const char *target, const char *uuid)
     CRM_CHECK(target != NULL, return);
     CRM_CHECK(uuid != NULL, return);
 
-    if(get_node_uuid(0, target) == NULL) {
-        set_node_uuid(target, uuid);
-    }
-
     /* Make sure the membership and join caches are accurate */
-    peer = crm_get_peer(0, target);
-    if(peer->uuid == NULL) {
+    peer = crm_get_peer_full(0, target, CRM_GET_PEER_CLUSTER | CRM_GET_PEER_REMOTE);
+
+    CRM_CHECK(peer != NULL, return);
+
+    if (peer->uuid == NULL) {
         crm_info("Recording uuid '%s' for node '%s'", uuid, target);
         peer->uuid = strdup(uuid);
     }
-    crm_update_peer_proc(__FUNCTION__, peer, crm_proc_none, NULL);
-    crm_update_peer_state(__FUNCTION__, peer, CRM_NODE_LOST, 0);
-    crm_update_peer_expected(__FUNCTION__, peer, CRMD_JOINSTATE_DOWN);
-    erase_node_from_join(target);
 
-    node_state = do_update_node_cib(peer, node_update_cluster|node_update_peer|node_update_join|node_update_expected, NULL, __FUNCTION__);
+    crmd_peer_down(peer, TRUE);
+    node_state =
+        do_update_node_cib(peer,
+                           node_update_cluster | node_update_peer | node_update_join |
+                           node_update_expected, NULL, __FUNCTION__);
 
     /* Force our known ID */
     crm_xml_add(node_state, XML_ATTR_UUID, uuid);
@@ -94,13 +95,13 @@ send_stonith_update(crm_action_t * action, const char *target, const char *uuid)
 
     /* Delay processing the trigger until the update completes */
     crm_debug("Sending fencing update %d for %s", rc, target);
-    add_cib_op_callback(fsa_cib_conn, rc, FALSE, strdup(target), cib_fencing_updated);
+    fsa_register_cib_callback(rc, FALSE, strdup(target), cib_fencing_updated);
 
     /* Make sure it sticks */
     /* fsa_cib_conn->cmds->bump_epoch(fsa_cib_conn, cib_quorum_override|cib_scope_local);    */
 
-    erase_status_tag(target, XML_CIB_TAG_LRM, cib_scope_local);
-    erase_status_tag(target, XML_TAG_TRANSIENT_NODEATTRS, cib_scope_local);
+    erase_status_tag(peer->uname, XML_CIB_TAG_LRM, cib_scope_local);
+    erase_status_tag(peer->uname, XML_TAG_TRANSIENT_NODEATTRS, cib_scope_local);
 
     free_xml(node_state);
     return;
@@ -138,17 +139,18 @@ te_fence_node(crm_graph_t * graph, crm_action_t * action)
     /* Passing NULL means block until we can connect... */
     te_connect_stonith(NULL);
 
-    if (confirmed_nodes && g_hash_table_size(confirmed_nodes) == 1) {
+    if (crmd_join_phase_count(crm_join_confirmed) == 1) {
         options |= st_opt_allow_suicide;
     }
 
     rc = stonith_api->cmds->fence(stonith_api, options, target, type,
                                   transition_graph->stonith_timeout / 1000, 0);
 
-    stonith_api->cmds->register_callback(
-        stonith_api, rc, transition_graph->stonith_timeout / 1000,
-        st_opt_timeout_updates, generate_transition_key(transition_graph->id, action->id, 0, te_uuid),
-        "tengine_stonith_callback", tengine_stonith_callback);
+    stonith_api->cmds->register_callback(stonith_api, rc, transition_graph->stonith_timeout / 1000,
+                                         st_opt_timeout_updates,
+                                         generate_transition_key(transition_graph->id, action->id,
+                                                                 0, te_uuid),
+                                         "tengine_stonith_callback", tengine_stonith_callback);
 
     return TRUE;
 }
@@ -175,6 +177,7 @@ te_crm_command(crm_graph_t * graph, crm_action_t * action)
     const char *task = NULL;
     const char *value = NULL;
     const char *on_node = NULL;
+    const char *router_node = NULL;
 
     gboolean rc = TRUE;
     gboolean no_wait = FALSE;
@@ -182,17 +185,21 @@ te_crm_command(crm_graph_t * graph, crm_action_t * action)
     id = ID(action->xml);
     task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
     on_node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
+    router_node = crm_element_value(action->xml, XML_LRM_ATTR_ROUTER_NODE);
+
+    if (!router_node) {
+        router_node = on_node;
+    }
 
     CRM_CHECK(on_node != NULL && strlen(on_node) != 0,
-              crm_err( "Corrupted command (id=%s) %s: no node",
-                            crm_str(id), crm_str(task));
+              crm_err("Corrupted command (id=%s) %s: no node", crm_str(id), crm_str(task));
               return FALSE);
 
-    crm_info( "Executing crm-event (%s): %s on %s%s%s",
-                  crm_str(id), crm_str(task), on_node,
-                  is_local ? " (local)" : "", no_wait ? " - no waiting" : "");
+    crm_info("Executing crm-event (%s): %s on %s%s%s",
+             crm_str(id), crm_str(task), on_node,
+             is_local ? " (local)" : "", no_wait ? " - no waiting" : "");
 
-    if (safe_str_eq(on_node, fsa_our_uname)) {
+    if (safe_str_eq(router_node, fsa_our_uname)) {
         is_local = TRUE;
     }
 
@@ -203,26 +210,26 @@ te_crm_command(crm_graph_t * graph, crm_action_t * action)
 
     if (is_local && safe_str_eq(task, CRM_OP_SHUTDOWN)) {
         /* defer until everything else completes */
-        crm_info( "crm-event (%s) is a local shutdown", crm_str(id));
+        crm_info("crm-event (%s) is a local shutdown", crm_str(id));
         graph->completion_action = tg_shutdown;
         graph->abort_reason = "local shutdown";
-        action->confirmed = TRUE;
+        te_action_confirmed(action);
         update_graph(graph, action);
         trigger_graph();
         return TRUE;
 
-    } else if(safe_str_eq(task, CRM_OP_SHUTDOWN)) {
-        crm_node_t *peer = crm_get_peer(0, on_node);
+    } else if (safe_str_eq(task, CRM_OP_SHUTDOWN)) {
+        crm_node_t *peer = crm_get_peer(0, router_node);
         crm_update_peer_expected(__FUNCTION__, peer, CRMD_JOINSTATE_DOWN);
     }
 
-    cmd = create_request(task, action->xml, on_node, CRM_SYSTEM_CRMD, CRM_SYSTEM_TENGINE, NULL);
+    cmd = create_request(task, action->xml, router_node, CRM_SYSTEM_CRMD, CRM_SYSTEM_TENGINE, NULL);
 
     counter =
         generate_transition_key(transition_graph->id, action->id, get_target_rc(action), te_uuid);
     crm_xml_add(cmd, XML_ATTR_TRANSITION_KEY, counter);
 
-    rc = send_cluster_message(crm_get_peer(0, on_node), crm_msg_crmd, cmd, TRUE);
+    rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_crmd, cmd, TRUE);
     free(counter);
     free_xml(cmd);
 
@@ -231,7 +238,7 @@ te_crm_command(crm_graph_t * graph, crm_action_t * action)
         return FALSE;
 
     } else if (no_wait) {
-        action->confirmed = TRUE;
+        te_action_confirmed(action);
         update_graph(graph, action);
         trigger_graph();
 
@@ -322,19 +329,20 @@ cib_action_update(crm_action_t * action, int status, int op_rc)
     op->user_data = generate_transition_key(transition_graph->id, action->id, target_rc, te_uuid);
 
     xml_op = create_operation_update(rsc, op, CRM_FEATURE_SET, target_rc, __FUNCTION__, LOG_INFO);
+    crm_xml_add(xml_op, XML_LRM_ATTR_TARGET, target); /* For context during triage */
     lrmd_free_event(op);
 
     crm_trace("Updating CIB with \"%s\" (%s): %s %s on %s",
-                status < 0 ? "new action" : XML_ATTR_TIMEOUT,
-                crm_element_name(action->xml), crm_str(task), rsc_id, target);
+              status < 0 ? "new action" : XML_ATTR_TIMEOUT,
+              crm_element_name(action->xml), crm_str(task), rsc_id, target);
     crm_log_xml_trace(xml_op, "Op");
 
     rc = fsa_cib_conn->cmds->update(fsa_cib_conn, XML_CIB_TAG_STATUS, state, call_options);
 
     crm_trace("Updating CIB with %s action %d: %s on %s (call_id=%d)",
-                services_lrm_status_str(status), action->id, task_uuid, target, rc);
+              services_lrm_status_str(status), action->id, task_uuid, target, rc);
 
-    add_cib_op_callback(fsa_cib_conn, rc, FALSE, NULL, cib_action_updated);
+    fsa_register_cib_callback(rc, FALSE, NULL, cib_action_updated);
     free_xml(state);
 
     action->sent_update = TRUE;
@@ -366,6 +374,7 @@ te_rsc_command(crm_graph_t * graph, crm_action_t * action)
     const char *task = NULL;
     const char *value = NULL;
     const char *on_node = NULL;
+    const char *router_node = NULL;
     const char *task_uuid = NULL;
 
     CRM_ASSERT(action != NULL);
@@ -375,19 +384,23 @@ te_rsc_command(crm_graph_t * graph, crm_action_t * action)
     on_node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
 
     CRM_CHECK(on_node != NULL && strlen(on_node) != 0,
-              crm_err( "Corrupted command(id=%s) %s: no node",
-                            ID(action->xml), crm_str(task));
+              crm_err("Corrupted command(id=%s) %s: no node", ID(action->xml), crm_str(task));
               return FALSE);
 
     rsc_op = action->xml;
     task = crm_element_value(rsc_op, XML_LRM_ATTR_TASK);
     task_uuid = crm_element_value(action->xml, XML_LRM_ATTR_TASK_KEY);
-    on_node = crm_element_value(rsc_op, XML_LRM_ATTR_TARGET);
+    router_node = crm_element_value(rsc_op, XML_LRM_ATTR_ROUTER_NODE);
+
+    if (!router_node) {
+        router_node = on_node;
+    }
+
     counter =
         generate_transition_key(transition_graph->id, action->id, get_target_rc(action), te_uuid);
     crm_xml_add(rsc_op, XML_ATTR_TRANSITION_KEY, counter);
 
-    if (safe_str_eq(on_node, fsa_our_uname)) {
+    if (safe_str_eq(router_node, fsa_our_uname)) {
         is_local = TRUE;
     }
 
@@ -396,11 +409,11 @@ te_rsc_command(crm_graph_t * graph, crm_action_t * action)
         no_wait = TRUE;
     }
 
-    crm_info("Initiating action %d: %s %s on %s%s%s",
-             action->id, task, task_uuid, on_node,
-             is_local ? " (local)" : "", no_wait ? " - no waiting" : "");
+    crm_notice("Initiating action %d: %s %s on %s%s%s",
+               action->id, task, task_uuid, on_node,
+               is_local ? " (local)" : "", no_wait ? " - no waiting" : "");
 
-    cmd = create_request(CRM_OP_INVOKE_LRM, rsc_op, on_node,
+    cmd = create_request(CRM_OP_INVOKE_LRM, rsc_op, router_node,
                          CRM_SYSTEM_LRMD, CRM_SYSTEM_TENGINE, NULL);
 
     if (is_local) {
@@ -423,46 +436,214 @@ te_rsc_command(crm_graph_t * graph, crm_action_t * action)
         do_lrm_invoke(A_LRM_INVOKE, C_FSA_INTERNAL, fsa_state, I_NULL, &msg);
 
     } else {
-        rc = send_cluster_message(crm_get_peer(0, on_node), crm_msg_lrmd, cmd, TRUE);
+        rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_lrmd, cmd, TRUE);
     }
 
     free(counter);
     free_xml(cmd);
 
     action->executed = TRUE;
+
     if (rc == FALSE) {
         crm_err("Action %d failed: send", action->id);
         return FALSE;
 
     } else if (no_wait) {
-        action->confirmed = TRUE;
+        crm_info("Action %d confirmed - no wait", action->id);
+        action->confirmed = TRUE; /* Just mark confirmed.
+                                   * Don't bump the job count only to immediately decrement it
+                                   */
         update_graph(transition_graph, action);
         trigger_graph();
 
+    } else if (action->confirmed == TRUE) {
+        crm_debug("Action %d: %s %s on %s(timeout %dms) was already confirmed.",
+                  action->id, task, task_uuid, on_node, action->timeout);
     } else {
         if (action->timeout <= 0) {
             crm_err("Action %d: %s %s on %s had an invalid timeout (%dms).  Using %dms instead",
                     action->id, task, task_uuid, on_node, action->timeout, graph->network_delay);
             action->timeout = graph->network_delay;
         }
+        te_update_job_count(action, 1);
         te_start_action_timer(graph, action);
     }
 
     value = crm_meta_value(action->params, XML_OP_ATTR_PENDING);
-    if (crm_is_true(value)) {
+    if (crm_is_true(value)
+        && safe_str_neq(task, CRMD_ACTION_CANCEL)
+        && safe_str_neq(task, CRMD_ACTION_DELETE)) {
         /* write a "pending" entry to the CIB, inhibit notification */
-        crm_info("Recording pending op %s in the CIB", task_uuid);
-        cib_action_update(action, PCMK_LRM_OP_PENDING, PCMK_EXECRA_STATUS_UNKNOWN);
+        crm_debug("Recording pending op %s in the CIB", task_uuid);
+        cib_action_update(action, PCMK_LRM_OP_PENDING, PCMK_OCF_UNKNOWN);
     }
 
     return TRUE;
 }
 
+struct te_peer_s
+{
+        char *name;
+        int jobs;
+        int migrate_jobs;
+};
+
+static void te_peer_free(gpointer p)
+{
+    struct te_peer_s *peer = p;
+
+    free(peer->name);
+    free(peer);
+}
+
+void te_reset_job_counts(void)
+{
+    GHashTableIter iter;
+    struct te_peer_s *peer = NULL;
+
+    if(te_targets == NULL) {
+        te_targets = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, te_peer_free);
+    }
+
+    g_hash_table_iter_init(&iter, te_targets);
+    while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & peer)) {
+        peer->jobs = 0;
+        peer->migrate_jobs = 0;
+    }
+}
+
+static void
+te_update_job_count_on(const char *target, int offset, bool migrate)
+{
+    struct te_peer_s *r = NULL;
+
+    if(target == NULL || te_targets == NULL) {
+        return;
+    }
+
+    r = g_hash_table_lookup(te_targets, target);
+    if(r == NULL) {
+        r = calloc(1, sizeof(struct te_peer_s));
+        r->name = strdup(target);
+        g_hash_table_insert(te_targets, r->name, r);
+    }
+
+    r->jobs += offset;
+    if(migrate) {
+        r->migrate_jobs += offset;
+    }
+    crm_trace("jobs[%s] = %d", target, r->jobs);
+}
+
+static void
+te_update_job_count(crm_action_t * action, int offset)
+{
+    const char *task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
+    const char *target = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
+
+    if (action->type != action_type_rsc || target == NULL) {
+        /* No limit on these */
+        return;
+    }
+
+    if (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED)) {
+        const char *t1 = crm_meta_value(action->params, XML_LRM_ATTR_MIGRATE_SOURCE);
+        const char *t2 = crm_meta_value(action->params, XML_LRM_ATTR_MIGRATE_TARGET);
+
+        te_update_job_count_on(t1, offset, TRUE);
+        te_update_job_count_on(t2, offset, TRUE);
+
+    } else {
+
+        te_update_job_count_on(target, offset, FALSE);
+    }
+}
+
+static gboolean
+te_should_perform_action_on(crm_graph_t * graph, crm_action_t * action, const char *target)
+{
+    int limit = 0;
+    struct te_peer_s *r = NULL;
+    const char *task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
+    const char *id = crm_element_value(action->xml, XML_LRM_ATTR_TASK_KEY);
+
+    if(target == NULL) {
+        /* No limit on these */
+        return TRUE;
+
+    } else if(te_targets == NULL) {
+        return FALSE;
+    }
+
+    r = g_hash_table_lookup(te_targets, target);
+    limit = throttle_get_job_limit(target);
+
+    if(r == NULL) {
+        r = calloc(1, sizeof(struct te_peer_s));
+        r->name = strdup(target);
+        g_hash_table_insert(te_targets, r->name, r);
+    }
+
+    if(limit <= r->jobs) {
+        crm_trace("Peer %s is over their job limit of %d (%d): deferring %s",
+                  target, limit, r->jobs, id);
+        return FALSE;
+
+    } else if(graph->migration_limit > 0 && r->migrate_jobs >= graph->migration_limit) {
+        if (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED)) {
+            crm_trace("Peer %s is over their migration job limit of %d (%d): deferring %s",
+                      target, graph->migration_limit, r->migrate_jobs, id);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static gboolean
+te_should_perform_action(crm_graph_t * graph, crm_action_t * action)
+{
+    const char *target = NULL;
+    const char *task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
+
+    if (action->type != action_type_rsc) {
+        /* No limit on these */
+        return TRUE;
+    }
+
+    if (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED)) {
+        target = crm_meta_value(action->params, XML_LRM_ATTR_MIGRATE_SOURCE);
+        if(te_should_perform_action_on(graph, action, target) == FALSE) {
+            return FALSE;
+        }
+
+        target = crm_meta_value(action->params, XML_LRM_ATTR_MIGRATE_TARGET);
+
+    } else {
+        target = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
+    }
+
+    return te_should_perform_action_on(graph, action, target);
+}
+
+void
+te_action_confirmed(crm_action_t * action)
+{
+    const char *target = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
+
+    if (action->confirmed == FALSE && action->type == action_type_rsc && target != NULL) {
+        te_update_job_count(action, -1);
+    }
+    action->confirmed = TRUE;
+}
+
+
 crm_graph_functions_t te_graph_fns = {
     te_pseudo_action,
     te_rsc_command,
     te_crm_command,
-    te_fence_node
+    te_fence_node,
+    te_should_perform_action,
 };
 
 void
@@ -478,7 +659,10 @@ notify_crmd(crm_graph_t * graph)
     switch (graph->completion_action) {
         case tg_stop:
             type = "stop";
-            /* fall through */
+            if (fsa_state == S_TRANSITION_ENGINE) {
+                event = I_TE_SUCCESS;
+            }
+            break;
         case tg_done:
             type = "done";
             if (fsa_state == S_TRANSITION_ENGINE) {
@@ -489,11 +673,15 @@ notify_crmd(crm_graph_t * graph)
         case tg_restart:
             type = "restart";
             if (fsa_state == S_TRANSITION_ENGINE) {
-                if (transition_timer->period_ms > 0) {
-                    crm_timer_stop(transition_timer);
-                    crm_timer_start(transition_timer);
-                } else if(too_many_st_failures() == FALSE) {
-                    event = I_PE_CALC;
+                if (too_many_st_failures() == FALSE) {
+                    if (transition_timer->period_ms > 0) {
+                        crm_timer_stop(transition_timer);
+                        crm_timer_start(transition_timer);
+                    } else {
+                        event = I_PE_CALC;
+                    }
+                } else {
+                    event = I_TE_SUCCESS;
                 }
 
             } else if (fsa_state == S_POLICY_ENGINE) {
@@ -512,8 +700,7 @@ notify_crmd(crm_graph_t * graph)
             }
     }
 
-    crm_debug( "Transition %d status: %s - %s",
-                  graph->id, type, crm_str(graph->abort_reason));
+    crm_debug("Transition %d status: %s - %s", graph->id, type, crm_str(graph->abort_reason));
 
     graph->abort_reason = NULL;
     graph->completion_action = tg_done;

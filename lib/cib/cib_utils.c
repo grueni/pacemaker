@@ -5,12 +5,12 @@
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -106,17 +106,25 @@ cib_compare_generation(xmlNode * left, xmlNode * right)
     return 0;
 }
 
+/* Deprecated - doesn't expose -EACCES */
 xmlNode *
 get_cib_copy(cib_t * cib)
 {
     xmlNode *xml_cib;
     int options = cib_scope_local | cib_sync_call;
+    int rc = cib->cmds->query(cib, NULL, &xml_cib, options);
 
-    if (cib->cmds->query(cib, NULL, &xml_cib, options) != pcmk_ok) {
-        crm_err("Couldnt retrieve the CIB");
+    if (rc == -EACCES) {
         return NULL;
+
+    } else if (rc != pcmk_ok) {
+        crm_err("Couldnt retrieve the CIB");
+        free_xml(xml_cib);
+        return NULL;
+
     } else if (xml_cib == NULL) {
         crm_err("The CIB result was empty");
+        free_xml(xml_cib);
         return NULL;
     }
 
@@ -130,47 +138,16 @@ get_cib_copy(cib_t * cib)
 xmlNode *
 cib_get_generation(cib_t * cib)
 {
-    xmlNode *the_cib = get_cib_copy(cib);
+    xmlNode *the_cib = NULL;
     xmlNode *generation = create_xml_node(NULL, XML_CIB_TAG_GENERATION_TUPPLE);
 
+    cib->cmds->query(cib, NULL, &the_cib, cib_scope_local | cib_sync_call);
     if (the_cib != NULL) {
         copy_in_properties(generation, the_cib);
         free_xml(the_cib);
     }
 
     return generation;
-}
-
-void
-log_cib_diff(int log_level, xmlNode * diff, const char *function)
-{
-    int add_updates = 0;
-    int add_epoch = 0;
-    int add_admin_epoch = 0;
-
-    int del_updates = 0;
-    int del_epoch = 0;
-    int del_admin_epoch = 0;
-
-    if (diff == NULL) {
-        return;
-    }
-
-    cib_diff_version_details(diff, &add_admin_epoch, &add_epoch, &add_updates,
-                             &del_admin_epoch, &del_epoch, &del_updates);
-
-    if (add_updates != del_updates) {
-        do_crm_log(log_level, "%s: Diff: --- %d.%d.%d", function,
-                   del_admin_epoch, del_epoch, del_updates);
-        do_crm_log(log_level, "%s: Diff: +++ %d.%d.%d", function,
-                   add_admin_epoch, add_epoch, add_updates);
-    } else if (diff != NULL) {
-        do_crm_log(log_level,
-                   "%s: Local-only Change: %d.%d.%d", function,
-                   add_admin_epoch, add_epoch, add_updates);
-    }
-
-    log_xml_diff(log_level, diff, function);
 }
 
 gboolean
@@ -195,25 +172,19 @@ gboolean
 cib_diff_version_details(xmlNode * diff, int *admin_epoch, int *epoch, int *updates,
                          int *_admin_epoch, int *_epoch, int *_updates)
 {
-    xmlNode *tmp = NULL;
+    int add[] = { 0, 0, 0 };
+    int del[] = { 0, 0, 0 };
 
-    tmp = find_xml_node(diff, "diff-added", FALSE);
-    tmp = find_xml_node(tmp, XML_TAG_CIB, FALSE);
-    cib_version_details(tmp, admin_epoch, epoch, updates);
+    xml_patch_versions(diff, add, del);
 
-    tmp = find_xml_node(diff, "diff-removed", FALSE);
-    tmp = find_xml_node(tmp, XML_TAG_CIB, FALSE);
-    cib_version_details(tmp, _admin_epoch, _epoch, _updates);
+    *admin_epoch = add[0];
+    *epoch = add[1];
+    *updates = add[2];
 
-    if(*_admin_epoch < 0) {
-        *_admin_epoch = *admin_epoch;
-    }
-    if(*_epoch < 0) {
-        *_epoch = *epoch;
-    }
-    if(*_updates < 0) {
-        *_updates = *updates;
-    }
+    *_admin_epoch = del[0];
+    *_epoch = del[1];
+    *_updates = del[2];
+
     return TRUE;
 }
 
@@ -262,64 +233,26 @@ get_object_root(const char *object_type, xmlNode * the_root)
     return get_xpath_object(xpath, the_root, LOG_DEBUG_4);
 }
 
-xmlNode *
-create_cib_fragment_adv(xmlNode * update, const char *update_section, const char *source)
-{
-    xmlNode *cib = NULL;
-    gboolean whole_cib = FALSE;
-    xmlNode *object_root = NULL;
-    char *local_section = NULL;
-
-/* 	crm_debug("Creating a blank fragment: %s", update_section); */
-
-    if (update == NULL && update_section == NULL) {
-        crm_trace("Creating a blank fragment");
-        update = createEmptyCib();
-        crm_xml_add(cib, XML_ATTR_ORIGIN, source);
-        return update;
-
-    } else if (update == NULL) {
-        crm_err("No update to create a fragment for");
-        return NULL;
-
-    }
-
-    CRM_CHECK(update_section != NULL, return NULL);
-    if (safe_str_eq(crm_element_name(update), XML_TAG_CIB)) {
-        whole_cib = TRUE;
-    }
-
-    if (whole_cib == FALSE) {
-        cib = createEmptyCib();
-        crm_xml_add(cib, XML_ATTR_ORIGIN, source);
-        object_root = get_object_root(update_section, cib);
-        add_node_copy(object_root, update);
-
-    } else {
-        cib = copy_xml(update);
-        crm_xml_add(cib, XML_ATTR_ORIGIN, source);
-    }
-
-    free(local_section);
-    crm_trace("Verifying created fragment");
-    return cib;
-}
-
 /*
  * It is the callers responsibility to free both the new CIB (output)
  *     and the new CIB (input)
  */
 xmlNode *
-createEmptyCib(void)
+createEmptyCib(int admin_epoch)
 {
     xmlNode *cib_root = NULL, *config = NULL;
 
     cib_root = create_xml_node(NULL, XML_TAG_CIB);
+    crm_xml_add(cib_root, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
+    crm_xml_add(cib_root, XML_ATTR_VALIDATION, xml_latest_schema());
+
+    crm_xml_add_int(cib_root, XML_ATTR_GENERATION, admin_epoch);
+    crm_xml_add_int(cib_root, XML_ATTR_NUMUPDATES, 0);
+    crm_xml_add_int(cib_root, XML_ATTR_GENERATION_ADMIN, 0);
 
     config = create_xml_node(cib_root, XML_CIB_TAG_CONFIGURATION);
     create_xml_node(cib_root, XML_CIB_TAG_STATUS);
 
-/* 	crm_xml_add(cib_root, "version", "1"); */
     create_xml_node(config, XML_CIB_TAG_CRMCONFIG);
     create_xml_node(config, XML_CIB_TAG_NODES);
     create_xml_node(config, XML_CIB_TAG_RESOURCES);
@@ -328,71 +261,25 @@ createEmptyCib(void)
     return cib_root;
 }
 
-static unsigned int dtd_throttle = 0;
-
-void
-fix_cib_diff(xmlNode * last, xmlNode * next, xmlNode * local_diff, gboolean changed)
+static bool
+cib_acl_enabled(xmlNode *xml, const char *user)
 {
-    xmlNode *cib = NULL;
-    xmlNode *diff_child = NULL;
-    const char *tag = NULL;
-    const char *value = NULL;
+    bool rc = FALSE;
 
-    tag = "diff-removed";
-    diff_child = find_xml_node(local_diff, tag, FALSE);
-    if (diff_child == NULL) {
-        diff_child = create_xml_node(local_diff, tag);
+#if ENABLE_ACL
+    if(pcmk_acl_required(user)) {
+        const char *value = NULL;
+        GHashTable *options = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
+
+        cib_read_config(options, xml);
+        value = cib_pref(options, "enable-acl");
+        rc = crm_is_true(value);
+        g_hash_table_destroy(options);
     }
 
-    tag = XML_TAG_CIB;
-    cib = find_xml_node(diff_child, tag, FALSE);
-    if (cib == NULL) {
-        cib = create_xml_node(diff_child, tag);
-    }
-
-    tag = XML_ATTR_GENERATION_ADMIN;
-    value = crm_element_value(last, tag);
-    crm_xml_add(diff_child, tag, value);
-    if (changed) {
-        crm_xml_add(cib, tag, value);
-    }
-
-    tag = XML_ATTR_GENERATION;
-    value = crm_element_value(last, tag);
-    crm_xml_add(diff_child, tag, value);
-    if (changed) {
-        crm_xml_add(cib, tag, value);
-    }
-
-    tag = XML_ATTR_NUMUPDATES;
-    value = crm_element_value(last, tag);
-    crm_xml_add(cib, tag, value);
-    crm_xml_add(diff_child, tag, value);
-
-    tag = "diff-added";
-    diff_child = find_xml_node(local_diff, tag, FALSE);
-    if (diff_child == NULL) {
-        diff_child = create_xml_node(local_diff, tag);
-    }
-
-    tag = XML_TAG_CIB;
-    cib = find_xml_node(diff_child, tag, FALSE);
-    if (cib == NULL) {
-        cib = create_xml_node(diff_child, tag);
-    }
-
-    if (next) {
-        xmlAttrPtr xIter = NULL;
-
-        for (xIter = next->properties; xIter; xIter = xIter->next) {
-            const char *p_name = (const char *)xIter->name;
-            const char *p_value = crm_element_value(next, p_name);
-
-            xmlSetProp(cib, (const xmlChar *)p_name, (const xmlChar *)p_value);
-        }
-    }
-
-    crm_log_xml_trace(local_diff, "Repaired-diff");
+    crm_debug("CIB ACL is %s", rc ? "enabled" : "disabled");
+#endif
+    return rc;
 }
 
 int
@@ -401,18 +288,26 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
                gboolean manage_counters, gboolean * config_changed,
                xmlNode * current_cib, xmlNode ** result_cib, xmlNode ** diff, xmlNode ** output)
 {
-
     int rc = pcmk_ok;
     gboolean check_dtd = TRUE;
+    xmlNode *top = NULL;
     xmlNode *scratch = NULL;
     xmlNode *local_diff = NULL;
-    const char *current_dtd = "unknown";
+
+    const char *new_version = NULL;
+    static struct qb_log_callsite *diff_cs = NULL;
+    const char *user = crm_element_value(req, F_CIB_USER);
+
+    crm_trace("Begin %s%s op", is_query ? "read-only " : "", op);
 
     CRM_CHECK(output != NULL, return -ENOMSG);
     CRM_CHECK(result_cib != NULL, return -ENOMSG);
     CRM_CHECK(config_changed != NULL, return -ENOMSG);
 
-    *output = NULL;
+    if(output) {
+        *output = NULL;
+    }
+
     *result_cib = NULL;
     *config_changed = FALSE;
 
@@ -421,30 +316,98 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
     }
 
     if (is_query) {
-        rc = (*fn) (op, call_options, section, req, input, current_cib, result_cib, output);
+        xmlNode *cib_ro = current_cib;
+        xmlNode *cib_filtered = NULL;
+
+        if(cib_acl_enabled(cib_ro, user)) {
+            if(xml_acl_filtered_copy(user, current_cib, current_cib, &cib_filtered)) {
+                if (cib_filtered == NULL) {
+                    crm_debug("Pre-filtered the entire cib");
+                    return -EACCES;
+                }
+                cib_ro = cib_filtered;
+                crm_log_xml_trace(cib_ro, "filtered");
+            }
+        }
+
+        rc = (*fn) (op, call_options, section, req, input, cib_ro, result_cib, output);
+
+        if(output == NULL || *output == NULL) {
+            /* nothing */
+
+        } else if(cib_filtered == *output) {
+            cib_filtered = NULL; /* Let them have this copy */
+
+        } else if(*output == current_cib) {
+            /* They already know not to free it */
+
+        } else if(cib_filtered && (*output)->doc == cib_filtered->doc) {
+            /* We're about to free the document of which *output is a part */
+            *output = copy_xml(*output);
+
+        } else if((*output)->doc == current_cib->doc) {
+            /* Give them a copy they can free */
+            *output = copy_xml(*output);
+        }
+
+        free_xml(cib_filtered);
         return rc;
     }
 
-    scratch = copy_xml(current_cib);
-    rc = (*fn) (op, call_options, section, req, input, current_cib, &scratch, output);
 
-    CRM_CHECK(current_cib != scratch, return -EINVAL);
+    if (is_set(call_options, cib_zero_copy)) {
+        /* Conditional on v2 patch style */
+
+        scratch = current_cib;
+
+        /* Create a shallow copy of current_cib for the version details */
+        current_cib = create_xml_node(NULL, (const char *)scratch->name);
+        copy_in_properties(current_cib, scratch);
+        top = current_cib;
+
+        xml_track_changes(scratch, user, NULL, cib_acl_enabled(scratch, user));
+        rc = (*fn) (op, call_options, section, req, input, scratch, &scratch, output);
+
+    } else {
+        scratch = copy_xml(current_cib);
+        xml_track_changes(scratch, user, NULL, cib_acl_enabled(scratch, user));
+        rc = (*fn) (op, call_options, section, req, input, current_cib, &scratch, output);
+
+        if(scratch && xml_tracking_changes(scratch) == FALSE) {
+            crm_trace("Inferring changes after %s op", op);
+            xml_track_changes(scratch, user, current_cib, cib_acl_enabled(current_cib, user));
+            xml_calculate_changes(current_cib, scratch);
+        }
+        CRM_CHECK(current_cib != scratch, return -EINVAL);
+    }
+
+    xml_acl_disable(scratch); /* Allow the system to make any additional changes */
 
     if (rc == pcmk_ok && scratch == NULL) {
         rc = -EINVAL;
+        goto done;
+
+    } else if(rc == pcmk_ok && xml_acl_denied(scratch)) {
+        crm_trace("ACL rejected part or all of the proposed changes");
+        rc = -EACCES;
+        goto done;
+
+    } else if (rc != pcmk_ok) {
+        goto done;
     }
 
-    if (rc == pcmk_ok && scratch) {
-        const char *new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);
+    if (scratch) {
+        new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);
 
         if (new_version && compare_version(new_version, CRM_FEATURE_SET) > 0) {
             crm_err("Discarding update with feature set '%s' greater than our own '%s'",
                     new_version, CRM_FEATURE_SET);
             rc = -EPROTONOSUPPORT;
+            goto done;
         }
     }
 
-    if (rc == pcmk_ok && current_cib) {
+    if (current_cib) {
         int old = 0;
         int new = 0;
 
@@ -471,83 +434,146 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
         }
     }
 
-    if (rc == pcmk_ok) {
-        fix_plus_plus_recursive(scratch);
-        current_dtd = crm_element_value(scratch, XML_ATTR_VALIDATION);
+    crm_trace("Massaging CIB contents");
+    strip_text_nodes(scratch);
+    fix_plus_plus_recursive(scratch);
 
-        if (manage_counters) {
-            if (is_set(call_options, cib_inhibit_bcast) && safe_str_eq(section, XML_CIB_TAG_STATUS)) {
-                /* Fast-track changes connections which wont be broadcasting anywhere */
-                cib_update_counter(scratch, XML_ATTR_NUMUPDATES, FALSE);
-                goto done;
+    if (is_set(call_options, cib_zero_copy)) {
+        /* At this point, current_cib is just the 'cib' tag and its properties,
+         *
+         * The v1 format would barf on this, but we know the v2 patch
+         * format only needs it for the top-level version fields
+         */
+        local_diff = xml_create_patchset(2, current_cib, scratch, (bool*)config_changed, manage_counters, FALSE);
+
+    } else {
+        static time_t expires = 0;
+        time_t tm_now = time(NULL);
+        bool with_digest = FALSE;
+
+        if (expires < tm_now) {
+            expires = tm_now + 60;  /* Validate clients are correctly applying v2-style diffs at most once a minute */
+            with_digest = TRUE;
+        }
+
+        local_diff = xml_create_patchset(0, current_cib, scratch, (bool*)config_changed, manage_counters, with_digest);
+    }
+
+    if (diff_cs == NULL) {
+        diff_cs = qb_log_callsite_get(__PRETTY_FUNCTION__, __FILE__, "diff-validation", LOG_DEBUG, __LINE__, crm_trace_nonlog);
+    }
+
+    if(local_diff) {
+        xml_log_patchset(LOG_INFO, __FUNCTION__, local_diff);
+        crm_log_xml_trace(local_diff, "raw patch");
+    }
+
+    if (is_not_set(call_options, cib_zero_copy) /* The original to compare against doesn't exist */
+        && local_diff
+        && crm_is_callsite_active(diff_cs, LOG_TRACE, 0)) {
+
+        /* Validate the calculated patch set */
+        int test_rc, format = 1;
+        xmlNode * c = copy_xml(current_cib);
+
+        crm_element_value_int(local_diff, "format", &format);
+        test_rc = xml_apply_patchset(c, local_diff, manage_counters);
+
+        if(test_rc != pcmk_ok) {
+            save_xml_to_file(c,           "PatchApply:calculated", NULL);
+            save_xml_to_file(current_cib, "PatchApply:input", NULL);
+            save_xml_to_file(scratch,     "PatchApply:actual", NULL);
+            save_xml_to_file(local_diff,  "PatchApply:diff", NULL);
+            crm_err("v%d patchset error, patch failed to apply: %s (%d)", format, pcmk_strerror(test_rc), test_rc);
+        }
+        free_xml(c);
+    }
+
+    xml_log_changes(LOG_TRACE, __FUNCTION__, scratch);
+    xml_accept_changes(scratch);
+
+    if (safe_str_eq(section, XML_CIB_TAG_STATUS)) {
+        /* Throttle the amount of costly validation we perform due to status updates
+         * a) we don't really care whats in the status section
+         * b) we don't validate any of it's contents at the moment anyway
+         */
+        check_dtd = FALSE;
+    }
+
+    /* === scratch must not be modified after this point ===
+     * Exceptions, anything in:
+
+     static filter_t filter[] = {
+     { 0, XML_ATTR_ORIGIN },
+     { 0, XML_CIB_ATTR_WRITTEN },
+     { 0, XML_ATTR_UPDATE_ORIG },
+     { 0, XML_ATTR_UPDATE_CLIENT },
+     { 0, XML_ATTR_UPDATE_USER },
+     };
+     */
+
+    if (*config_changed && is_not_set(call_options, cib_no_mtime)) {
+        char *now_str = NULL;
+        time_t now = time(NULL);
+        const char *schema = crm_element_value(scratch, XML_ATTR_VALIDATION);
+
+        now_str = ctime(&now);
+        now_str[24] = EOS;      /* replace the newline */
+        crm_xml_replace(scratch, XML_CIB_ATTR_WRITTEN, now_str);
+
+        if (schema) {
+            static int minimum_schema = 0;
+            int current_schema = get_schema_version(schema);
+
+            if (minimum_schema == 0) {
+                minimum_schema = get_schema_version("pacemaker-1.1");
             }
 
-            /* The diff calculation in cib_config_changed() accounts for 25% of the
-             * CIB's total CPU usage on the DC
-             *
-             * RNG validation on the otherhand, accounts for only 9%... 
-             */
-            *config_changed = cib_config_changed(current_cib, scratch, &local_diff);
+            /* Does the CIB support the "update-*" attributes... */
+            if (current_schema >= minimum_schema) {
+                const char *origin = crm_element_value(req, F_ORIG);
 
-            if (*config_changed) {
-                cib_update_counter(scratch, XML_ATTR_NUMUPDATES, TRUE);
-                cib_update_counter(scratch, XML_ATTR_GENERATION, FALSE);
-
-            } else {
-                /* Previously we only did this if the diff detected a change
-                 *
-                 * But we replies are still sent, even if nothing changes so we
-                 *   don't save any network traffic and means we need to jump
-                 *   through expensive hoops to detect ordering changes - see below
-                 */
-                cib_update_counter(scratch, XML_ATTR_NUMUPDATES, FALSE);
-
-                if (local_diff == NULL) {
-                    /* Nothing to check */
-                    check_dtd = FALSE;
-
-                    /* Create a fake diff so that notifications, which include a _digest_,
-                     * will be sent to our peers
-                     *
-                     * This is the cheapest way to detect changes to group/set ordering
-                     *
-                     * Previously we compared the old and new digest in cib_config_changed(),
-                     * but that accounted for 15% of the CIB's total CPU usage on the DC
-                     */
-                    local_diff = create_xml_node(NULL, "diff");
-                    crm_xml_add(local_diff, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
-                    create_xml_node(local_diff, "diff-removed");
-                    create_xml_node(local_diff, "diff-added");
-
-                    /* Usually these are attrd re-updates */
-                    crm_log_xml_trace(req, "Non-change");
-
-                } else if (dtd_throttle++ % 20) {
-                    /* Throttle the amount of costly validation we perform due to status updates
-                     * a) we don't really care whats in the status section
-                     * b) we don't validate any of it's contents at the moment anyway
-                     */
-                    check_dtd = FALSE;
-                }
+                CRM_LOG_ASSERT(origin != NULL);
+                crm_xml_replace(scratch, XML_ATTR_UPDATE_ORIG, origin);
+                crm_xml_replace(scratch, XML_ATTR_UPDATE_CLIENT,
+                                crm_element_value(req, F_CIB_CLIENTNAME));
+#if ENABLE_ACL
+                crm_xml_replace(scratch, XML_ATTR_UPDATE_USER, crm_element_value(req, F_CIB_USER));
+#endif
             }
         }
     }
 
-    if (diff != NULL && local_diff != NULL) {
-        /* Only fix the diff if we'll return it... */
-        fix_cib_diff(current_cib, scratch, local_diff, *config_changed);
-        *diff = local_diff;
-        local_diff = NULL;
+    crm_trace("Perform validation: %s", check_dtd ? "true" : "false");
+    if (rc == pcmk_ok && check_dtd && validate_xml(scratch, NULL, TRUE) == FALSE) {
+        const char *current_dtd = crm_element_value(scratch, XML_ATTR_VALIDATION);
+
+        crm_warn("Updated CIB does not validate against %s schema/dtd", crm_str(current_dtd));
+        rc = -pcmk_err_schema_validation;
     }
 
   done:
-    if (rc == pcmk_ok && check_dtd && validate_xml(scratch, NULL, TRUE) == FALSE) {
-        crm_warn("Updated CIB does not validate against %s schema/dtd", crm_str(current_dtd));
-        rc = -pcmk_err_dtd_validation;
-    }
 
     *result_cib = scratch;
-    free_xml(local_diff);
+#if ENABLE_ACL
+    if(rc != pcmk_ok && cib_acl_enabled(current_cib, user)) {
+        if(xml_acl_filtered_copy(user, current_cib, scratch, result_cib)) {
+            if (*result_cib == NULL) {
+                crm_debug("Pre-filtered the entire cib result");
+            }
+            free_xml(scratch);
+        }
+    }
+#endif
+
+    if(diff) {
+        *diff = local_diff;
+    } else {
+        free_xml(local_diff);
+    }
+
+    free_xml(top);
+    crm_trace("Done");
     return rc;
 }
 
@@ -730,7 +756,7 @@ cib_read_config(GHashTable * options, xmlNode * current_cib)
 }
 
 int
-cib_apply_patch_event(xmlNode *event, xmlNode *input, xmlNode **output, int level) 
+cib_apply_patch_event(xmlNode * event, xmlNode * input, xmlNode ** output, int level)
 {
     int rc = pcmk_err_generic;
 
@@ -748,14 +774,21 @@ cib_apply_patch_event(xmlNode *event, xmlNode *input, xmlNode **output, int leve
     }
 
     if (level > LOG_CRIT) {
-        log_cib_diff(level, diff, "Config update");
+        xml_log_patchset(level, "Config update", diff);
     }
 
     if (input != NULL) {
-        rc = cib_process_diff(NULL, cib_none, NULL, NULL, diff, input, output, NULL);
+        rc = cib_process_diff(NULL, cib_none, NULL, event, diff, input, output, NULL);
 
         if (rc != pcmk_ok) {
-            crm_debug("Update didn't apply: %s", pcmk_strerror(rc));
+            crm_debug("Update didn't apply: %s (%d) %p", pcmk_strerror(rc), rc, *output);
+
+            if (rc == -pcmk_err_old_data) {
+                crm_trace("Masking error, we already have the supplied update");
+                return pcmk_ok;
+            }
+            free_xml(*output); *output = NULL;
+
             return rc;
         }
     }
@@ -767,33 +800,37 @@ gboolean
 cib_internal_config_changed(xmlNode * diff)
 {
     gboolean changed = FALSE;
-    const char *config_xpath =
-        "//" XML_TAG_CIB "/" XML_CIB_TAG_CONFIGURATION "/" XML_CIB_TAG_CRMCONFIG;
     xmlXPathObject *xpathObj = NULL;
 
     if (diff == NULL) {
         return FALSE;
     }
 
-    xpathObj = xpath_search(diff, config_xpath);
-    if (xpathObj && xpathObj->nodesetval->nodeNr > 0) {
+    xpathObj = xpath_search(diff, "//" XML_CIB_TAG_CRMCONFIG);
+    if (numXpathResults(xpathObj) > 0) {
         changed = TRUE;
     }
 
-    if (xpathObj) {
-        xmlXPathFreeObject(xpathObj);
-    }
+    freeXpathObject(xpathObj);
 
     return changed;
 }
 
-int cib_internal_op(cib_t * cib, const char *op, const char *host,
-                    const char *section, xmlNode * data,
-                    xmlNode ** output_data, int call_options, const char *user_name)
+int
+cib_internal_op(cib_t * cib, const char *op, const char *host,
+                const char *section, xmlNode * data,
+                xmlNode ** output_data, int call_options, const char *user_name)
 {
-    int (*delegate)(cib_t * cib, const char *op, const char *host,
-                    const char *section, xmlNode * data,
-                    xmlNode ** output_data, int call_options, const char *user_name) = cib->delegate_fn;
+    int (*delegate) (cib_t * cib, const char *op, const char *host,
+                     const char *section, xmlNode * data,
+                     xmlNode ** output_data, int call_options, const char *user_name) =
+        cib->delegate_fn;
+
+#if ENABLE_ACL
+    if(user_name == NULL) {
+        user_name = getenv("CIB_user");
+    }
+#endif
 
     return delegate(cib, op, host, section, data, output_data, call_options, user_name);
 }

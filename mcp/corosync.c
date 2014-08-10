@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2010 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -43,13 +43,7 @@
 #  include <corosync/cmap.h>
 #endif
 
-static struct cpg_name cpg_group = {
-    .length = 0,
-    .value[0] = 0,
-};
-
 enum cluster_type_e stack = pcmk_cluster_unknown;
-static cpg_handle_t cpg_handle;
 static corosync_cfg_handle_t cfg_handle;
 
 /* =::=::=::= CFG - Shutdown stuff =::=::=::= */
@@ -118,11 +112,11 @@ cluster_connect_cfg(uint32_t * nodeid)
 {
     cs_error_t rc;
     int fd = 0, retries = 0;
-    static struct mainloop_fd_callbacks cfg_fd_callbacks = 
-        {
-            .dispatch = pcmk_cfg_dispatch,
-            .destroy = cfg_connection_destroy,
-        };
+
+    static struct mainloop_fd_callbacks cfg_fd_callbacks = {
+        .dispatch = pcmk_cfg_dispatch,
+        .destroy = cfg_connection_destroy,
+    };
 
     cs_repeat(retries, 30, rc = corosync_cfg_initialize(&cfg_handle, &cfg_callbacks));
 
@@ -153,168 +147,6 @@ cluster_connect_cfg(uint32_t * nodeid)
   bail:
     corosync_cfg_finalize(cfg_handle);
     return FALSE;
-}
-
-/* =::=::=::= CPG - Closed Process Group Messaging =::=::=::= */
-
-static int
-pcmk_cpg_dispatch(gpointer user_data)
-{
-    cpg_handle_t *handle = (cpg_handle_t *) user_data;
-    cs_error_t rc = cpg_dispatch(*handle, CS_DISPATCH_ALL);
-
-    if (rc != CS_OK) {
-        return -1;
-    }
-    return 0;
-}
-
-static void
-cpg_connection_destroy(gpointer user_data)
-{
-    crm_err("Connection destroyed");
-    cpg_handle = 0;
-}
-
-static void
-pcmk_cpg_deliver(cpg_handle_t handle,
-                 const struct cpg_name *groupName,
-                 uint32_t nodeid, uint32_t pid, void *msg, size_t msg_len)
-{
-    if (nodeid != local_nodeid) {
-        uint32_t procs = 0;
-        xmlNode *xml = string2xml(msg);
-        const char *uname = crm_element_value(xml, "uname");
-
-        crm_element_value_int(xml, "proclist", (int *)&procs);
-        /* crm_debug("Got proclist %.32x from %s", procs, uname); */
-        if (update_node_processes(nodeid, uname, procs)) {
-            update_process_clients();
-        }
-    }
-}
-
-static void
-pcmk_cpg_membership(cpg_handle_t handle,
-                    const struct cpg_name *groupName,
-                    const struct cpg_address *member_list, size_t member_list_entries,
-                    const struct cpg_address *left_list, size_t left_list_entries,
-                    const struct cpg_address *joined_list, size_t joined_list_entries)
-{
-    /* Don't care about CPG membership */
-    update_process_peers();
-}
-
-cpg_callbacks_t cpg_callbacks = {
-    .cpg_deliver_fn = pcmk_cpg_deliver,
-    .cpg_confchg_fn = pcmk_cpg_membership,
-};
-
-gboolean
-cluster_disconnect_cpg(void)
-{
-    if (cpg_handle) {
-        cpg_finalize(cpg_handle);
-        cpg_handle = 0;
-    }
-    return TRUE;
-}
-
-gboolean
-cluster_connect_cpg(void)
-{
-    cs_error_t rc;
-    unsigned int nodeid;
-    int fd;
-    int retries = 0;
-    static struct mainloop_fd_callbacks cpg_fd_callbacks = 
-        {
-            .dispatch = pcmk_cpg_dispatch,
-            .destroy = cpg_connection_destroy,
-        };
-
-    strcpy(cpg_group.value, "pcmk");
-    cpg_group.length = strlen(cpg_group.value) + 1;
-
-    retries = 0;
-    cs_repeat(retries, 30, rc = cpg_initialize(&cpg_handle, &cpg_callbacks));
-    if (rc != CS_OK) {
-        crm_err("corosync cpg init error %d", rc);
-        return FALSE;
-    }
-
-    rc = cpg_fd_get(cpg_handle, &fd);
-    if (rc != CS_OK) {
-        crm_err("corosync cpg fd_get error %d", rc);
-        goto bail;
-    }
-
-    retries = 0;
-    cs_repeat(retries, 30, rc = cpg_local_get(cpg_handle, &nodeid));
-    if (rc != CS_OK) {
-        crm_err("corosync cpg local_get error %d", rc);
-        goto bail;
-    }
-
-    crm_debug("Our nodeid: %d", nodeid);
-
-    retries = 0;
-    cs_repeat(retries, 30, rc = cpg_join(cpg_handle, &cpg_group));
-
-    if (rc != CS_OK) {
-        crm_err("Could not join the CPG group '%s': %d", crm_system_name, rc);
-        goto bail;
-    }
-
-    mainloop_add_fd("corosync-cpg", G_PRIORITY_DEFAULT, fd, &cpg_handle, &cpg_fd_callbacks);
-    return TRUE;
-
-  bail:
-    cpg_finalize(cpg_handle);
-    return FALSE;
-}
-
-gboolean
-send_cpg_message(struct iovec * iov)
-{
-    int rc = CS_OK;
-    int retries = 0;
-
-    errno = 0;
-
-    do {
-        rc = cpg_mcast_joined(cpg_handle, CPG_TYPE_AGREED, iov, 1);
-        if (rc == CS_ERR_TRY_AGAIN || rc == CS_ERR_QUEUE_FULL) {
-            cpg_flow_control_state_t fc_state = CPG_FLOW_CONTROL_DISABLED;
-            int rc2 = cpg_flow_control_state_get(cpg_handle, &fc_state);
-
-            if (rc2 == CS_OK && fc_state == CPG_FLOW_CONTROL_ENABLED) {
-                crm_debug("Attempting to clear cpg dispatch queue");
-                rc2 = cpg_dispatch(cpg_handle, CS_DISPATCH_ALL);
-            }
-
-            if (rc2 != CS_OK) {
-                crm_warn("Could not check/clear the cpg connection");
-                goto bail;
-
-            } else {
-                retries++;
-                crm_debug("Retrying operation after %ds", retries);
-                sleep(retries);
-            }
-        } else {
-            break;
-        }
-
-        /* 5 retires is plenty, we'll resend once the membership reforms anyway */
-    } while (retries < 5);
-
-  bail:
-    if (rc != CS_OK) {
-        crm_err("Sending message via cpg FAILED: (rc=%d) %s", rc, ais_error2text(rc));
-    }
-
-    return (rc == CS_OK);
 }
 
 /* =::=::=::= Configuration =::=::=::= */
@@ -403,14 +235,15 @@ config_find_next(confdb_handle_t config, const char *name, confdb_handle_t top_h
 }
 #else
 static int
-get_config_opt(uint64_t unused, cmap_handle_t object_handle, const char *key, char **value, const char *fallback)
+get_config_opt(uint64_t unused, cmap_handle_t object_handle, const char *key, char **value,
+               const char *fallback)
 {
     int rc = 0, retries = 0;
 
     cs_repeat(retries, 5, rc = cmap_get_string(object_handle, key, value));
-    if(rc != CS_OK) {
+    if (rc != CS_OK) {
         crm_trace("Search for %s failed %d, defaulting to %s", key, rc, fallback);
-        if(fallback) {
+        if (fallback) {
             *value = strdup(fallback);
         } else {
             *value = NULL;
@@ -429,39 +262,33 @@ get_config_opt(uint64_t unused, cmap_handle_t object_handle, const char *key, ch
 #endif
 
 gboolean
-read_config(void)
+mcp_read_config(void)
 {
     int rc = CS_OK;
     int retries = 0;
-    gboolean have_log = FALSE;
 
     const char *const_value = NULL;
 
-    char *logging_debug = NULL;
-    char *logging_logfile = NULL;
-    char *logging_to_logfile = NULL;
-    char *logging_to_syslog = NULL;
-    char *logging_syslog_facility = NULL;
-
 #if HAVE_CONFDB
     char *value = NULL;
-    confdb_handle_t config;
+    confdb_handle_t config = 0;
     confdb_handle_t top_handle = 0;
     hdb_handle_t local_handle;
     static confdb_callbacks_t callbacks = { };
 
     do {
         rc = confdb_initialize(&config, &callbacks);
-	if(rc != CS_OK) {
-	    retries++;
-	    printf("Connection setup failed: %d.  Retrying in %ds\n", rc, retries);
-	    sleep(retries);
+        if (rc != CS_OK) {
+            retries++;
+            printf("confdb connection setup failed: %s.  Retrying in %ds\n", ais_error2text(rc), retries);
+            crm_info("confdb connection setup failed: %s.  Retrying in %ds", ais_error2text(rc), retries);
+            sleep(retries);
 
-	} else {
+        } else {
             break;
         }
 
-    } while(retries < 5);
+    } while (retries < 5);
 #elif HAVE_CMAP
     cmap_handle_t local_handle;
     uint64_t config = 0;
@@ -469,19 +296,17 @@ read_config(void)
     /* There can be only one (possibility if confdb isn't around) */
     do {
         rc = cmap_initialize(&local_handle);
-	if(rc != CS_OK) {
-	    retries++;
-	    printf("API connection setup failed: %s.  Retrying in %ds\n",
-                   cs_strerror(rc), retries);
-	    crm_info("API connection setup failed: %s.  Retrying in %ds",
-                     cs_strerror(rc), retries);
-	    sleep(retries);
+        if (rc != CS_OK) {
+            retries++;
+            printf("cmap connection setup failed: %s.  Retrying in %ds\n", cs_strerror(rc), retries);
+            crm_info("cmap connection setup failed: %s.  Retrying in %ds", cs_strerror(rc), retries);
+            sleep(retries);
 
-	} else {
+        } else {
             break;
         }
 
-    } while(retries < 5);
+    } while (retries < 5);
 #endif
 
     if (rc != CS_OK) {
@@ -492,7 +317,7 @@ read_config(void)
 
     stack = get_cluster_type();
     crm_info("Reading configure for stack: %s", name_for_cluster_type(stack));
-    
+
     /* =::=::= Should we be here =::=::= */
     if (stack == pcmk_cluster_corosync) {
         set_daemon_option("cluster_type", "corosync");
@@ -527,7 +352,7 @@ read_config(void)
                 } else {
                     crm_err("We can only start Pacemaker from init if using version 1"
                             " of the Pacemaker plugin for Corosync.  Terminating.");
-                    exit(100);
+                    crm_exit(DAEMON_RESPAWN_STOP);
                 }
                 break;
             }
@@ -547,87 +372,103 @@ read_config(void)
 #endif
 
     /* =::=::= Logging =::=::= */
-    get_config_opt(config, local_handle, KEY_PREFIX"debug", &logging_debug, "off");
+    if (daemon_option("debug")) {
+        /* Syslog logging is already setup by crm_log_init() */
+
+    } else {
+        /* Check corosync */
+        char *debug_enabled = NULL;
+
+        get_config_opt(config, local_handle, KEY_PREFIX "debug", &debug_enabled, "off");
+
+        if (crm_is_true(debug_enabled)) {
+            set_daemon_option("debug", "1");
+            if (get_crm_log_level() < LOG_DEBUG) {
+                set_crm_log_level(LOG_DEBUG);
+            }
+
+        } else {
+            set_daemon_option("debug", "0");
+        }
+
+        free(debug_enabled);
+    }
 
     const_value = daemon_option("debugfile");
-    if(const_value) {
-        logging_to_logfile = strdup("on");
-        logging_logfile = strdup(const_value);
-        crm_trace("Using debugfile setting from the environment: %s", logging_logfile);
+    if (daemon_option("logfile")) {
+        /* File logging is already setup by crm_log_init() */
+
+    } else if(const_value) {
+        /* From when we cared what options heartbeat used */
+        set_daemon_option("logfile", const_value);
+        crm_add_logfile(const_value);
 
     } else {
-        get_config_opt(config, local_handle, KEY_PREFIX"to_logfile", &logging_to_logfile, "off");
-        get_config_opt(config, local_handle, KEY_PREFIX"logfile", &logging_logfile, "/var/log/pacemaker");
-    }
-    
-    const_value = daemon_option("logfacility");
-    if(const_value) {
-        logging_syslog_facility = strdup(const_value);
-        crm_trace("Using logfacility setting from the environment: %s", logging_syslog_facility);
+        /* Check corosync */
+        char *logfile = NULL;
+        char *logfile_enabled = NULL;
 
-        if(safe_str_eq(logging_syslog_facility, "none")) {
-            logging_to_syslog = strdup("off");
+        get_config_opt(config, local_handle, KEY_PREFIX "to_logfile", &logfile_enabled, "on");
+        get_config_opt(config, local_handle, KEY_PREFIX "logfile", &logfile, "/var/log/pacemaker.log");
+
+        if (crm_is_true(logfile_enabled) == FALSE) {
+            crm_trace("File logging disabled in corosync");
+
+        } else if (crm_add_logfile(logfile)) {
+            set_daemon_option("logfile", logfile);
+
         } else {
-            logging_to_syslog = strdup("on");
+            crm_err("Couldn't create logfile: %s", logfile);
+            set_daemon_option("logfile", "none");
         }
 
-    } else {
-        get_config_opt(config, local_handle, KEY_PREFIX"to_syslog", &logging_to_syslog, "on");
-        get_config_opt(config, local_handle, KEY_PREFIX"syslog_facility", &logging_syslog_facility, "daemon");
+        free(logfile);
+        free(logfile_enabled);
     }
-    
+
+    if (daemon_option("logfacility")) {
+        /* Syslog logging is already setup by crm_log_init() */
+
+    } else {
+        /* Check corosync */
+        char *syslog_enabled = NULL;
+        char *syslog_facility = NULL;
+
+        get_config_opt(config, local_handle, KEY_PREFIX "to_syslog", &syslog_enabled, "on");
+        get_config_opt(config, local_handle, KEY_PREFIX "syslog_facility", &syslog_facility, "daemon");
+
+        if (crm_is_true(syslog_enabled) == FALSE) {
+            qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_FALSE);
+            set_daemon_option("logfacility", "none");
+
+        } else {
+            qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_FACILITY, qb_log_facility2int(syslog_facility));
+            qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_TRUE);
+            set_daemon_option("logfacility", syslog_facility);
+        }
+
+        free(syslog_enabled);
+        free(syslog_facility);
+    }
+
 #if HAVE_CONFDB
-    confdb_finalize(config);    
+    confdb_finalize(config);
 #elif HAVE_CMAP
-    cmap_finalize(local_handle); 
+    if(local_handle){
+        gid_t gid = 0;
+        if (crm_user_lookup(CRM_DAEMON_USER, NULL, &gid) < 0) {
+            crm_warn("No group found for user %s", CRM_DAEMON_USER);
+
+        } else {
+            char key[PATH_MAX];
+            snprintf(key, PATH_MAX, "uidgid.gid.%u", gid);
+            rc = cmap_set_uint8(local_handle, key, 1);
+            crm_notice("Configured corosync to accept connections from group %u: %s (%d)",
+                       gid, ais_error2text(rc), rc);
+        }
+    }
+    cmap_finalize(local_handle);
 #endif
 
-    if(daemon_option("debug")) {
-        crm_trace("Using debug setting from the environment: %s", daemon_option("debug"));
-        if(get_crm_log_level() < LOG_DEBUG && daemon_option_enabled("pacemakerd", "debug")) {
-            set_crm_log_level(LOG_DEBUG);
-        }
-
-    } else if (crm_is_true(logging_debug)) {
-        set_daemon_option("debug", "1");
-        if(get_crm_log_level() < LOG_DEBUG) {
-            set_crm_log_level(LOG_DEBUG);
-        }
-
-    } else {
-        set_daemon_option("debug", "0");
-    }
-
-    if (crm_is_true(logging_to_logfile)) {
-        if(crm_add_logfile(logging_logfile)) {
-            /* What a cluster fsck, eventually we need to mandate /one/ */ 
-            set_daemon_option("debugfile", logging_logfile);
-            set_daemon_option("DEBUGLOG", logging_logfile);
-            set_daemon_option("LOGFILE", logging_logfile);
-            have_log = TRUE;
-
-        } else {
-            crm_err("Couldn't create logfile: %s", logging_logfile);
-        }
-    }
-    
-    if (have_log && crm_is_true(logging_to_syslog) == FALSE) {
-        qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_FALSE);
-        free(logging_syslog_facility);
-        logging_syslog_facility = strdup("none");
-        crm_info("User configured file based logging and explicitly disabled syslog.");
-
-    } else if (crm_is_true(logging_to_syslog) == FALSE) {
-        crm_err("Please enable some sort of logging, either 'to_logfile: on' or 'to_syslog: on'.");
-        crm_err("If you use file logging, be sure to also define a value for 'logfile'");
-    }
-
-    set_daemon_option("logfacility", logging_syslog_facility);
-    
-    free(logging_debug);
-    free(logging_logfile);
-    free(logging_to_logfile);
-    free(logging_to_syslog);
-    free(logging_syslog_facility);
     return TRUE;
 }

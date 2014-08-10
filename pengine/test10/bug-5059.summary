@@ -6,11 +6,12 @@ OFFLINE: [ gluster04.h ]
 
  Master/Slave Set: ms_stateful [g_stateful]
      Resource Group: g_stateful:0
-         p_stateful1:0	(ocf::pacemaker:Stateful):	Started gluster01.h
-         p_stateful2:0	(ocf::pacemaker:Stateful):	Stopped 
+         p_stateful1	(ocf::pacemaker:Stateful):	Started gluster01.h 
+         p_stateful2	(ocf::pacemaker:Stateful):	Stopped 
      Resource Group: g_stateful:1
-         p_stateful1:1	(ocf::pacemaker:Stateful):	Started gluster02.h
-         p_stateful2:1	(ocf::pacemaker:Stateful):	Stopped 
+         p_stateful1	(ocf::pacemaker:Stateful):	Started gluster02.h 
+         p_stateful2	(ocf::pacemaker:Stateful):	Stopped 
+     Stopped: [ gluster03.h gluster04.h ]
  Clone Set: c_dummy [p_dummy1]
      Started: [ gluster01.h gluster02.h ]
 
@@ -22,6 +23,8 @@ Transition Summary:
 
 Executing cluster transition:
  * Pseudo action:   ms_stateful_pre_notify_start_0
+ * Resource action: iptest          delete on gluster02.h
+ * Resource action: ipsrc2          delete on gluster02.h
  * Resource action: p_stateful1:0   notify on gluster01.h
  * Resource action: p_stateful1:1   notify on gluster02.h
  * Pseudo action:   ms_stateful_confirmed-pre_notify_start_0

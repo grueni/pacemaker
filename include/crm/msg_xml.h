@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -18,37 +18,37 @@
 #ifndef XML_TAGS__H
 #  define XML_TAGS__H
 
-#ifndef F_ORIG
-#  define F_ORIG    "src"
-#endif
+#  ifndef F_ORIG
+#    define F_ORIG    "src"
+#  endif
 
-#ifndef F_SEQ
-#  define F_SEQ		"seq"
-#endif
+#  ifndef F_SEQ
+#    define F_SEQ		"seq"
+#  endif
 
-#ifndef F_SUBTYPE
-#  define F_SUBTYPE "subt"
-#endif
+#  ifndef F_SUBTYPE
+#    define F_SUBTYPE "subt"
+#  endif
 
-#ifndef F_TYPE
-#  define F_TYPE    "t"
-#endif
+#  ifndef F_TYPE
+#    define F_TYPE    "t"
+#  endif
 
-#ifndef F_CLIENTNAME
-#  define	F_CLIENTNAME	"cn"
-#endif
+#  ifndef F_CLIENTNAME
+#    define	F_CLIENTNAME	"cn"
+#  endif
 
-#ifndef F_XML_TAGNAME
-#  define F_XML_TAGNAME	"__name__"
-#endif
+#  ifndef F_XML_TAGNAME
+#    define F_XML_TAGNAME	"__name__"
+#  endif
 
-#ifndef T_CRM
-#  define T_CRM     "crmd"
-#endif
+#  ifndef T_CRM
+#    define T_CRM     "crmd"
+#  endif
 
-#ifndef T_ATTRD
-#  define T_ATTRD     "attrd"
-#endif
+#  ifndef T_ATTRD
+#    define T_ATTRD     "attrd"
+#  endif
 
 #  define CIB_OPTIONS_FIRST "cib-bootstrap-options"
 
@@ -70,6 +70,9 @@
 #  define F_CRM_ELECTION_OWNER		"election-owner"
 #  define F_CRM_TGRAPH			"crm-tgraph"
 #  define F_CRM_TGRAPH_INPUT		"crm-tgraph-in"
+
+#  define F_CRM_THROTTLE_MODE		"crm-limit-mode"
+#  define F_CRM_THROTTLE_MAX		"crm-limit-max"
 
 /*---- Common tags/attrs */
 #  define XML_DIFF_MARKER		"__crm_diff_marker__"
@@ -199,9 +202,17 @@
 #  define XML_RSC_ATTR_FAIL_TIMEOUT	"failure-timeout"
 #  define XML_RSC_ATTR_MULTIPLE		"multiple-active"
 #  define XML_RSC_ATTR_PRIORITY		"priority"
+#  define XML_RSC_ATTR_REQUIRES		"requires"
+#  define XML_RSC_ATTR_PROVIDES		"provides"
+#  define XML_RSC_ATTR_CONTAINER	"container"
+#  define XML_RSC_ATTR_INTERNAL_RSC	"internal_rsc"
+#  define XML_RSC_ATTR_MAINTENANCE	"maintenance"
+#  define XML_RSC_ATTR_REMOTE_NODE  	"remote-node"
+
 #  define XML_OP_ATTR_ON_FAIL		"on-fail"
 #  define XML_OP_ATTR_START_DELAY	"start-delay"
 #  define XML_OP_ATTR_ALLOW_MIGRATE	"allow-migrate"
+#  define XML_OP_ATTR_DEPENDENT "dependent-on"
 #  define XML_OP_ATTR_ORIGIN		"interval-origin"
 #  define XML_OP_ATTR_PENDING		"record-pending"
 
@@ -228,6 +239,7 @@
 #  define XML_NODE_EXPECTED     	"expected"
 #  define XML_NODE_IN_CLUSTER        	"in_ccm"
 #  define XML_NODE_IS_PEER    	"crmd"
+#  define XML_NODE_IS_REMOTE    	"remote_node"
 
 #  define XML_CIB_ATTR_SHUTDOWN       	"shutdown"
 #  define XML_CIB_ATTR_STONITH	    	"stonith"
@@ -236,6 +248,12 @@
 #  define XML_LRM_ATTR_TASK		"operation"
 #  define XML_LRM_ATTR_TASK_KEY		"operation_key"
 #  define XML_LRM_ATTR_TARGET		"on_node"
+/*! used for remote nodes.
+ *  For remote nodes the action is routed to the 'on_node'
+ *  node location, and then from there if 'exec_on' is set
+ *  the host will execute the action on the remote node
+ *  it controls. */
+#  define XML_LRM_ATTR_ROUTER_NODE  "router_node"
 #  define XML_LRM_ATTR_TARGET_UUID	"on_node_uuid"
 #  define XML_LRM_ATTR_RSCID		"rsc-id"
 #  define XML_LRM_ATTR_OPSTATUS		"op-status"
@@ -244,6 +262,11 @@
 #  define XML_LRM_ATTR_OP_DIGEST	"op-digest"
 #  define XML_LRM_ATTR_OP_RESTART	"op-force-restart"
 #  define XML_LRM_ATTR_RESTART_DIGEST	"op-restart-digest"
+
+#  define XML_RSC_OP_LAST_CHANGE        "last-rc-change"
+#  define XML_RSC_OP_LAST_RUN           "last-run"
+#  define XML_RSC_OP_T_EXEC             "exec-time"
+#  define XML_RSC_OP_T_QUEUE            "queue-time"
 
 #  define XML_LRM_ATTR_MIGRATE_SOURCE	"migrate_source"
 #  define XML_LRM_ATTR_MIGRATE_TARGET	"migrate_target"
@@ -317,25 +340,48 @@
 #  define XML_TAG_DIFF_ADDED		"diff-added"
 #  define XML_TAG_DIFF_REMOVED		"diff-removed"
 
-#  define XML_ACL_TAG_USER		"acl_user"
+#  define XML_ACL_TAG_USER		"acl_target"
+#  define XML_ACL_TAG_USERv1		"acl_user"
+#  define XML_ACL_TAG_GROUP		"acl_group"
 #  define XML_ACL_TAG_ROLE		"acl_role"
-#  define XML_ACL_TAG_ROLE_REF 		"role_ref"
+#  define XML_ACL_TAG_PERMISSION	"acl_permission"
+#  define XML_ACL_TAG_ROLE_REF 		"role"
+#  define XML_ACL_TAG_ROLE_REFv1	"role_ref"
+#  define XML_ACL_ATTR_KIND		"kind"
 #  define XML_ACL_TAG_READ		"read"
 #  define XML_ACL_TAG_WRITE		"write"
 #  define XML_ACL_TAG_DENY		"deny"
-#  define XML_ACL_ATTR_REF		"ref"
-#  define XML_ACL_ATTR_TAG		"tag"
+#  define XML_ACL_ATTR_REF		"reference"
+#  define XML_ACL_ATTR_REFv1		"ref"
+#  define XML_ACL_ATTR_TAG		"object-type"
+#  define XML_ACL_ATTR_TAGv1		"tag"
 #  define XML_ACL_ATTR_XPATH		"xpath"
 #  define XML_ACL_ATTR_ATTRIBUTE	"attribute"
 
 #  define XML_CIB_TAG_TICKETS		"tickets"
 #  define XML_CIB_TAG_TICKET_STATE	"ticket_state"
 
+#  define XML_CIB_TAG_TAGS   		"tags"
+#  define XML_CIB_TAG_TAG   		"tag"
+#  define XML_CIB_TAG_OBJ_REF 		"obj_ref"
+
 #  define XML_TAG_FENCING_TOPOLOGY      "fencing-topology"
 #  define XML_TAG_FENCING_LEVEL         "fencing-level"
 #  define XML_ATTR_STONITH_INDEX        "index"
 #  define XML_ATTR_STONITH_TARGET       "target"
 #  define XML_ATTR_STONITH_DEVICES      "devices"
+
+#  define XML_TAG_DIFF                  "diff"
+#  define XML_DIFF_VERSION              "version"
+#  define XML_DIFF_VSOURCE              "source"
+#  define XML_DIFF_VTARGET              "target"
+#  define XML_DIFF_CHANGE               "change"
+#  define XML_DIFF_LIST                 "change-list"
+#  define XML_DIFF_ATTR                 "change-attr"
+#  define XML_DIFF_RESULT               "change-result"
+#  define XML_DIFF_OP                   "operation"
+#  define XML_DIFF_PATH                 "path"
+#  define XML_DIFF_POSITION             "position"
 
 #  include <crm/common/xml.h>
 

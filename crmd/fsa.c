@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -28,6 +28,7 @@
 #include <crm/cib.h>
 #include <crm/msg_xml.h>
 #include <crm/common/xml.h>
+#include <crm/cluster/election.h>
 
 #include <crm/cluster.h>
 
@@ -41,22 +42,24 @@ char *fsa_our_dc = NULL;
 cib_t *fsa_cib_conn = NULL;
 char *fsa_our_dc_version = NULL;
 
-lrmd_t *fsa_lrm_conn;
 char *fsa_our_uuid = NULL;
 char *fsa_our_uname = NULL;
+
+char *fsa_cluster_name = NULL;
 
 #if SUPPORT_HEARTBEAT
 ll_cluster_t *fsa_cluster_conn;
 #endif
 
-fsa_timer_t *wait_timer = NULL;
-fsa_timer_t *recheck_timer = NULL;
-fsa_timer_t *election_trigger = NULL;
-fsa_timer_t *election_timeout = NULL;
-fsa_timer_t *transition_timer = NULL;
+election_t *fsa_election = NULL;
+
+fsa_timer_t *wait_timer = NULL;        /* How long to wait before retrying to connect to the cib/lrmd/ccm */
+fsa_timer_t *recheck_timer = NULL;     /* Periodically re-run the PE to account for time based rules/preferences */
+fsa_timer_t *election_trigger = NULL;  /* How long to wait at startup, or after an election, for the DC to make contact */
+fsa_timer_t *transition_timer = NULL;  /* How long to delay the start of a new transition with the expectation something else might happen too */
 fsa_timer_t *integration_timer = NULL;
 fsa_timer_t *finalization_timer = NULL;
-fsa_timer_t *shutdown_escalation_timer = NULL;
+fsa_timer_t *shutdown_escalation_timer = NULL; /* How long to wait for the DC to stop all resources and give us the all-clear to shut down */
 
 volatile gboolean do_fsa_stall = FALSE;
 volatile long long fsa_input_register = 0;
@@ -65,10 +68,6 @@ volatile enum crmd_fsa_state fsa_state = S_STARTING;
 
 extern uint highest_born_on;
 extern uint num_join_invites;
-extern GHashTable *welcomed_nodes;
-extern GHashTable *finalized_nodes;
-extern GHashTable *confirmed_nodes;
-extern GHashTable *integrated_nodes;
 extern void initialize_join(gboolean before);
 
 #define DOT_PREFIX "actions:trace: "
@@ -154,10 +153,12 @@ s_crmd_fsa(enum crmd_fsa_cause cause)
     fsa_data_t *fsa_data = NULL;
     long long register_copy = fsa_input_register;
     long long new_actions = A_NOTHING;
-    enum crmd_fsa_state last_state = fsa_state;
+    enum crmd_fsa_state last_state;
 
     crm_trace("FSA invoked with Cause: %s\tState: %s",
-                fsa_cause2string(cause), fsa_state2string(fsa_state));
+              fsa_cause2string(cause), fsa_state2string(fsa_state));
+
+    fsa_dump_actions(fsa_actions, "Initial");
 
     do_fsa_stall = FALSE;
     if (is_message() == FALSE && fsa_actions != A_NOTHING) {
@@ -174,16 +175,20 @@ s_crmd_fsa(enum crmd_fsa_cause cause)
         crm_trace("Checking messages (%d remaining)", g_list_length(fsa_message_queue));
 
         fsa_data = get_message();
-        CRM_CHECK(fsa_data != NULL, continue);
+        if(fsa_data == NULL) {
+            continue;
+        }
 
         log_fsa_input(fsa_data);
 
         /* add any actions back to the queue */
         fsa_actions |= fsa_data->actions;
+        fsa_dump_actions(fsa_data->actions, "Restored actions");
 
         /* get the next batch of actions */
         new_actions = crmd_fsa_actions[fsa_data->fsa_input][fsa_state];
         fsa_actions |= new_actions;
+        fsa_dump_actions(new_actions, "New actions");
 
         if (fsa_data->fsa_input != I_NULL && fsa_data->fsa_input != I_ROUTER) {
             crm_debug("Processing %s: [ state=%s cause=%s origin=%s ]",
@@ -191,24 +196,6 @@ s_crmd_fsa(enum crmd_fsa_cause cause)
                       fsa_state2string(fsa_state),
                       fsa_cause2string(fsa_data->fsa_cause), fsa_data->origin);
         }
-#ifdef FSA_TRACE
-        if (new_actions != A_NOTHING) {
-            crm_trace("Adding FSA actions %.16llx for %s/%s",
-                        new_actions, fsa_input2string(fsa_data->fsa_input),
-                        fsa_state2string(fsa_state));
-            fsa_dump_actions(new_actions, "\tFSA scheduled");
-
-        } else if (fsa_data->fsa_input != I_NULL && new_actions == A_NOTHING) {
-            crm_debug("No action specified for input,state (%s,%s)",
-                      fsa_input2string(fsa_data->fsa_input), fsa_state2string(fsa_state));
-        }
-        if (fsa_data->actions != A_NOTHING) {
-            crm_trace("Adding input actions %.16llx for %s/%s",
-                        new_actions, fsa_input2string(fsa_data->fsa_input),
-                        fsa_state2string(fsa_state));
-            fsa_dump_actions(fsa_data->actions, "\tInput scheduled");
-        }
-#endif
 
         /* logging : *before* the state is changed */
         if (is_set(fsa_actions, A_ERROR)) {
@@ -263,10 +250,11 @@ s_crmd_fsa(enum crmd_fsa_cause cause)
     if (register_copy != fsa_input_register) {
         long long same = register_copy & fsa_input_register;
 
-        fsa_dump_inputs(LOG_DEBUG, "Added input:", fsa_input_register ^ same);
-        fsa_dump_inputs(LOG_DEBUG, "Removed input:", register_copy ^ same);
+        fsa_dump_inputs(LOG_DEBUG, "Added", fsa_input_register ^ same);
+        fsa_dump_inputs(LOG_DEBUG, "Removed", register_copy ^ same);
     }
 
+    fsa_dump_actions(fsa_actions, "Remaining");
     fsa_dump_queue(LOG_DEBUG);
 
     return fsa_state;
@@ -300,7 +288,7 @@ s_crmd_fsa_actions(fsa_data_t * fsa_data)
 
             /* sub-system restart */
         } else if ((fsa_actions & O_LRM_RECONNECT) == O_LRM_RECONNECT) {
-            do_fsa_action(fsa_data,  O_LRM_RECONNECT, do_lrm_control);
+            do_fsa_action(fsa_data, O_LRM_RECONNECT, do_lrm_control);
         } else if ((fsa_actions & O_CIB_RESTART) == O_CIB_RESTART) {
             do_fsa_action(fsa_data, O_CIB_RESTART, do_cib_control);
         } else if ((fsa_actions & O_PE_RESTART) == O_PE_RESTART) {
@@ -380,6 +368,7 @@ s_crmd_fsa_actions(fsa_data_t * fsa_data)
 
             /*
              * Medium priority actions
+             * - Membership
              */
         } else if (fsa_actions & A_DC_TAKEOVER) {
             do_fsa_action(fsa_data, A_DC_TAKEOVER, do_dc_takeover);
@@ -391,36 +380,36 @@ s_crmd_fsa_actions(fsa_data_t * fsa_data)
             do_fsa_action(fsa_data, A_ELECTION_CHECK, do_election_check);
         } else if (fsa_actions & A_ELECTION_START) {
             do_fsa_action(fsa_data, A_ELECTION_START, do_election_vote);
-        } else if (fsa_actions & A_TE_HALT) {
-            do_fsa_action(fsa_data, A_TE_HALT, do_te_invoke);
-        } else if (fsa_actions & A_TE_CANCEL) {
-            do_fsa_action(fsa_data, A_TE_CANCEL, do_te_invoke);
         } else if (fsa_actions & A_DC_JOIN_OFFER_ALL) {
             do_fsa_action(fsa_data, A_DC_JOIN_OFFER_ALL, do_dc_join_offer_all);
         } else if (fsa_actions & A_DC_JOIN_OFFER_ONE) {
-            do_fsa_action(fsa_data, A_DC_JOIN_OFFER_ONE, do_dc_join_offer_all);
+            do_fsa_action(fsa_data, A_DC_JOIN_OFFER_ONE, do_dc_join_offer_one);
         } else if (fsa_actions & A_DC_JOIN_PROCESS_REQ) {
             do_fsa_action(fsa_data, A_DC_JOIN_PROCESS_REQ, do_dc_join_filter_offer);
         } else if (fsa_actions & A_DC_JOIN_PROCESS_ACK) {
             do_fsa_action(fsa_data, A_DC_JOIN_PROCESS_ACK, do_dc_join_ack);
+        } else if (fsa_actions & A_DC_JOIN_FINALIZE) {
+            do_fsa_action(fsa_data, A_DC_JOIN_FINALIZE, do_dc_join_finalize);
+        } else if (fsa_actions & A_CL_JOIN_ANNOUNCE) {
+            do_fsa_action(fsa_data, A_CL_JOIN_ANNOUNCE, do_cl_join_announce);
 
             /*
              * Low(er) priority actions
              * Make sure the CIB is always updated before invoking the
              * PE, and the PE before the TE
              */
-        } else if (fsa_actions & A_DC_JOIN_FINALIZE) {
-            do_fsa_action(fsa_data, A_DC_JOIN_FINALIZE, do_dc_join_finalize);
+        } else if (fsa_actions & A_TE_HALT) {
+            do_fsa_action(fsa_data, A_TE_HALT, do_te_invoke);
+        } else if (fsa_actions & A_TE_CANCEL) {
+            do_fsa_action(fsa_data, A_TE_CANCEL, do_te_invoke);
         } else if (fsa_actions & A_LRM_INVOKE) {
             do_fsa_action(fsa_data, A_LRM_INVOKE, do_lrm_invoke);
         } else if (fsa_actions & A_PE_INVOKE) {
             do_fsa_action(fsa_data, A_PE_INVOKE, do_pe_invoke);
         } else if (fsa_actions & A_TE_INVOKE) {
             do_fsa_action(fsa_data, A_TE_INVOKE, do_te_invoke);
-        } else if (fsa_actions & A_CL_JOIN_ANNOUNCE) {
-            do_fsa_action(fsa_data, A_CL_JOIN_ANNOUNCE, do_cl_join_announce);
 
-            /* sub-system stop */
+            /* Shutdown actions */
         } else if (fsa_actions & A_DC_RELEASED) {
             do_fsa_action(fsa_data, A_DC_RELEASED, do_dc_release);
         } else if (fsa_actions & A_PE_STOP) {
@@ -462,6 +451,7 @@ s_crmd_fsa_actions(fsa_data_t * fsa_data)
 void
 log_fsa_input(fsa_data_t * stored_msg)
 {
+    CRM_ASSERT(stored_msg);
     crm_trace("Processing queued input %d", stored_msg->id);
     if (stored_msg->fsa_cause == C_CCM_CALLBACK) {
         crm_trace("FSA processing CCM callback from %s", stored_msg->origin);
@@ -501,22 +491,24 @@ do_state_transition(long long actions,
     do_dot_log(DOT_PREFIX "\t%s -> %s [ label=%s cause=%s origin=%s ]",
                state_from, state_to, input, fsa_cause2string(cause), msg_data->origin);
 
-    if(cur_state == S_IDLE || next_state == S_IDLE) {
+    if (cur_state == S_IDLE || next_state == S_IDLE) {
         level = LOG_NOTICE;
-    } else if(cur_state == S_NOT_DC || next_state == S_NOT_DC) {
+    } else if (cur_state == S_NOT_DC || next_state == S_NOT_DC) {
         level = LOG_NOTICE;
-    } else if(cur_state == S_ELECTION) {
+    } else if (cur_state == S_ELECTION) {
         level = LOG_NOTICE;
-    } else if(next_state == S_RECOVERY) {
+    } else if (cur_state == S_STARTING) {
+        level = LOG_NOTICE;
+    } else if (next_state == S_RECOVERY) {
         level = LOG_WARNING;
     }
 
     do_crm_log(level, "State transition %s -> %s [ input=%s cause=%s origin=%s ]",
-             state_from, state_to, input, fsa_cause2string(cause), msg_data->origin);
+               state_from, state_to, input, fsa_cause2string(cause), msg_data->origin);
 
     /* the last two clauses might cause trouble later */
-    if (election_timeout != NULL && next_state != S_ELECTION && cur_state != S_RELEASE_DC) {
-        crm_timer_stop(election_timeout);
+    if (next_state != S_ELECTION && cur_state != S_RELEASE_DC) {
+        election_timeout_stop(fsa_election);
 /* 	} else { */
 /* 		crm_timer_start(election_timeout); */
     }
@@ -548,7 +540,8 @@ do_state_transition(long long actions,
     }
 
     if (cur_state == S_FINALIZE_JOIN && next_state == S_POLICY_ENGINE) {
-        populate_cib_nodes(node_update_quick|node_update_cluster|node_update_peer|node_update_join|node_update_expected, __FUNCTION__);
+        populate_cib_nodes(node_update_quick | node_update_cluster | node_update_peer |
+                           node_update_join | node_update_expected, __FUNCTION__);
     }
 
     switch (next_state) {
@@ -556,16 +549,17 @@ do_state_transition(long long actions,
             fsa_cib_conn->cmds->set_slave(fsa_cib_conn, cib_scope_local);
             /* fall through */
         case S_ELECTION:
-            crm_trace("Resetting our DC to NULL on transition to %s",
-                        fsa_state2string(next_state));
+            crm_trace("Resetting our DC to NULL on transition to %s", fsa_state2string(next_state));
             update_dc(NULL);
             break;
         case S_NOT_DC:
             election_trigger->counter = 0;
-            if(stonith_cleanup_list) {
+            if (stonith_cleanup_list) {
                 GListPtr gIter = NULL;
+
                 for (gIter = stonith_cleanup_list; gIter != NULL; gIter = gIter->next) {
                     char *target = gIter->data;
+
                     crm_info("Purging %s from stonith cleanup list", target);
                     free(target);
                 }
@@ -591,17 +585,14 @@ do_state_transition(long long actions,
                 crm_warn("Progressed to state %s after %s",
                          fsa_state2string(next_state), fsa_cause2string(cause));
             }
-            if (g_hash_table_size(welcomed_nodes) > 0) {
-                char *msg = strdup("  Welcome reply not received from");
-
+            if (crmd_join_phase_count(crm_join_welcomed) > 0) {
                 crm_warn("%u cluster nodes failed to respond"
-                         " to the join offer.", g_hash_table_size(welcomed_nodes));
-                g_hash_table_foreach(welcomed_nodes, ghash_print_node, msg);
-                free(msg);
+                         " to the join offer.", crmd_join_phase_count(crm_join_welcomed));
+                crmd_join_phase_log(LOG_NOTICE);
 
             } else {
-                crm_debug("All %d cluster nodes "
-                         "responded to the join offer.", g_hash_table_size(integrated_nodes));
+                crm_debug("All %d cluster nodes responded to the join offer.",
+                          crmd_join_phase_count(crm_join_integrated));
             }
             break;
 
@@ -613,22 +604,19 @@ do_state_transition(long long actions,
                          fsa_state2string(next_state), fsa_cause2string(cause));
             }
 
-            if (g_hash_table_size(finalized_nodes) > 0) {
-                char *msg = strdup("  Confirm not received from");
+            if (crmd_join_phase_count(crm_join_finalized) > 0) {
+                crm_err("%u cluster nodes failed to confirm their join.",
+                        crmd_join_phase_count(crm_join_finalized));
+                crmd_join_phase_log(LOG_NOTICE);
 
-                crm_err("%u cluster nodes failed to confirm"
-                        " their join.", g_hash_table_size(finalized_nodes));
-                g_hash_table_foreach(finalized_nodes, ghash_print_node, msg);
-                free(msg);
-
-            } else if (g_hash_table_size(confirmed_nodes)
+            } else if (crmd_join_phase_count(crm_join_confirmed)
                        == crm_active_peers()) {
                 crm_debug("All %u cluster nodes are"
-                         " eligible to run resources.", crm_active_peers());
+                          " eligible to run resources.", crm_active_peers());
 
-            } else if (g_hash_table_size(confirmed_nodes) > crm_active_peers()) {
+            } else if (crmd_join_phase_count(crm_join_confirmed) > crm_active_peers()) {
                 crm_err("We have more confirmed nodes than our membership does: %d vs. %d",
-                        g_hash_table_size(confirmed_nodes), crm_active_peers());
+                        crmd_join_phase_count(crm_join_confirmed), crm_active_peers());
                 register_fsa_input(C_FSA_INTERNAL, I_ELECTION, NULL);
 
             } else if (saved_ccm_membership_id != crm_peer_seq) {
@@ -639,8 +627,8 @@ do_state_transition(long long actions,
             } else {
                 crm_warn("Only %u of %u cluster "
                          "nodes are eligible to run resources - continue %d",
-                         g_hash_table_size(confirmed_nodes),
-                         crm_active_peers(), g_hash_table_size(welcomed_nodes));
+                         crmd_join_phase_count(crm_join_confirmed),
+                         crm_active_peers(), crmd_join_phase_count(crm_join_welcomed));
             }
 /* 			initialize_join(FALSE); */
             break;

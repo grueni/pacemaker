@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -111,12 +111,13 @@ do_cl_join_offer_respond(long long action,
     }
 #endif
 
-    crm_trace("Accepting join offer: join-%s", crm_element_value(input->msg, F_CRM_JOIN_ID));
+    crm_trace("Accepting join offer from %s: join-%s",
+              welcome_from, crm_element_value(input->msg, F_CRM_JOIN_ID));
 
     /* we only ever want the last one */
     if (query_call_id > 0) {
+        /* Calling remove_cib_op_callback() would result in a memory leak of the data field */
         crm_trace("Cancelling previous join query: %d", query_call_id);
-        remove_cib_op_callback(query_call_id, FALSE);
         query_call_id = 0;
     }
 
@@ -126,9 +127,9 @@ do_cl_join_offer_respond(long long action,
     }
 
     CRM_LOG_ASSERT(input != NULL);
-    query_call_id = fsa_cib_conn->cmds->query(fsa_cib_conn, NULL, NULL, cib_scope_local);
-    add_cib_op_callback(fsa_cib_conn, query_call_id, FALSE, strdup(join_id),
-                        join_query_callback);
+    query_call_id =
+        fsa_cib_conn->cmds->query(fsa_cib_conn, NULL, NULL, cib_scope_local | cib_no_children);
+    fsa_register_cib_callback(query_call_id, FALSE, strdup(join_id), join_query_callback);
     crm_trace("Registered join query callback: %d", query_call_id);
 
     register_fsa_action(A_DC_TIMER_STOP);
@@ -137,46 +138,42 @@ do_cl_join_offer_respond(long long action,
 void
 join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)
 {
-    xmlNode *local_cib = NULL;
     char *join_id = user_data;
     xmlNode *generation = create_xml_node(NULL, XML_CIB_TAG_GENERATION_TUPPLE);
 
     CRM_LOG_ASSERT(join_id != NULL);
 
-    query_call_id = 0;
-
-    if (rc == pcmk_ok) {
-        local_cib = output;
-        CRM_LOG_ASSERT(safe_str_eq(crm_element_name(local_cib), XML_TAG_CIB));
+    if (query_call_id != call_id) {
+        crm_trace("Query %d superceeded", call_id);
+        goto done;
     }
 
-    if (local_cib != NULL) {
+    query_call_id = 0;
+    if(rc != pcmk_ok || output == NULL) {
+        crm_err("Could not retrieve version details for join-%s: %s (%d)",
+                join_id, pcmk_strerror(rc), rc);
+        register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, NULL, NULL, __FUNCTION__);
+
+    } else if (fsa_our_dc == NULL) {
+        crm_debug("Membership is in flux, not continuing join-%s", join_id);
+
+    } else {
         xmlNode *reply = NULL;
 
-        crm_debug("Respond to join offer join-%s", join_id);
-        crm_debug("Acknowledging %s as our DC", fsa_our_dc);
-        copy_in_properties(generation, local_cib);
+        crm_debug("Respond to join offer join-%s from %s", join_id, fsa_our_dc);
+        copy_in_properties(generation, output);
 
         reply = create_request(CRM_OP_JOIN_REQUEST, generation, fsa_our_dc,
                                CRM_SYSTEM_DC, CRM_SYSTEM_CRMD, NULL);
 
         crm_xml_add(reply, F_CRM_JOIN_ID, join_id);
-        if(fsa_our_dc) {
-            send_cluster_message(crm_get_peer(0, fsa_our_dc), crm_msg_crmd, reply, TRUE);
-        } else {
-            crm_warn("No DC for join-%s", join_id);
-            send_cluster_message(NULL, crm_msg_crmd, reply, TRUE);
-        }
+        send_cluster_message(crm_get_peer(0, fsa_our_dc), crm_msg_crmd, reply, TRUE);
         free_xml(reply);
-
-    } else {
-        crm_err("Could not retrieve Generation to attach to our"
-                " join acknowledgement: %s", pcmk_strerror(rc));
-        register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, NULL, NULL, __FUNCTION__);
     }
 
-    free(join_id);
+  done:
     free_xml(generation);
+    free(join_id);
 }
 
 /*	A_CL_JOIN_RESULT	*/
@@ -228,7 +225,7 @@ do_cl_join_finalize_respond(long long action,
 
     /* send our status section to the DC */
     crm_debug("Confirming join join-%d: %s", join_id, crm_element_value(input->msg, F_CRM_TASK));
-    tmp1 = do_lrm_query(TRUE);
+    tmp1 = do_lrm_query(TRUE, fsa_our_uname);
     if (tmp1 != NULL) {
         xmlNode *reply = create_request(CRM_OP_JOIN_CONFIRM, tmp1, fsa_our_dc,
                                         CRM_SYSTEM_DC, CRM_SYSTEM_CRMD, NULL);
@@ -262,8 +259,8 @@ do_cl_join_finalize_respond(long long action,
 
             /* Just in case attrd was still around too */
             if (is_not_set(fsa_input_register, R_SHUTDOWN)) {
-                update_attrd(fsa_our_uname, "terminate", NULL, NULL);
-                update_attrd(fsa_our_uname, XML_CIB_ATTR_SHUTDOWN, NULL, NULL);
+                update_attrd(fsa_our_uname, "terminate", NULL, NULL, FALSE);
+                update_attrd(fsa_our_uname, XML_CIB_ATTR_SHUTDOWN, "0", NULL, FALSE);
             }
         }
 
@@ -272,7 +269,7 @@ do_cl_join_finalize_respond(long long action,
 
         if (AM_I_DC == FALSE) {
             register_fsa_input_adv(cause, I_NOT_DC, NULL, A_NOTHING, TRUE, __FUNCTION__);
-            update_attrd(NULL, NULL, NULL, NULL);
+            update_attrd(NULL, NULL, NULL, NULL, FALSE);
         }
 
         free_xml(tmp1);

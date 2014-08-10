@@ -17,7 +17,7 @@
 #
 MAINTAINERCLEANFILES    = Makefile.in
 
-INCLUDES        = -I$(top_builddir)/include -I$(top_srcdir)/include	\
+AM_CPPFLAGS        = -I$(top_builddir)/include -I$(top_srcdir)/include	\
 		-I$(top_builddir)/libltdl   -I$(top_srcdir)/libltdl
 
 ## libraries
@@ -26,12 +26,13 @@ lib_LTLIBRARIES	= libpe_rules.la libpe_status.la
 ## SOURCES
 noinst_HEADERS	= unpack.h variant.h
 
-libpe_rules_la_LDFLAGS	= -version-info 2:1:0
+libpe_rules_la_LDFLAGS	= -version-info 2:3:0
 libpe_rules_la_SOURCES	= rules.c common.c
+libpe_rules_la_LIBADD	= $(top_builddir)/lib/common/libcrmcommon.la
 
-libpe_status_la_LDFLAGS	= -version-info 4:0:0
+libpe_status_la_LDFLAGS	= -version-info 7:0:3
 libpe_status_la_SOURCES	=  status.c unpack.c utils.c complex.c native.c group.c clone.c rules.c common.c
-libpe_status_la_LIBADD	=  @CURSESLIBS@
+libpe_status_la_LIBADD	=  @CURSESLIBS@ $(top_builddir)/lib/common/libcrmcommon.la
 
 clean-generic:
 	rm -f *.log *.debug *~

@@ -109,7 +109,6 @@ typedef struct crm_graph_s {
     GListPtr synapses;          /* synpase_t* */
 
     int migration_limit;
-    GHashTable *migrating;
 
 } crm_graph_t;
 
@@ -118,6 +117,7 @@ typedef struct crm_graph_functions_s {
     gboolean(*rsc) (crm_graph_t * graph, crm_action_t * action);
     gboolean(*crmd) (crm_graph_t * graph, crm_action_t * action);
     gboolean(*stonith) (crm_graph_t * graph, crm_action_t * action);
+    gboolean(*allowed) (crm_graph_t * graph, crm_action_t * action);
 } crm_graph_functions_t;
 
 enum transition_status {
@@ -139,7 +139,8 @@ void destroy_graph(crm_graph_t * graph);
 const char *transition_status(enum transition_status state);
 void print_graph(unsigned int log_level, crm_graph_t * graph);
 void print_action(int log_level, const char *prefix, crm_action_t * action);
-void update_abort_priority(crm_graph_t * graph, int priority,
-                                  enum transition_action action, const char *abort_reason);
+bool update_abort_priority(crm_graph_t * graph, int priority,
+                           enum transition_action action, const char *abort_reason);
 const char *actiontype2text(action_type_e type);
-lrmd_event_data_t *convert_graph_action(xmlNode * resource, crm_action_t * action, int status, int rc);
+lrmd_event_data_t *convert_graph_action(xmlNode * resource, crm_action_t * action, int status,
+                                        int rc);

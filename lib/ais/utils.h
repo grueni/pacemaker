@@ -48,14 +48,6 @@ extern int openais_dispatch_send(void *conn, void *msg, int mlen);
 
 #  endif
 
-#  if !CS_USES_LIBQB
-#    include <corosync/coroipc_types.h>
-#  endif
-
-#  if LIBQB_LOGGING
-#    include <qb/qblog.h>
-#  endif
-
 #  ifdef SUPPORT_COROSYNC
 #    include <corosync/corodefs.h>
 #    include <corosync/swab.h>
@@ -149,37 +141,21 @@ level2char(int level)
     return "debug";
 }
 
-#  if LIBQB_LOGGING
-#    define do_ais_log(level, fmt, args...) do {				\
+#  define do_ais_log(level, fmt, args...) do {				\
 	if(plugin_log_level < (level)) {				\
 	    continue;							\
 	} else if((level) > LOG_DEBUG) {				\
 	    log_printf(LOG_DEBUG, "debug%d: %s: " fmt,			\
-		       level-LOG_INFO, __PRETTY_FUNCTION__ , ##args);	\
-	} else {							\
-            qb_log_from_external_source(__func__, __FILE__,             \
-               fmt, level, __LINE__, 0, ##args);			\
-	}								\
-    } while(0)
-
-#  else
-#    define do_ais_log(level, fmt, args...) do {				\
-	if(plugin_log_level < (level)) {				\
-	    continue;							\
-	} else if((level) > LOG_DEBUG) {				\
-	    log_printf(LOG_DEBUG, "debug%d: %s: " fmt,			\
-		       level-LOG_INFO, __PRETTY_FUNCTION__ , ##args);	\
+		       level-LOG_INFO, __FUNCTION__ , ##args);	\
 	} else {							\
 	    log_printf(level, "%s: %s: " fmt, level2char(level),	\
-		       __PRETTY_FUNCTION__ , ##args);			\
+		       __FUNCTION__ , ##args);			\
 	}								\
     } while(0)
-
-#  endif
 
 #  define ais_perror(fmt, args...) log_printf(				\
 	LOG_ERR, "%s: " fmt ": (%d) %s",				\
-	__PRETTY_FUNCTION__ , ##args, errno, strerror(errno))
+	__FUNCTION__ , ##args, errno, strerror(errno))
 
 #  define ais_crit(fmt, args...)    do_ais_log(LOG_CRIT,    fmt , ##args)
 #  define ais_err(fmt, args...)     do_ais_log(LOG_ERR,     fmt , ##args)

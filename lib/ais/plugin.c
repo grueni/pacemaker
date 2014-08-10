@@ -1,16 +1,16 @@
 /*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USAA
@@ -103,7 +103,7 @@ static crm_child_t pcmk_children[] = {
     { 0, crm_proc_stonithd, crm_flag_none,    0, 0, TRUE,  "stonithd", NULL,		"/bin/false",		   NULL, NULL },
     { 0, crm_proc_pe,       crm_flag_none,    5, 0, TRUE,  "pengine",  CRM_DAEMON_USER, CRM_DAEMON_DIR"/pengine",  NULL, NULL },
     { 0, crm_proc_mgmtd,    crm_flag_none,    7, 0, TRUE,  "mgmtd",    NULL,		HB_DAEMON_DIR"/mgmtd",     NULL, NULL },
-    { 0, crm_proc_stonith_ng, crm_flag_none,  2, 0, TRUE,  "stonith-ng", NULL,		CRM_DAEMON_DIR"/stonithd", NULL, NULL },
+    { 0, crm_proc_stonith_ng, crm_flag_members, 2, 0, TRUE,  "stonith-ng", NULL,		CRM_DAEMON_DIR"/stonithd", NULL, NULL },
 };
 /* *INDENT-ON* */
 
@@ -140,6 +140,7 @@ void pcmk_quorum(void *conn, ais_void_ptr * msg);
 void pcmk_cluster_id_swab(void *msg);
 void pcmk_cluster_id_callback(ais_void_ptr * message, unsigned int nodeid);
 void ais_remove_peer(char *node_id);
+void ais_remove_peer_by_name(const char *node_name);
 
 static uint32_t
 get_process_list(void)
@@ -160,27 +161,27 @@ get_process_list(void)
 }
 
 static struct corosync_lib_handler pcmk_lib_service[] = {
-    {                           /* 0 */
+    {                           /* 0 - crm_class_cluster */
      .lib_handler_fn = pcmk_ipc,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
-    {                           /* 1 */
+    {                           /* 1 - crm_class_members */
      .lib_handler_fn = pcmk_nodes,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
-    {                           /* 2 */
+    {                           /* 2 - crm_class_notify */
      .lib_handler_fn = pcmk_notify,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
-    {                           /* 3 */
+    {                           /* 3 - crm_class_nodeid */
      .lib_handler_fn = pcmk_nodeid,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
-    {                           /* 4 */
+    {                           /* 4 - crm_class_rmpeer */
      .lib_handler_fn = pcmk_remove_member,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
-    {                           /* 5 */
+    {                           /* 5 - crm_class_quorum */
      .lib_handler_fn = pcmk_quorum,
      .flow_control = COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
      },
@@ -203,14 +204,14 @@ struct corosync_service_engine pcmk_service_handler = {
     .name			= (char *)"Pacemaker Cluster Manager "PACKAGE_VERSION,
     .id				= PCMK_SERVICE_ID,
     .private_data_size		= 0,
-    .flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED, 
+    .flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
     .allow_inquorate		= CS_LIB_ALLOW_INQUORATE,
     .lib_init_fn		= pcmk_ipc_connect,
     .lib_exit_fn		= pcmk_ipc_exit,
     .exec_init_fn		= pcmk_startup,
     .exec_exit_fn		= pcmk_shutdown,
     .config_init_fn		= pcmk_config_init,
-    .priority			= 50,    
+    .priority			= 50,
     .lib_engine			= pcmk_lib_service,
     .lib_engine_count		= sizeof (pcmk_lib_service) / sizeof (struct corosync_lib_handler),
     .exec_engine		= pcmk_exec_service,
@@ -350,7 +351,7 @@ process_ais_conf(void)
                 ignore = fchown(logfd, pcmk_uid, pcmk_gid);
                 ignore = fchmod(logfd, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 
-                if(ignore < 0) {
+                if (ignore < 0) {
                     fprintf(logfile, "Could not set r/w permissions for uid=%d, gid=%d on %s\n",
                             pcmk_uid, pcmk_gid, value);
 
@@ -492,7 +493,7 @@ pcmk_wait_dispatch(void *arg)
                 }
 
                 /* Broadcast the fact that one of our processes died
-                 * 
+                 *
                  * Try to get some logging of the cause out first though
                  * because we're probably about to get fenced
                  *
@@ -607,7 +608,7 @@ pcmk_startup(struct corosync_api_v1 *init_with)
     ipc_client_list = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     ais_info("CRM: Initialized");
-    log_printf(LOG_INFO, "Logging: Initialized %s\n", __PRETTY_FUNCTION__);
+    log_printf(LOG_INFO, "Logging: Initialized %s\n", __FUNCTION__);
 
     rc = getrlimit(RLIMIT_CORE, &cores);
     if (rc < 0) {
@@ -674,13 +675,13 @@ pcmk_startup(struct corosync_api_v1 *init_with)
 }
 
 /*
-  static void ais_print_node(const char *prefix, struct totem_ip_address *host) 
+  static void ais_print_node(const char *prefix, struct totem_ip_address *host)
   {
   int len = 0;
   char *buffer = NULL;
 
   ais_malloc0(buffer, INET6_ADDRSTRLEN+1);
-	
+
   inet_ntop(host->family, host->addr, buffer, INET6_ADDRSTRLEN);
 
   len = strlen(buffer);
@@ -926,9 +927,9 @@ pcmk_cluster_callback(ais_void_ptr * message, unsigned int nodeid)
 
     } else {
         ais_trace("Discarding Msg[%d] (dest=%s:%s, from=%s:%s)",
-                    ais_msg->id, ais_dest(&(ais_msg->host)),
-                    msg_type2text(ais_msg->host.type),
-                    ais_dest(&(ais_msg->sender)), msg_type2text(ais_msg->sender.type));
+                  ais_msg->id, ais_dest(&(ais_msg->host)),
+                  msg_type2text(ais_msg->host.type),
+                  ais_dest(&(ais_msg->sender)), msg_type2text(ais_msg->sender.type));
     }
 }
 
@@ -1026,12 +1027,14 @@ pcmk_ipc(void *conn, ais_void_ptr * msg)
         transient = FALSE;
     }
 #if 0
-    /* If this check fails, the order of pcmk_children probably 
+    /* If this check fails, the order of pcmk_children probably
      *   doesn't match that of the crm_ais_msg_types enum
      */
     AIS_CHECK(transient || mutable->sender.pid == pcmk_children[type].pid,
               ais_err("Sender: %d, child[%d]: %d", mutable->sender.pid, type,
-                      pcmk_children[type].pid); ais_free(mutable); return);
+                      pcmk_children[type].pid);
+              ais_free(mutable);
+              return);
 #endif
 
     if (transient == FALSE
@@ -1385,7 +1388,8 @@ check_message_sanity(const AIS_Message * msg, const char *data)
 
     AIS_CHECK(msg->header.size > sizeof(AIS_Message),
               ais_err("Message %d size too small: %d < %zu",
-                      msg->header.id, msg->header.size, sizeof(AIS_Message)); return FALSE);
+                      msg->header.id, msg->header.size, sizeof(AIS_Message));
+              return FALSE);
 
     if (sane && ais_data_len(msg) != tmp_size) {
         ais_warn("Message payload size is incorrect: expected %d, got %d", ais_data_len(msg),
@@ -1471,9 +1475,9 @@ route_ais_message(const AIS_Message * msg, gboolean local_origin)
     static int service_id = SERVICE_ID_MAKE(PCMK_SERVICE_ID, 0);
 
     ais_trace("Msg[%d] (dest=%s:%s, from=%s:%s.%d, remote=%s, size=%d)",
-                mutable->id, ais_dest(&(mutable->host)), msg_type2text(dest),
-                ais_dest(&(mutable->sender)), msg_type2text(mutable->sender.type),
-                mutable->sender.pid, local_origin ? "false" : "true", ais_data_len((mutable)));
+              mutable->id, ais_dest(&(mutable->host)), msg_type2text(dest),
+              ais_dest(&(mutable->sender)), msg_type2text(mutable->sender.type),
+              mutable->sender.pid, local_origin ? "false" : "true", ais_data_len((mutable)));
 
     if (local_origin == FALSE) {
         if (mutable->host.size == 0 || ais_str_eq(local_uname, mutable->host.uname)) {
@@ -1490,6 +1494,7 @@ route_ais_message(const AIS_Message * msg, gboolean local_origin)
     if (mutable->host.local) {
         void *conn = NULL;
         const char *lookup = NULL;
+        int children_index = 0;
 
         if (dest == crm_msg_ais) {
             process_ais_message(mutable);
@@ -1527,10 +1532,15 @@ route_ais_message(const AIS_Message * msg, gboolean local_origin)
         }
 
         lookup = msg_type2text(dest);
-        conn = pcmk_children[dest].async_conn;
 
-        /* the cluster fails in weird and wonderfully obscure ways when this is not true */
-        AIS_ASSERT(ais_str_eq(lookup, pcmk_children[dest].name));
+        if (dest == crm_msg_pe && ais_str_eq(pcmk_children[7].name, lookup)) {
+            children_index = 7;
+
+        } else {
+            children_index = dest;
+        }
+
+        conn = pcmk_children[children_index].async_conn;
 
         if (mutable->header.id == service_id) {
             mutable->header.id = 0;     /* reset this back to zero for IPC messages */
@@ -1575,8 +1585,7 @@ send_plugin_msg_raw(const AIS_Message * ais_msg)
     if (mutable->id == 0) {
         msg_id++;
         AIS_CHECK(msg_id != 0 /* detect wrap-around */ ,
-                  msg_id++;
-                  ais_err("Message ID wrapped around"));
+                  msg_id++; ais_err("Message ID wrapped around"));
         mutable->id = msg_id;
     }
 
@@ -1710,6 +1719,42 @@ ais_remove_peer(char *node_id)
     }
 }
 
+void
+ais_remove_peer_by_name(const char *node_name)
+{
+    GHashTableIter iter;
+    gpointer key = 0;
+    crm_node_t *node = NULL;
+    GList *node_list = NULL;
+
+    g_hash_table_iter_init(&iter, membership_list);
+
+    while (g_hash_table_iter_next(&iter, &key, (void **)&node)) {
+        if (ais_str_eq(node_name, node->uname)) {
+            uint32_t node_id = GPOINTER_TO_UINT(key);
+            char *node_id_s = NULL;
+
+            ais_malloc0(node_id_s, 32);
+            snprintf(node_id_s, 31, "%u", node_id);
+            node_list = g_list_append(node_list, node_id_s);
+        }
+    }
+
+    if (node_list) {
+        GList *gIter = NULL;
+
+        for (gIter = node_list; gIter != NULL; gIter = gIter->next) {
+            char *node_id_s = gIter->data;
+
+            ais_remove_peer(node_id_s);
+        }
+        g_list_free_full(node_list, free);
+
+    } else {
+        ais_warn("Peer %s is unkown", node_name);
+    }
+}
+
 gboolean
 process_ais_message(const AIS_Message * msg)
 {
@@ -1726,7 +1771,7 @@ process_ais_message(const AIS_Message * msg)
     if (data && len > 12 && strncmp("remove-peer:", data, 12) == 0) {
         char *node = data + 12;
 
-        ais_remove_peer(node);
+        ais_remove_peer_by_name(node);
     }
 
     ais_free(data);

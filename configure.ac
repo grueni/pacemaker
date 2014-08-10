@@ -4,7 +4,7 @@ dnl
 dnl License: GNU General Public License (GPL)
 
 dnl ===============================================
-dnl Bootstrap 
+dnl Bootstrap
 dnl ===============================================
 AC_PREREQ(2.59)
 
@@ -19,8 +19,8 @@ dnl     checks for compiler characteristics
 dnl     checks for library functions
 dnl     checks for system services
 
-AC_INIT(pacemaker, 1.1.8, pacemaker@oss.clusterlabs.org)
-CRM_DTD_VERSION="1.2"
+m4_include([version.m4])
+AC_INIT([pacemaker], VERSION_NUMBER, pacemaker@oss.clusterlabs.org,pacemaker,http://clusterlabs.org)
 
 PCMK_FEATURES=""
 HB_PKG=heartbeat
@@ -53,7 +53,8 @@ AC_ARG_WITH(pkg-name,
     [  --with-pkg-name=name     Override package name (if you're a packager needing to pretend) ],
     [ PACKAGE_NAME="$withval" ])
 
-AM_INIT_AUTOMAKE($PACKAGE_NAME, $PACKAGE_VERSION)
+dnl Older distros may need: AM_INIT_AUTOMAKE($PACKAGE_NAME, $PACKAGE_VERSION)
+AM_INIT_AUTOMAKE
 AC_DEFINE_UNQUOTED(PACEMAKER_VERSION, "$PACKAGE_VERSION", Current pacemaker version)
 
 PACKAGE_SERIES=`echo $PACKAGE_VERSION | awk -F. '{ print $1"."$2 }'`
@@ -61,7 +62,7 @@ AC_SUBST(PACKAGE_SERIES)
 AC_SUBST(PACKAGE_VERSION)
 
 dnl automake >= 1.11 offers --enable-silent-rules for suppressing the output from
-dnl normal compilation.  When a failure occurs, it will then display the full 
+dnl normal compilation.  When a failure occurs, it will then display the full
 dnl command line
 dnl Wrap in m4_ifdef to avoid breaking on older platforms
 m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])])
@@ -102,17 +103,17 @@ AC_CHECK_SIZEOF(long long)
 AC_STRUCT_TIMEZONE
 
 dnl ===============================================
-dnl Helpers 
+dnl Helpers
 dnl ===============================================
 cc_supports_flag() {
-         local CFLAGS="$@"
+         local CFLAGS="-Werror $@"
          AC_MSG_CHECKING(whether $CC supports "$@")
          AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[ ]], [[ ]])], [RC=0; AC_MSG_RESULT(yes)],[RC=1; AC_MSG_RESULT(no)])
          return $RC
 }
 
 try_extract_header_define() {
-	  AC_MSG_CHECKING(if $2 in $1 exists. If not defaulting to $3)
+	  AC_MSG_CHECKING(if $2 in $1 exists)
 	  Cfile=$srcdir/extract_define.$2.${$}
 	  printf "#include <stdio.h>\n" > ${Cfile}.c
 	  printf "#include <%s>\n" $1 >> ${Cfile}.c
@@ -120,12 +121,17 @@ try_extract_header_define() {
 	  printf "#ifdef %s\n" $2 >> ${Cfile}.c
 	  printf "printf(\"%%s\", %s);\n" $2 >> ${Cfile}.c
 	  printf "#endif \n return 0; }\n" >> ${Cfile}.c
-	  $CC $CFLAGS ${Cfile}.c -o ${Cfile}
-	  value=`${Cfile}`
+	  $CC $CFLAGS ${Cfile}.c -o ${Cfile} 2>/dev/null
+	  value=
+	  if test -x ${Cfile}; then
+	      value=`${Cfile} 2>/dev/null`
+	  fi
 	  if  test x"${value}" == x""; then
 	      value=$3
+	      AC_MSG_RESULT(default: $value)
+	  else
+	      AC_MSG_RESULT($value)
 	  fi
-	  AC_MSG_RESULT($value)
 	  printf $value
 	  rm -rf ${Cfile}.c ${Cfile} ${Cfile}.dSYM ${Cfile}.gcno
 	}
@@ -164,7 +170,7 @@ AC_ARG_ENABLE([fatal-warnings],
      [default=yes]])
 
 AC_ARG_ENABLE([quiet],
-[  --enable-quiet 
+[  --enable-quiet
      Supress make output unless there is an error
      [default=no]])
 
@@ -173,7 +179,7 @@ AC_ARG_ENABLE([thread-safe],
      [default=no]])
 
 AC_ARG_ENABLE([bundled-ltdl],
-[  --enable-bundled-ltdl  Configure, build and install the standalone ltdl library bundled with ${PACKAGE} [default=no]]) 
+[  --enable-bundled-ltdl  Configure, build and install the standalone ltdl library bundled with ${PACKAGE} [default=no]])
 LTDL_LIBS=""
 
 AC_ARG_ENABLE([no-stack],
@@ -189,14 +195,14 @@ AC_ARG_ENABLE([systemd],
        Do not build support for the Systemd init system [default=yes]])
 
 AC_ARG_WITH(ais,
-    [  --with-ais     
+    [  --with-ais
        Support the Corosync messaging and membership layer ],
     [ SUPPORT_CS=$withval ],
     [ SUPPORT_CS=try ],
 )
 
 AC_ARG_WITH(corosync,
-    [  --with-corosync     
+    [  --with-corosync
        Support the Corosync messaging and membership layer ],
     [ SUPPORT_CS=$withval ]
 dnl	initialized in AC_ARG_WITH(ais...) already,
@@ -204,35 +210,54 @@ dnl	don't reset to try if it was given as --without-ais
 )
 
 AC_ARG_WITH(heartbeat,
-    [  --with-heartbeat     
+    [  --with-heartbeat
        Support the Heartbeat messaging and membership layer ],
     [ SUPPORT_HEARTBEAT=$withval ],
     [ SUPPORT_HEARTBEAT=try ],
 )
 
 AC_ARG_WITH(cman,
-    [  --with-cman     
+    [  --with-cman
        Support the consumption of membership and quorum from cman ],
     [ SUPPORT_CMAN=$withval ],
     [ SUPPORT_CMAN=try ],
 )
 
 AC_ARG_WITH(cpg,
-    [  --with-cs-quorum     
+    [  --with-cs-quorum
        Support the consumption of membership and quorum from corosync ],
     [ SUPPORT_CS_QUORUM=$withval ],
     [ SUPPORT_CS_QUORUM=try ],
 )
 
+AC_ARG_WITH(nagios,
+    [  --with-nagios
+       Support nagios remote monitoring ],
+    [ SUPPORT_NAGIOS=$withval ],
+    [ SUPPORT_NAGIOS=try ],
+)
+
+AC_ARG_WITH(nagios-plugin-dir,
+    [  --with-nagios-plugin-dir=DIR
+       Directory for nagios plugins [${NAGIOS_PLUGIN_DIR}]],
+    [ NAGIOS_PLUGIN_DIR="$withval" ]
+)
+
+AC_ARG_WITH(nagios-metadata-dir,
+    [  --with-nagios-metadata-dir=DIR
+       Directory for nagios plugins metadata [${NAGIOS_METADATA_DIR}]],
+    [ NAGIOS_METADATA_DIR="$withval" ]
+)
+
 AC_ARG_WITH(snmp,
-    [  --with-snmp     
+    [  --with-snmp
        Support the SNMP protocol ],
     [ SUPPORT_SNMP=$withval ],
     [ SUPPORT_SNMP=try ],
 )
 
 AC_ARG_WITH(esmtp,
-    [  --with-esmtp  
+    [  --with-esmtp
        Support the sending mail notifications with the esmtp library ],
     [ SUPPORT_ESMTP=$withval ],
     [ SUPPORT_ESMTP=try ],
@@ -242,17 +267,24 @@ AC_ARG_WITH(acl,
     [  --with-acl
        Support CIB ACL ],
     [ SUPPORT_ACL=$withval ],
-    [ SUPPORT_ACL=no ],
+    [ SUPPORT_ACL=yes ],
+)
+
+AC_ARG_WITH(cibsecrets,
+    [  --with-cibsecrets
+       Support CIB secrets ],
+    [ SUPPORT_CIBSECRETS=$withval ],
+    [ SUPPORT_CIBSECRETS=no ],
 )
 
 CSPREFIX=""
 AC_ARG_WITH(ais-prefix,
     [  --with-ais-prefix=DIR  Prefix used when Corosync was installed [$prefix]],
-    [ CSPREFIX=$withval ], 
+    [ CSPREFIX=$withval ],
     [ CSPREFIX=$prefix ])
 
 LCRSODIR=""
-AC_ARG_WITH(lcrso-dir, 
+AC_ARG_WITH(lcrso-dir,
     [  --with-lcrso-dir=DIR   Corosync lcrso files. ],
     [ LCRSODIR="$withval" ])
 
@@ -263,15 +295,14 @@ AC_ARG_WITH(initdir,
 
 SUPPORT_PROFILING=0
 AC_ARG_WITH(profiling,
-    [  --with-profiling     
-       Support gprof profiling ],
+    [  --with-profiling
+       Disable optimizations for effective profiling ],
     [ SUPPORT_PROFILING=$withval ])
 
-SUPPORT_GCOV=0
-AC_ARG_WITH(gcov,
-    [  --with-gcov
-       Support gcov coverage testing ],
-    [ SUPPORT_GCOV=$withval ])
+AC_ARG_WITH(coverage,
+    [  --with-coverage
+       Disable optimizations for effective profiling ],
+    [ SUPPORT_COVERAGE=$withval ])
 
 PUBLICAN_BRAND="common"
 AC_ARG_WITH(brand,
@@ -362,7 +393,7 @@ case $libdir in
     ;;
 esac
 
-dnl Expand autoconf variables so that we dont end up with '${prefix}' 
+dnl Expand autoconf variables so that we dont end up with '${prefix}'
 dnl in #defines and python scripts
 dnl NOTE: Autoconf deliberately leaves them unexpanded to allow
 dnl    make exec_prefix=/foo install
@@ -395,7 +426,7 @@ AC_SUBST(docdir)
 for j in prefix exec_prefix bindir sbindir libexecdir datadir sysconfdir \
     sharedstatedir localstatedir libdir includedir oldincludedir infodir \
     mandir INITDIR docdir
-do 
+do
   dirname=`eval echo '${'${j}'}'`
   if
     test ! -d "$dirname"
@@ -407,27 +438,29 @@ done
 dnl This OS-based decision-making is poor autotools practice;
 dnl feature-based mechanisms are strongly preferred.
 dnl
-dnl So keep this section to a bare minimum; regard as a "necessary evil". 
+dnl So keep this section to a bare minimum; regard as a "necessary evil".
 
 case "$host_os" in
-*bsd*)		LIBS="-L/usr/local/lib"
+*bsd*)
+		AC_DEFINE_UNQUOTED(ON_BSD, 1, Compiling for BSD platform)
+		LIBS="-L/usr/local/lib"
 		CPPFLAGS="$CPPFLAGS -I/usr/local/include"
 		INIT_EXT=".sh"
 		;;
 *solaris*)
 		;;
-*linux*)	
+*linux*)
 		AC_DEFINE_UNQUOTED(ON_LINUX, 1, Compiling for Linux platform)
   		CFLAGS="$CFLAGS -I${prefix}/include"
  		;;
-darwin*)	
+darwin*)
 		AC_DEFINE_UNQUOTED(ON_DARWIN, 1, Compiling for Darwin platform)
   		LIBS="$LIBS -L${prefix}/lib"
   		CFLAGS="$CFLAGS -I${prefix}/include"
 		;;
 esac
 
-dnl Eventually remove this 
+dnl Eventually remove this
 CFLAGS="$CFLAGS -I${prefix}/include/heartbeat"
 
 AC_SUBST(INIT_EXT)
@@ -456,14 +489,14 @@ AC_COMPILE_IFELSE(
 #include <stdlib.h>
       ],
       [
-int max = 512;	
+int max = 512;
 uint64_t bignum = 42;
 char *buffer = malloc(max);
 const char *random = "random";
 snprintf(buffer, max-1, "<quorum id=%lu quorate=%s/>", bignum, random);
 fprintf(stderr, "Result: %s\n", buffer);
       ]
-    )], 
+    )],
     [U64T="%lu"],
     [U64T="%llu"]
 )
@@ -601,7 +634,7 @@ AC_CHECK_LIB(rt, sched_getscheduler)            dnl -lrt (for Tru64)
 AC_CHECK_LIB(gnugetopt, getopt_long)		dnl -lgnugetopt ( if available )
 AC_CHECK_LIB(pam, pam_start)			dnl -lpam (if available)
 
-AC_CHECK_FUNCS([sched_getparam sched_setparam sched_get_priority_min])
+AC_CHECK_FUNCS([sched_setscheduler])
 
 AC_CHECK_LIB(uuid, uuid_parse)			dnl load the library if necessary
 AC_CHECK_FUNCS(uuid_unparse)			dnl OSX ships uuid_* as standard functions
@@ -622,7 +655,7 @@ else
         GPKGNAME="glib-2.0"
 fi
 
-if 
+if
    $PKGCONFIG --exists $GPKGNAME
 then
 	GLIBCONFIG="$PKGCONFIG $GPKGNAME"
@@ -633,28 +666,10 @@ else
 	$PKGCONFIG --cflags $GPKGNAME; echo $?
 	$PKGCONFIG $GPKGNAME; echo $?
 	set +x
-        
+
 	AC_MSG_ERROR(You need glib2-devel installed in order to build ${PACKAGE})
 fi
 AC_MSG_RESULT(using $GLIBCONFIG)
-
-AC_CHECK_LIB(glib-2.0, g_hash_table_get_values)
-if test "x$ac_cv_lib_glib_2_0_g_hash_table_get_values" != x""yes; then
-   AC_MSG_WARN(Your version of Glib is too old, you should have at least 2.14)
-fi
-
-AC_CHECK_LIB(glib-2.0, g_list_free_full)
-if test "x$ac_cv_lib_glib_2_0_g_list_free_full" != x""yes; then
-   AC_DEFINE_UNQUOTED(NEED_G_LIST_FREE_FULL, 1, glib-2.0 has no g_list_free_full)
-fi
-
-if 
-    $PKGCONFIG --exists systemd
-then
-    systemdunitdir=`$PKGCONFIG --variable=systemdsystemunitdir systemd`
-    AC_SUBST(systemdunitdir)
-fi
-AM_CONDITIONAL(HAVE_SYSTEMD, test -n "$systemdunitdir" -a "x$systemdunitdir" != xno)
 
 #
 #	Where is dlopen?
@@ -697,6 +712,10 @@ if test "X$GLIBCONFIG" != X; then
 	LIBS="$LIBS $GLIBLIB"
 fi
 
+dnl FreeBSD needs -lcompat for ftime() used by lrmd.c
+AC_CHECK_LIB([compat], [ftime], [COMPAT_LIBS='-lcompat'])
+AC_SUBST(COMPAT_LIBS)
+
 dnl ========================================================================
 dnl Headers
 dnl ========================================================================
@@ -715,6 +734,7 @@ AC_CHECK_HEADERS(glib.h)
 AC_CHECK_HEADERS(grp.h)
 AC_CHECK_HEADERS(limits.h)
 AC_CHECK_HEADERS(linux/errqueue.h)
+AC_CHECK_HEADERS(linux/swab.h)
 AC_CHECK_HEADERS(malloc.h)
 AC_CHECK_HEADERS(netdb.h)
 AC_CHECK_HEADERS(netinet/in.h)
@@ -735,9 +755,11 @@ AC_CHECK_HEADERS(sys/dir.h)
 AC_CHECK_HEADERS(sys/ioctl.h)
 AC_CHECK_HEADERS(sys/param.h)
 AC_CHECK_HEADERS(sys/poll.h)
+AC_CHECK_HEADERS(sys/reboot.h)
 AC_CHECK_HEADERS(sys/resource.h)
 AC_CHECK_HEADERS(sys/select.h)
 AC_CHECK_HEADERS(sys/socket.h)
+AC_CHECK_HEADERS(sys/signalfd.h)
 AC_CHECK_HEADERS(sys/sockio.h)
 AC_CHECK_HEADERS(sys/stat.h)
 AC_CHECK_HEADERS(sys/time.h)
@@ -751,7 +773,7 @@ AC_CHECK_HEADERS(time.h)
 AC_CHECK_HEADERS(unistd.h)
 AC_CHECK_HEADERS(winsock.h)
 
-dnl These headers need prerequisits before the tests will pass 
+dnl These headers need prerequisits before the tests will pass
 dnl AC_CHECK_HEADERS(net/if.h)
 dnl AC_CHECK_HEADERS(netinet/icmp6.h)
 dnl AC_CHECK_HEADERS(netinet/ip6.h)
@@ -901,7 +923,7 @@ if test "x$CURSESLIBS" != "x"; then
 fi
 
 dnl Check for printw() prototype compatibility
-if test X"$CURSESLIBS" != X"" && cc_supports_flag -Wcast-qual && cc_supports_flag -Werror; then 
+if test X"$CURSESLIBS" != X"" && cc_supports_flag -Wcast-qual && cc_supports_flag -Werror; then
     AC_MSG_CHECKING(whether printw() requires argument of "const char *")
     ac_save_LIBS=$LIBS
     LIBS="$CURSESLIBS  $LIBS"
@@ -920,7 +942,7 @@ if test X"$CURSESLIBS" != X"" && cc_supports_flag -Wcast-qual && cc_supports_fla
 #endif
 	      ],
 	      [printw((const char *)"Test");]
-	    )], 
+	    )],
 	    [ac_cv_compatible_printw=yes],
 	    [ac_cv_compatible_printw=no]
     )
@@ -943,50 +965,39 @@ dnl ========================================================================
 dnl    Profiling and GProf
 dnl ========================================================================
 
+AC_MSG_NOTICE(Old CFLAGS: $CFLAGS)
+case $SUPPORT_COVERAGE in
+     1|yes|true)
+	SUPPORT_PROFILING=1
+	PCMK_FEATURES="$PCMK_FEATURES coverage"
+	CFLAGS="$CFLAGS -fprofile-arcs -ftest-coverage"
+	dnl During linking, make sure to specify -lgcov or -coverage
+
+        dnl Enable gprof
+	#LIBS="$LIBS -pg"
+	#CFLAGS="$CFLAGS -pg"
+	;;
+esac
+
 case $SUPPORT_PROFILING in
-     1|yes|true) 
+     1|yes|true)
 	SUPPORT_PROFILING=1
 
-        dnl Enable gprof
-	#LIBS="$LIBS -pg"
-	#CFLAGS="$CFLAGS -pg"
-
 	dnl Disable various compiler optimizations
-	CFLAGS="$CFLAGS -fno-omit-frame-pointer"
-	#CFLAGS="$CFLAGS -fno-inline-functions -fno-inline-functions-called-once -fno-optimize-sibling-calls"
-	dnl CFLAGS="$CFLAGS -fno-default-inline -fno-inline"
+	CFLAGS="$CFLAGS -fno-omit-frame-pointer -fno-inline -fno-builtin "
+	dnl CFLAGS="$CFLAGS -fno-inline-functions -fno-default-inline -fno-inline-functions-called-once -fno-optimize-sibling-calls"
+
+	dnl Turn off optimization so tools can get accurate line numbers
+	CFLAGS=`echo $CFLAGS | sed -e 's/-O.\ //g' -e 's/-Wp,-D_FORTIFY_SOURCE=.\ //g' -e 's/-D_FORTIFY_SOURCE=.\ //g'`
+	CFLAGS="$CFLAGS -O0 -g3 -gdwarf-2"
 
 	dnl Update features
-	PCMK_FEATURES="$PCMK_FEATURES gprof"
+	PCMK_FEATURES="$PCMK_FEATURES profile"
 	;;
      *) SUPPORT_PROFILING=0;;
 esac
-AC_DEFINE_UNQUOTED(SUPPORT_PROFILING, $SUPPORT_PROFILING, Support for gprof profiling)
-
-case $SUPPORT_GCOV in
-     1|yes|true) 
-	SUPPORT_GCOV=1
-
-        dnl Enable gprof
-	#LIBS="$LIBS -pg"
-	#CFLAGS="$CFLAGS -pg"
-
-	dnl Disable various compiler optimizations
-	CFLAGS="$CFLAGS -fprofile-arcs -ftest-coverage -fno-inline"
-
-	dnl Turn off optimization so code coverage tool
-	dnl can get accurate line numbers
-	AC_MSG_NOTICE(Old CFLAGS: $CFLAGS) 
-	CFLAGS=`echo $CFLAGS | sed -e 's/-O.\ //g' -e 's/-Wp,-D_FORTIFY_SOURCE=.\ //g'`
-	CFLAGS="$CFLAGS -O0"
-	AC_MSG_NOTICE(New CFLAGS: $CFLAGS) 
-
-	dnl Update features
-	PCMK_FEATURES="$PCMK_FEATURES gcov"
-	;;
-     *) SUPPORT_PROFILING=0;;
-esac
-AC_DEFINE_UNQUOTED(SUPPORT_GCOV, $SUPPORT_GCOV, Support for gcov coverage testing)
+AC_MSG_NOTICE(New CFLAGS: $CFLAGS)
+AC_DEFINE_UNQUOTED(SUPPORT_PROFILING, $SUPPORT_PROFILING, Support for profiling)
 
 dnl ========================================================================
 dnl    Cluster infrastructure - Heartbeat / LibQB
@@ -1002,18 +1013,18 @@ fi
 
 PKG_CHECK_MODULES(libqb, libqb, HAVE_libqb=1, HAVE_libqb=0)
 AC_CHECK_HEADERS(qb/qbipc_common.h)
-AC_CHECK_LIB(qb, qb_ipcc_is_connected)
-AC_CHECK_FUNCS(qb_ipcc_is_connected)
+AC_CHECK_LIB(qb, qb_ipcs_connection_auth_set)
 
 LIBQB_LOG=1
 PCMK_FEATURES="$PCMK_FEATURES libqb-logging libqb-ipc"
 
-if test $ac_cv_lib_qb_qb_ipcc_is_connected != yes; then
-   AC_MSG_FAILURE(Version of IPC in libqb is not new enough)
-fi
+AC_CHECK_FUNCS(qb_ipcs_connection_get_buffer_size, AC_DEFINE(HAVE_IPCS_GET_BUFFER_SIZE,  1, [Have qb_ipcc_get_buffer_size function]))
 
-AC_DEFINE_UNQUOTED(LIBQB_LOGGING, $LIBQB_LOG, Use libqb for logging)
-AC_DEFINE_UNQUOTED(LIBQB_IPC, 0, Use libqb for IPC)
+if
+   ! pkg-config --atleast-version 0.13 libqb
+then
+   AC_MSG_FAILURE(Version of libqb is too old: v0.13 or greater requried)
+fi
 
 LIBS="$LIBS $libqb_LIBS"
 
@@ -1021,6 +1032,7 @@ AC_CHECK_HEADERS(heartbeat/hb_config.h)
 AC_CHECK_HEADERS(heartbeat/glue_config.h)
 AC_CHECK_HEADERS(stonith/stonith.h)
 AC_CHECK_HEADERS(agent_config.h)
+
 GLUE_HEADER=none
 HAVE_GLUE=0
 if test "$ac_cv_header_heartbeat_glue_config_h" = "yes";  then
@@ -1052,9 +1064,6 @@ CRM_DTD_DIRECTORY="${datadir}/pacemaker"
 AC_DEFINE_UNQUOTED(CRM_DTD_DIRECTORY,"$CRM_DTD_DIRECTORY", Location for the Pacemaker Relax-NG Schema)
 AC_SUBST(CRM_DTD_DIRECTORY)
 
-AC_DEFINE_UNQUOTED(CRM_DTD_VERSION,"$CRM_DTD_VERSION", Current version of the Pacemaker Relax-NG Schema)
-AC_SUBST(CRM_DTD_VERSION)
-
 CRM_CORE_DIR=`try_extract_header_define $GLUE_HEADER HA_COREDIR ${localstatedir}/lib/pacemaker/cores`
 AC_DEFINE_UNQUOTED(CRM_CORE_DIR,"$CRM_CORE_DIR", Location to store core files produced by Pacemaker daemons)
 AC_SUBST(CRM_CORE_DIR)
@@ -1083,6 +1092,10 @@ CRM_CONFIG_DIR="${localstatedir}/lib/pacemaker/cib"
 AC_DEFINE_UNQUOTED(CRM_CONFIG_DIR,"$CRM_CONFIG_DIR", Where to keep configuration files)
 AC_SUBST(CRM_CONFIG_DIR)
 
+CRM_CONFIG_CTS="${localstatedir}/lib/pacemaker/cts"
+AC_DEFINE_UNQUOTED(CRM_CONFIG_CTS,"$CRM_CONFIG_CTS", Where to keep cts stateful data)
+AC_SUBST(CRM_CONFIG_CTS)
+
 CRM_LEGACY_CONFIG_DIR="${localstatedir}/lib/heartbeat/crm"
 AC_DEFINE_UNQUOTED(CRM_LEGACY_CONFIG_DIR,"$CRM_LEGACY_CONFIG_DIR", Where Pacemaker used to keep configuration files)
 AC_SUBST(CRM_LEGACY_CONFIG_DIR)
@@ -1092,7 +1105,7 @@ AC_DEFINE_UNQUOTED(CRM_DAEMON_DIR,"$CRM_DAEMON_DIR", Location for Pacemaker daem
 AC_SUBST(CRM_DAEMON_DIR)
 
 HB_DAEMON_DIR=`try_extract_header_define $GLUE_HEADER HA_LIBHBDIR $libdir/heartbeat`
-AC_DEFINE_UNQUOTED(HB_DAEMON_DIR,"$HB_DAEMON_DIR", Location for Heartbeat expects Pacemaker daemons to be in)
+AC_DEFINE_UNQUOTED(HB_DAEMON_DIR,"$HB_DAEMON_DIR", Location Heartbeat expects Pacemaker daemons to be in)
 AC_SUBST(HB_DAEMON_DIR)
 
 dnl Needed so that the Corosync plugin can clear out the directory as Heartbeat does
@@ -1100,7 +1113,7 @@ HA_STATE_DIR=`try_extract_header_define $GLUE_HEADER HA_VARRUNDIR ${localstatedi
 AC_DEFINE_UNQUOTED(HA_STATE_DIR,"$HA_STATE_DIR", Where Heartbeat keeps state files and sockets)
 AC_SUBST(HA_STATE_DIR)
 
-CRM_RSCTMP_DIR=`try_extract_header_define agent_config.h HA_RSCTMPDIR $HA_STATE_DIR/heartbeat/rsctmp`
+CRM_RSCTMP_DIR=`try_extract_header_define agent_config.h HA_RSCTMPDIR $HA_STATE_DIR/resource-agents`
 AC_MSG_CHECKING(Scratch dir for resource agents)
 AC_MSG_RESULT($CRM_RSCTMP_DIR)
 AC_DEFINE_UNQUOTED(CRM_RSCTMP_DIR,"$CRM_RSCTMP_DIR", Where resource agents should keep state files)
@@ -1141,7 +1154,7 @@ elif test -x $GIT -a -d .git; then
 
 else
    # The current directory name make a reasonable default
-   # Most generated archives will include the hash or tag 
+   # Most generated archives will include the hash or tag
    BASE=`basename $PWD`
    BUILD_VERSION=`echo $BASE | sed s:.*[[Pp]]acemaker-::`
    AC_MSG_RESULT(directory based hash: $BUILD_VERSION)
@@ -1151,19 +1164,24 @@ AC_DEFINE_UNQUOTED(BUILD_VERSION, "$BUILD_VERSION", Build version)
 AC_SUBST(BUILD_VERSION)
 
 
-HAVE_gio=1
+HAVE_dbus=1
 HAVE_upstart=0
 HAVE_systemd=0
-PKG_CHECK_MODULES(GIO, gio-2.0, ,HAVE_gio=0)
+PKG_CHECK_MODULES(DBUS, dbus-1, ,HAVE_dbus=0)
 
-AC_CHECK_TYPE([GDBusProxy],,,[[#include <gio/gio.h>]])
+AC_DEFINE_UNQUOTED(SUPPORT_DBUS, $HAVE_dbus, Support dbus)
+AM_CONDITIONAL(BUILD_DBUS, test $HAVE_dbus = 1)
 
-if test x$ac_cv_type_GDBusProxy != xyes; then
-   HAVE_gio=0
-   AC_MSG_WARN(Unable to support systemd/upstart. You need to use glib >= 2.26)
+if test $HAVE_dbus = 1; then
+   CFLAGS="$CFLAGS `$PKGCONFIG --cflags dbus-1`"
 fi
 
-if test $HAVE_gio = 1 -a "x${enable_upstart}" != xno; then
+DBUS_LIBS="$CFLAGS `$PKGCONFIG --libs dbus-1`"
+AC_SUBST(DBUS_LIBS)
+
+AC_CHECK_TYPES([DBusBasicValue],,,[[#include <dbus/dbus.h>]])
+
+if test $HAVE_dbus = 1 -a "x${enable_upstart}" != xno; then
    HAVE_upstart=1
    PCMK_FEATURES="$PCMK_FEATURES upstart"
 fi
@@ -1171,13 +1189,52 @@ fi
 AC_DEFINE_UNQUOTED(SUPPORT_UPSTART, $HAVE_upstart, Support upstart based system services)
 AM_CONDITIONAL(BUILD_UPSTART, test $HAVE_upstart = 1)
 
-if test $HAVE_gio = 1 -a "x${enable_systemd}" != xno; then
-   HAVE_systemd=1
-   PCMK_FEATURES="$PCMK_FEATURES systemd"
+if
+    $PKGCONFIG --exists systemd
+then
+    systemdunitdir=`$PKGCONFIG --variable=systemdsystemunitdir systemd`
+    AC_SUBST(systemdunitdir)
+else
+    enable_systemd=no
 fi
+
+if test $HAVE_dbus = 1 -a "x${enable_systemd}" != xno; then
+   if test -n "$systemdunitdir" -a "x$systemdunitdir" != xno; then
+      HAVE_systemd=1
+      PCMK_FEATURES="$PCMK_FEATURES systemd"
+   fi
+fi
+
 AC_DEFINE_UNQUOTED(SUPPORT_SYSTEMD, $HAVE_systemd, Support systemd based system services)
 AM_CONDITIONAL(BUILD_SYSTEMD, test $HAVE_systemd = 1)
 
+case $SUPPORT_NAGIOS in
+     1|yes|true|try)
+        SUPPORT_NAGIOS=1;;
+     *)
+        SUPPORT_NAGIOS=0;;
+esac
+
+if test $SUPPORT_NAGIOS = 1; then
+    PCMK_FEATURES="$PCMK_FEATURES nagios"
+fi
+
+AC_DEFINE_UNQUOTED(SUPPORT_NAGIOS, $SUPPORT_NAGIOS, Support nagios plugins)
+AM_CONDITIONAL(BUILD_NAGIOS, test $SUPPORT_NAGIOS = 1)
+
+if test x"$NAGIOS_PLUGIN_DIR" = x""; then
+    NAGIOS_PLUGIN_DIR="${libexecdir}/nagios/plugins"
+fi
+
+AC_DEFINE_UNQUOTED(NAGIOS_PLUGIN_DIR, "$NAGIOS_PLUGIN_DIR", Directory for nagios plugins)
+AC_SUBST(NAGIOS_PLUGIN_DIR)
+
+if test x"$NAGIOS_METADATA_DIR" = x""; then
+    NAGIOS_METADATA_DIR="${datadir}/nagios/plugins-metadata"
+fi
+
+AC_DEFINE_UNQUOTED(NAGIOS_METADATA_DIR, "$NAGIOS_METADATA_DIR", Directory for nagios plugins metadata)
+AC_SUBST(NAGIOS_METADATA_DIR)
 
 STACKS=""
 CLUSTERLIBS=""
@@ -1190,12 +1247,13 @@ case $SUPPORT_HEARTBEAT in
 1|yes|true|try)
    AC_MSG_CHECKING(for heartbeat support)
    AC_CHECK_LIB(hbclient, ll_cluster_new, [SUPPORT_HEARTBEAT=1],
-		[if $SUPPORT_HEARTBEAT != try; then
+		[if test $SUPPORT_HEARTBEAT != try; then
 			AC_MSG_FAILURE(Unable to support Heartbeat: client libraries not found)
 		fi])
 
    if test $SUPPORT_HEARTBEAT = 1 ; then
 	STACKS="$STACKS heartbeat"
+	dnl objdump -x ${libdir}/libccmclient.so | grep SONAME | awk '{print $2}'
 	AC_DEFINE_UNQUOTED(CCM_LIBRARY, "libccmclient.so.1", Library to load for ccm support)
 	AC_DEFINE_UNQUOTED(HEARTBEAT_LIBRARY, "libhbclient.so.1", Library to load for heartbeat support)
    else
@@ -1247,13 +1305,13 @@ else
         SUPPORT_CS=1
 	CFLAGS="$CFLAGS $oldipc_FLAGS $cpg_FLAGS $cfg_FLAGS"
         COROSYNC_LIBS="$COROSYNC_LIBS $oldipc_LIBS $cpg_LIBS $cfg_LIBS"
-    
+
     elif test $HAVE_libqb = 1; then
         SUPPORT_CS=1
         CS_USES_LIBQB=1
 	CFLAGS="$CFLAGS $libqb_FLAGS $cpg_FLAGS $cfg_FLAGS"
         COROSYNC_LIBS="$COROSYNC_LIBS $libqb_LIBS $cpg_LIBS $cfg_LIBS"
-        AC_CHECK_LIB(corosync_common, cs_strerror) 
+        AC_CHECK_LIB(corosync_common, cs_strerror)
 
     else
         aisreason="corosync/libqb IPC libraries not found by pkg_config"
@@ -1270,7 +1328,7 @@ if test $SUPPORT_CS = 1 -a x$HAVE_oldipc = x0 ; then
     dnl The only option now is the built-in quorum API
     CFLAGS="$CFLAGS $cmap_CFLAGS $quorum_CFLAGS"
     COROSYNC_LIBS="$COROSYNC_LIBS $cmap_LIBS $quorum_LIBS"
-	
+
     STACKS="$STACKS corosync-native"
     AC_DEFINE_UNQUOTED(SUPPORT_CS_QUORUM, 1, Support the consumption of membership and quorum from corosync)
 fi
@@ -1304,9 +1362,9 @@ if test $SUPPORT_CS = 1; then
 elif test $SUPPORT_CS != 0; then
     SUPPORT_CS=0
     if test $missingisfatal = 0; then
-        AC_MSG_WARN(Unable to support Corosync: $aisreason) 
+        AC_MSG_WARN(Unable to support Corosync: $aisreason)
     else
-        AC_MSG_FAILURE(Unable to support Corosync: $aisreason) 
+        AC_MSG_FAILURE(Unable to support Corosync: $aisreason)
     fi
 fi
 
@@ -1318,6 +1376,7 @@ AC_DEFINE_UNQUOTED(SUPPORT_PLUGIN,   $SUPPORT_PLUGIN, Support the Pacemaker plug
 
 AM_CONDITIONAL(BUILD_CS_SUPPORT, test $SUPPORT_CS = 1)
 AM_CONDITIONAL(BUILD_CS_PLUGIN, test $SUPPORT_PLUGIN = 1)
+AM_CONDITIONAL(BUILD_CMAN, test $SUPPORT_CMAN = 1)
 
 AC_SUBST(SUPPORT_CMAN)
 AC_SUBST(SUPPORT_CS)
@@ -1405,9 +1464,9 @@ else
    	SNMPLIBS=""
    	SUPPORT_SNMP=0
      	if test $missingisfatal = 0; then
-	    AC_MSG_WARN(Unable to support SNMP) 
+	    AC_MSG_WARN(Unable to support SNMP)
         else
-	    AC_MSG_FAILURE(Unable to support SNMP) 
+	    AC_MSG_FAILURE(Unable to support SNMP)
         fi
     else
    	SUPPORT_SNMP=1
@@ -1464,9 +1523,9 @@ else
    if test $SUPPORT_ESMTP = no; then
    	SUPPORT_ESMTP=0
      	if test $missingisfatal = 0; then
-	    AC_MSG_WARN(Unable to support ESMTP) 
+	    AC_MSG_WARN(Unable to support ESMTP)
         else
-	    AC_MSG_FAILURE(Unable to support ESMTP) 
+	    AC_MSG_FAILURE(Unable to support ESMTP)
         fi
    else
    	SUPPORT_ESMTP=1
@@ -1479,7 +1538,7 @@ AM_CONDITIONAL(ENABLE_ESMTP, test "$SUPPORT_ESMTP" = "1")
 AC_DEFINE_UNQUOTED(ENABLE_ESMTP, $SUPPORT_ESMTP, Build in support for sending mail notifications with ESMTP)
 
 dnl ========================================================================
-dnl    ACL 
+dnl    ACL
 dnl ========================================================================
 
 case $SUPPORT_ACL in
@@ -1495,18 +1554,17 @@ if test $SUPPORT_ACL = no; then
 else
     AC_MSG_RESULT($SUPPORT_ACL)
 
+    SUPPORT_ACL=1
     AC_CHECK_LIB(qb, qb_ipcs_connection_auth_set)
     if test $ac_cv_lib_qb_qb_ipcs_connection_auth_set != yes; then
         SUPPORT_ACL=0
-    else
-        SUPPORT_ACL=1
     fi
 
     if test $SUPPORT_ACL = 0; then
         if test $missingisfatal = 0; then
-            AC_MSG_WARN(Unable to support ACL. You need to use libqb > 0.13.0) 
+            AC_MSG_WARN(Unable to support ACL. You need to use libqb > 0.13.0)
         else
-            AC_MSG_FAILURE(Unable to support ACL. You need to use libqb > 0.13.0) 
+            AC_MSG_FAILURE(Unable to support ACL. You need to use libqb > 0.13.0)
         fi
     fi
 fi
@@ -1517,6 +1575,32 @@ fi
 
 AM_CONDITIONAL(ENABLE_ACL, test "$SUPPORT_ACL" = "1")
 AC_DEFINE_UNQUOTED(ENABLE_ACL, $SUPPORT_ACL, Build in support for CIB ACL)
+
+dnl ========================================================================
+dnl    CIB secrets
+dnl ========================================================================
+
+case $SUPPORT_CIBSECRETS in
+     1|yes|true|try)
+        SUPPORT_CIBSECRETS=1;;
+     *)
+        SUPPORT_CIBSECRETS=0;;
+esac
+
+AC_DEFINE_UNQUOTED(SUPPORT_CIBSECRETS, $SUPPORT_CIBSECRETS, Support CIB secrets)
+AM_CONDITIONAL(BUILD_CIBSECRETS, test $SUPPORT_CIBSECRETS = 1)
+
+if test $SUPPORT_CIBSECRETS = 1; then
+    PCMK_FEATURES="$PCMK_FEATURES cibsecrets"
+
+    LRM_CIBSECRETS_DIR="${localstatedir}/lib/pacemaker/lrm/secrets"
+    AC_DEFINE_UNQUOTED(LRM_CIBSECRETS_DIR,"$LRM_CIBSECRETS_DIR", Location for CIB secrets)
+    AC_SUBST(LRM_CIBSECRETS_DIR)
+
+    LRM_LEGACY_CIBSECRETS_DIR="${localstatedir}/lib/heartbeat/lrm/secrets"
+    AC_DEFINE_UNQUOTED(LRM_LEGACY_CIBSECRETS_DIR,"$LRM_LEGACY_CIBSECRETS_DIR", Legacy location for CIB secrets)
+    AC_SUBST(LRM_LEGACY_CIBSECRETS_DIR)
+fi
 
 dnl ========================================================================
 dnl    GnuTLS
@@ -1605,21 +1689,26 @@ else
 		
 		-Wall
 		-Waggregate-return
-		-Wbad-function-cast 
-		-Wcast-align 
+		-Wbad-function-cast
+		-Wcast-align
 		-Wdeclaration-after-statement
 		-Wendif-labels
 		-Wfloat-equal
 		-Wformat=2
 		-Wformat-security
 		-Wformat-nonliteral
-		-Wmissing-prototypes 
-		-Wmissing-declarations 
+		-Wmissing-prototypes
+		-Wmissing-declarations
 		-Wnested-externs
 		-Wno-long-long
 		-Wno-strict-aliasing
+<<<<<<< HEAD
 		
 		-Wpointer-arith 
+=======
+		-Wunused-but-set-variable
+		-Wpointer-arith
+>>>>>>> beekhof/master
 		-Wstrict-prototypes
     		
 		-Wwrite-strings"
@@ -1693,7 +1782,7 @@ AC_SUBST(LIBADD_INTL)	dnl extra flags for GNU gettext stuff...
 
 AC_SUBST(LOCALE)
 
-dnl Options for cleaning up the compiler output 
+dnl Options for cleaning up the compiler output
 QUIET_LIBTOOL_OPTS=""
 QUIET_MAKE_OPTS=""
 if test "x${enable_quiet}" = "xyes"; then
@@ -1717,19 +1806,23 @@ AC_SUBST(PCMK_FEATURES)
 
 dnl The Makefiles and shell scripts we output
 AC_CONFIG_FILES(Makefile				        \
+Doxyfile							\
 coverage.sh							\
 cts/Makefile					        	\
 	cts/CTSvars.py						\
 	cts/LSBDummy						\
 	cts/benchmark/Makefile					\
-		cts/benchmark/clubench				\
+	cts/benchmark/clubench					\
+	cts/lxc_autogen.sh					\
 cib/Makefile							\
+attrd/Makefile							\
 crmd/Makefile							\
 pengine/Makefile						\
 	pengine/regression.core.sh				\
 doc/Makefile							\
 	doc/Pacemaker_Explained/publican.cfg			\
 	doc/Clusters_from_Scratch/publican.cfg			\
+	doc/Pacemaker_Remote/publican.cfg			\
 include/Makefile						\
 	include/crm/Makefile					\
 		include/crm/cib/Makefile			\
@@ -1739,9 +1832,13 @@ include/Makefile						\
 		include/crm/pengine/Makefile			\
 replace/Makefile						\
 lib/Makefile							\
-	lib/pcmk.pc						\
-	lib/pcmk-pe.pc						\
-	lib/pcmk-cib.pc						\
+	lib/pacemaker.pc					\
+	lib/pacemaker-cib.pc					\
+	lib/pacemaker-lrmd.pc					\
+	lib/pacemaker-service.pc				\
+	lib/pacemaker-pengine.pc				\
+	lib/pacemaker-fencing.pc				\
+	lib/pacemaker-cluster.pc				\
 	lib/ais/Makefile					\
 	lib/common/Makefile					\
 	lib/cluster/Makefile					\
@@ -1754,20 +1851,28 @@ lib/Makefile							\
 mcp/Makefile							\
 	mcp/pacemaker						\
 	mcp/pacemaker.service					\
+	mcp/pacemaker.upstart					\
+	mcp/pacemaker.combined.upstart				\
 fencing/Makefile                                                \
-        fencing/regression.py                                      \
+        fencing/regression.py                                   \
 lrmd/Makefile                                                   \
         lrmd/regression.py                                      \
+        lrmd/pacemaker_remote.service				\
+        lrmd/pacemaker_remote					\
 extra/Makefile							\
 	extra/resources/Makefile				\
 	extra/rgmanager/Makefile				\
+	extra/logrotate/Makefile				\
+	extra/logrotate/pacemaker				\
 tools/Makefile							\
 	tools/crm_report					\
+        tools/report.common                                     \
+	tools/cibsecret						\
 xml/Makefile							\
 lib/gnu/Makefile						\
 		)
 
-dnl Now process the entire list of files added by previous 
+dnl Now process the entire list of files added by previous
 dnl  calls to AC_CONFIG_FILES()
 AC_OUTPUT()
 
@@ -1798,4 +1903,3 @@ AC_MSG_RESULT([])
 AC_MSG_RESULT([  CFLAGS                   = ${CFLAGS}])
 AC_MSG_RESULT([  Libraries                = ${LIBS}])
 AC_MSG_RESULT([  Stack Libraries          = ${CLUSTERLIBS}])
-

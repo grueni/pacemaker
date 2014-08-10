@@ -8,7 +8,7 @@ Online: [ c001n02 c001n04 c001n06 c001n07 c001n08 ]
  Resource Group: group-1
      ocf_192.168.100.181	(ocf::heartbeat:IPaddr):	Started [ c001n03 c001n05 ]
      heartbeat_192.168.100.182	(heartbeat:IPaddr):	Started c001n03
-     ocf_192.168.100.183	(ocf::heartbeat:IPaddr):	Started FAILED [ c001n03 c001n05 ]
+     ocf_192.168.100.183	(ocf::heartbeat:IPaddr):	FAILED [ c001n03 c001n05 ]
  lsb_dummy	(lsb:/usr/lib/heartbeat/cts/LSBDummy):	Started c001n04
  rsc_c001n03	(ocf::heartbeat:IPaddr):	Started c001n06
  rsc_c001n02	(ocf::heartbeat:IPaddr):	Started c001n02
@@ -19,7 +19,7 @@ Online: [ c001n02 c001n04 c001n06 c001n07 c001n08 ]
  rsc_c001n08	(ocf::heartbeat:IPaddr):	Started c001n08
  Clone Set: DoFencing [child_DoFencing]
      Started: [ c001n02 c001n04 c001n06 c001n07 c001n08 ]
-     Stopped: [ child_DoFencing:5 child_DoFencing:6 ]
+     Stopped: [ c001n03 c001n05 ]
  Master/Slave Set: master_rsc_1 [ocf_msdummy] (unique)
      ocf_msdummy:0	(ocf::heartbeat:/usr/lib/heartbeat/cts/OCFMSDummy):	Master c001n02
      ocf_msdummy:1	(ocf::heartbeat:/usr/lib/heartbeat/cts/OCFMSDummy):	Started c001n02
@@ -39,15 +39,14 @@ Online: [ c001n02 c001n04 c001n06 c001n07 c001n08 ]
 Transition Summary:
  * Move    ocf_192.168.100.181	(Started c001n03 -> c001n02)
  * Move    heartbeat_192.168.100.182	(Started c001n03 -> c001n02)
- * Move    ocf_192.168.100.183	(Started c001n03 -> c001n02)
+ * Recover ocf_192.168.100.183	(Started c001n03 -> c001n02)
  * Move    rsc_c001n05	(Started c001n05 -> c001n07)
  * Move    rsc_c001n07	(Started c001n03 -> c001n07)
 
 Executing cluster transition:
  * Resource action: child_DoFencing:4 monitor=20000 on c001n08
- * Pseudo action:   stonith_up
- * Fencing c001n05
- * Fencing c001n03
+ * Fencing c001n05 (reboot)
+ * Fencing c001n03 (reboot)
  * Pseudo action:   stonith_complete
  * Pseudo action:   group-1_stop_0
  * Pseudo action:   ocf_192.168.100.183_stop_0
@@ -91,7 +90,7 @@ OFFLINE: [ c001n03 c001n05 ]
  rsc_c001n08	(ocf::heartbeat:IPaddr):	Started c001n08
  Clone Set: DoFencing [child_DoFencing]
      Started: [ c001n02 c001n04 c001n06 c001n07 c001n08 ]
-     Stopped: [ child_DoFencing:5 child_DoFencing:6 ]
+     Stopped: [ c001n03 c001n05 ]
  Master/Slave Set: master_rsc_1 [ocf_msdummy] (unique)
      ocf_msdummy:0	(ocf::heartbeat:/usr/lib/heartbeat/cts/OCFMSDummy):	Master c001n02
      ocf_msdummy:1	(ocf::heartbeat:/usr/lib/heartbeat/cts/OCFMSDummy):	Started c001n02

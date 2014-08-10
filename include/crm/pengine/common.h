@@ -33,7 +33,8 @@ enum action_fail_response {
     action_fail_block,
     action_fail_stop,
     action_fail_standby,
-    action_fail_fence
+    action_fail_fence,
+    action_fail_restart_container
 };
 
 /* the "done" action must be the "pre" action +1 */
@@ -61,9 +62,9 @@ enum rsc_recovery_type {
 };
 
 enum rsc_start_requirement {
-    rsc_req_nothing,
-    rsc_req_quorum,
-    rsc_req_stonith
+    rsc_req_nothing,            /* Allowed by custom_action() */
+    rsc_req_quorum,             /* Enforced by custom_action() */
+    rsc_req_stonith             /* Enforced by native_start_constraints() */
 };
 
 enum rsc_role_e {
@@ -96,6 +97,9 @@ enum pe_print_options {
 	pe_print_ops		= 0x0100,
 	pe_print_suppres_nl	= 0x0200,
 	pe_print_xml		= 0x0400,
+	pe_print_brief		= 0x0800,
+	pe_print_pending	= 0x1000,
+        pe_print_clone_details  = 0x2000,
 };
 /* *INDENT-ON* */
 

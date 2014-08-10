@@ -1,17 +1,17 @@
 
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -41,7 +41,9 @@
 #include <crm/attrd.h>
 #include <crm/pengine/rules.h>
 #include <crm/pengine/status.h>
+#include <crm/pengine/internal.h>
 
+bool scope_master = FALSE;
 gboolean do_force = FALSE;
 gboolean BE_QUIET = FALSE;
 const char *attr_set_type = XML_TAG_ATTR_SETS;
@@ -60,8 +62,9 @@ char *our_pid = NULL;
 crm_ipc_t *crmd_channel = NULL;
 char *xml_file = NULL;
 int cib_options = cib_sync_call;
-int crmd_replies_needed = 0;
+int crmd_replies_needed = 1; /* The welcome message */
 GMainLoop *mainloop = NULL;
+gboolean print_pending = FALSE;
 
 extern void cleanup_alloc_calculations(pe_working_set_t * data_set);
 
@@ -78,23 +81,20 @@ resource_ipc_timeout(gpointer data)
     fprintf(stderr, "No messages received in %d seconds.. aborting\n",
             (int)message_timeout_ms / 1000);
     crm_err("No messages received in %d seconds", (int)message_timeout_ms / 1000);
-    qb_log_fini();
-    exit(-1);
+    return crm_exit(-1);
 }
 
 static void
 resource_ipc_connection_destroy(gpointer user_data)
 {
     crm_info("Connection to CRMd was terminated");
-    qb_log_fini();
-    exit(1);
+    crm_exit(1);
 }
 
 static void
 start_mainloop(void)
 {
     mainloop = g_main_new(FALSE);
-    crmd_replies_needed++;      /* The welcome message */
     fprintf(stderr, "Waiting for %d replies from the CRMd", crmd_replies_needed);
     crm_debug("Waiting for %d replies from the CRMd", crmd_replies_needed);
 
@@ -114,17 +114,14 @@ resource_ipc_callback(const char *buffer, ssize_t length, gpointer userdata)
     if (crmd_replies_needed == 0) {
         fprintf(stderr, " OK\n");
         crm_debug("Got all the replies we expected");
-        crm_xml_cleanup();
-        qb_log_fini();
-        exit(0);
+        return crm_exit(pcmk_ok);
     }
 
     free_xml(msg);
     return 0;
 }
 
-struct ipc_client_callbacks crm_callbacks = 
-{
+struct ipc_client_callbacks crm_callbacks = {
     .dispatch = resource_ipc_callback,
     .destroy = resource_ipc_connection_destroy,
 };
@@ -143,7 +140,7 @@ do_find_resource(const char *rsc, resource_t * the_rsc, pe_working_set_t * data_
         return -ENXIO;
     }
 
-    if (the_rsc->variant > pe_clone) {
+    if (the_rsc->variant >= pe_clone) {
         GListPtr gIter = the_rsc->children;
 
         for (; gIter != NULL; gIter = gIter->next) {
@@ -161,7 +158,7 @@ do_find_resource(const char *rsc, resource_t * the_rsc, pe_working_set_t * data_
         } else {
             const char *state = "";
 
-            if (the_rsc->variant == pe_native && the_rsc->role == RSC_ROLE_MASTER) {
+            if (the_rsc->variant < pe_clone && the_rsc->fns->state(the_rsc, TRUE) == RSC_ROLE_MASTER) {
                 state = "Master";
             }
             fprintf(stdout, "resource %s is running on: %s %s\n", rsc, node->details->uname, state);
@@ -210,7 +207,7 @@ print_cts_constraints(pe_working_set_t * data_set)
                    cons_string(crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET_ROLE)));
 
         } else if (safe_str_eq(XML_CONS_TAG_RSC_LOCATION, crm_element_name(xml_obj))) {
-            /* unpack_rsc_location(xml_obj, data_set); */
+            /* unpack_location(xml_obj, data_set); */
         }
     }
 }
@@ -288,6 +285,11 @@ do_find_resource_list(pe_working_set_t * data_set, gboolean raw)
     int found = 0;
 
     GListPtr lpc = NULL;
+    int opts = pe_print_printf | pe_print_rsconly;
+
+    if (print_pending) {
+        opts |= pe_print_pending;
+    }
 
     for (lpc = data_set->resources; lpc != NULL; lpc = lpc->next) {
         resource_t *rsc = (resource_t *) lpc->data;
@@ -296,7 +298,7 @@ do_find_resource_list(pe_working_set_t * data_set, gboolean raw)
             && rsc->fns->active(rsc, TRUE) == FALSE) {
             continue;
         }
-        rsc->fns->print(rsc, NULL, pe_print_printf | pe_print_rsconly, stdout);
+        rsc->fns->print(rsc, NULL, opts, stdout);
         found++;
     }
 
@@ -327,11 +329,16 @@ dump_resource(const char *rsc, pe_working_set_t * data_set, gboolean expanded)
 {
     char *rsc_xml = NULL;
     resource_t *the_rsc = find_rsc_or_clone(rsc, data_set);
+    int opts = pe_print_printf;
 
     if (the_rsc == NULL) {
         return -ENXIO;
     }
-    the_rsc->fns->print(the_rsc, NULL, pe_print_printf, stdout);
+
+    if (print_pending) {
+        opts |= pe_print_pending;
+    }
+    the_rsc->fns->print(the_rsc, NULL, opts, stdout);
 
     if (expanded) {
         rsc_xml = dump_xml_formatted(the_rsc->xml);
@@ -402,11 +409,14 @@ find_resource_attr(cib_t * the_cib, const char *attr, const char *rsc, const cha
     static int xpath_max = 1024;
     int rc = pcmk_ok;
     xmlNode *xml_search = NULL;
-
     char *xpath_string = NULL;
 
     CRM_ASSERT(value != NULL);
     *value = NULL;
+
+    if(the_cib == NULL) {
+        return -ENOTCONN;
+    }
 
     xpath_string = calloc(1, xpath_max);
     offset +=
@@ -433,6 +443,7 @@ find_resource_attr(cib_t * the_cib, const char *attr, const char *rsc, const cha
         offset += snprintf(xpath_string + offset, xpath_max - offset, "@name=\"%s\"", attr_name);
     }
     offset += snprintf(xpath_string + offset, xpath_max - offset, "]");
+    CRM_LOG_ASSERT(offset > 0);
 
     rc = the_cib->cmds->query(the_cib, xpath_string, &xml_search,
                               cib_sync_call | cib_scope_local | cib_xpath);
@@ -467,12 +478,16 @@ find_resource_attr(cib_t * the_cib, const char *attr, const char *rsc, const cha
     return rc;
 }
 
+#include "../pengine/pengine.h"
+
+
 static int
 set_resource_attr(const char *rsc_id, const char *attr_set, const char *attr_id,
-                  const char *attr_name, const char *attr_value,
+                  const char *attr_name, const char *attr_value, bool recursive,
                   cib_t * cib, pe_working_set_t * data_set)
 {
     int rc = pcmk_ok;
+    static bool need_init = TRUE;
 
     char *local_attr_id = NULL;
     char *local_attr_set = NULL;
@@ -511,7 +526,7 @@ set_resource_attr(const char *rsc_id, const char *attr_set, const char *attr_id,
         xmlNode *cib_top = NULL;
         const char *tag = crm_element_name(rsc->xml);
 
-        rc = cib->cmds->query(cib, "/cib", &cib_top,
+        cib->cmds->query(cib, "/cib", &cib_top,
                               cib_sync_call | cib_scope_local | cib_xpath | cib_no_children);
         value = crm_element_value(cib_top, "ignore_dtd");
         if (value != NULL) {
@@ -564,6 +579,38 @@ set_resource_attr(const char *rsc_id, const char *attr_set, const char *attr_id,
     free_xml(xml_top);
     free(local_attr_id);
     free(local_attr_set);
+
+    if(recursive && safe_str_eq(attr_set_type, XML_TAG_META_SETS)) {
+        GListPtr lpc = NULL;
+
+        if(need_init) {
+            xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set->input);
+
+            need_init = FALSE;
+            unpack_constraints(cib_constraints, data_set);
+
+            for (lpc = data_set->resources; lpc != NULL; lpc = lpc->next) {
+                resource_t *r = (resource_t *) lpc->data;
+
+                clear_bit(r->flags, pe_rsc_allocating);
+            }
+        }
+
+        crm_debug("Looking for dependancies %p", rsc->rsc_cons_lhs);
+        set_bit(rsc->flags, pe_rsc_allocating);
+        for (lpc = rsc->rsc_cons_lhs; lpc != NULL; lpc = lpc->next) {
+            rsc_colocation_t *cons = (rsc_colocation_t *) lpc->data;
+            resource_t *peer = cons->rsc_lh;
+
+            crm_debug("Checking %s %d", cons->id, cons->score);
+            if (cons->score > 0 && is_not_set(peer->flags, pe_rsc_allocating)) {
+                /* Don't get into colocation loops */
+                crm_debug("Setting %s=%s for dependant resource %s", attr_name, attr_value, peer->id);
+                set_resource_attr(peer->id, NULL, NULL, attr_name, attr_value, recursive, cib, data_set);
+            }
+        }
+    }
+
     return rc;
 }
 
@@ -601,6 +648,7 @@ delete_resource_attr(const char *rsc_id, const char *attr_set, const char *attr_
 
     crm_log_xml_debug(xml_obj, "Delete");
 
+    CRM_ASSERT(cib);
     rc = cib->cmds->delete(cib, XML_CIB_TAG_RESOURCES, xml_obj, cib_options);
 
     if (rc == pcmk_ok) {
@@ -643,6 +691,7 @@ send_lrm_rsc_op(crm_ipc_t * crmd_channel, const char *op,
     xmlNode *cmd = NULL;
     xmlNode *xml_rsc = NULL;
     const char *value = NULL;
+    const char *router_node = host_uname;
     xmlNode *params = NULL;
     xmlNode *msg_data = NULL;
     resource_t *rsc = pe_find_resource(data_set->resources, rsc_id);
@@ -658,13 +707,29 @@ send_lrm_rsc_op(crm_ipc_t * crmd_channel, const char *op,
     } else if (host_uname == NULL) {
         CMD_ERR("Please supply a hostname with -H\n");
         return -EINVAL;
+    } else {
+        node_t *node = pe_find_node(data_set->nodes, host_uname);
+
+        if (node && is_remote_node(node)) {
+            if (node->details->remote_rsc == NULL || node->details->remote_rsc->running_on == NULL) {
+                CMD_ERR("No lrmd connection detected to remote node %s", host_uname);
+                return -ENXIO;
+            }
+            node = node->details->remote_rsc->running_on->data;
+            router_node = node->details->uname;
+        }
     }
 
-    key = crm_concat("0:0:crm-resource", our_pid, '-');
+    key = generate_transition_key(0, getpid(), 0, "xxxxxxxx-xrsc-opxx-xcrm-resourcexxxx");
 
     msg_data = create_xml_node(NULL, XML_GRAPH_TAG_RSC_OP);
     crm_xml_add(msg_data, XML_ATTR_TRANSITION_KEY, key);
     free(key);
+
+    crm_xml_add(msg_data, XML_LRM_ATTR_TARGET, host_uname);
+    if (safe_str_neq(router_node, host_uname)) {
+        crm_xml_add(msg_data, XML_LRM_ATTR_ROUTER_NODE, router_node);
+    }
 
     xml_rsc = create_xml_node(msg_data, XML_CIB_TAG_RESOURCE);
     if (rsc->clone_name) {
@@ -699,7 +764,7 @@ send_lrm_rsc_op(crm_ipc_t * crmd_channel, const char *op,
     crm_xml_add(params, key, "60000");  /* 1 minute */
     free(key);
 
-    cmd = create_request(op, msg_data, host_uname, CRM_SYSTEM_CRMD, crm_system_name, our_pid);
+    cmd = create_request(op, msg_data, router_node, CRM_SYSTEM_CRMD, crm_system_name, our_pid);
 
 /* 	crm_log_xml_warn(cmd, "send_lrm_rsc_op"); */
     free_xml(msg_data);
@@ -717,7 +782,7 @@ send_lrm_rsc_op(crm_ipc_t * crmd_channel, const char *op,
 }
 
 static int
-delete_lrm_rsc(crm_ipc_t * crmd_channel, const char *host_uname,
+delete_lrm_rsc(cib_t *cib_conn, crm_ipc_t * crmd_channel, const char *host_uname,
                resource_t * rsc, pe_working_set_t * data_set)
 {
     int rc = pcmk_ok;
@@ -731,7 +796,7 @@ delete_lrm_rsc(crm_ipc_t * crmd_channel, const char *host_uname,
         for (lpc = rsc->children; lpc != NULL; lpc = lpc->next) {
             resource_t *child = (resource_t *) lpc->data;
 
-            delete_lrm_rsc(crmd_channel, host_uname, child, data_set);
+            delete_lrm_rsc(cib_conn, crmd_channel, host_uname, child, data_set);
         }
         return pcmk_ok;
 
@@ -742,7 +807,7 @@ delete_lrm_rsc(crm_ipc_t * crmd_channel, const char *host_uname,
             node_t *node = (node_t *) lpc->data;
 
             if (node->details->online) {
-                delete_lrm_rsc(crmd_channel, node->details->uname, rsc, data_set);
+                delete_lrm_rsc(cib_conn, crmd_channel, node->details->uname, rsc, data_set);
             }
         }
 
@@ -751,16 +816,22 @@ delete_lrm_rsc(crm_ipc_t * crmd_channel, const char *host_uname,
 
     printf("Cleaning up %s on %s\n", rsc->id, host_uname);
     rc = send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_DELETE, host_uname, rsc->id, TRUE, data_set);
+
     if (rc == pcmk_ok) {
         char *attr_name = NULL;
         const char *id = rsc->id;
+        node_t *node = pe_find_node(data_set->nodes, host_uname);
 
+        if(node && node->details->remote_rsc == NULL) {
+            crmd_replies_needed++;
+        }
         if (rsc->clone_name) {
             id = rsc->clone_name;
         }
 
         attr_name = crm_concat("fail-count", id, '-');
-        attrd_update_delegate(NULL, 'D', host_uname, attr_name, NULL, XML_CIB_TAG_STATUS, NULL, NULL, NULL);
+        rc = attrd_update_delegate(NULL, 'D', host_uname, attr_name, NULL, XML_CIB_TAG_STATUS, NULL,
+                              NULL, NULL, node ? is_remote_node(node) : FALSE);
         free(attr_name);
     }
     return rc;
@@ -774,148 +845,177 @@ fail_lrm_rsc(crm_ipc_t * crmd_channel, const char *host_uname,
     return send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_FAIL, host_uname, rsc_id, FALSE, data_set);
 }
 
-static int
-refresh_lrm(crm_ipc_t * crmd_channel, const char *host_uname)
+static char *
+parse_cli_lifetime(const char *input)
 {
-    xmlNode *cmd = NULL;
-    int rc = -ECOMM;
+    char *later_s = NULL;
+    crm_time_t *now = NULL;
+    crm_time_t *later = NULL;
+    crm_time_t *duration = NULL;
 
-    cmd = create_request(CRM_OP_LRM_REFRESH, NULL, host_uname,
-                         CRM_SYSTEM_CRMD, crm_system_name, our_pid);
-
-    if (crm_ipc_send(crmd_channel, cmd, 0, 0, NULL) > 0) {
-        rc = 0;
+    if (input == NULL) {
+        return NULL;
     }
-    free_xml(cmd);
-    return rc;
+
+    duration = crm_time_parse_duration(move_lifetime);
+    if (duration == NULL) {
+        CMD_ERR("Invalid duration specified: %s\n", move_lifetime);
+        CMD_ERR("Please refer to"
+                " http://en.wikipedia.org/wiki/ISO_8601#Durations"
+                " for examples of valid durations\n");
+        return NULL;
+    }
+
+    now = crm_time_new(NULL);
+    later = crm_time_add(now, duration);
+    crm_time_log(LOG_INFO, "now     ", now,
+                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);
+    crm_time_log(LOG_INFO, "later   ", later,
+                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);
+    crm_time_log(LOG_INFO, "duration", duration, crm_time_log_date | crm_time_log_timeofday);
+    later_s = crm_time_as_string(later, crm_time_log_date | crm_time_log_timeofday);
+    printf("Migration will take effect until: %s\n", later_s);
+
+    crm_time_free(duration);
+    crm_time_free(later);
+    crm_time_free(now);
+    return later_s;
 }
 
 static int
-move_resource(const char *rsc_id,
-              const char *existing_node, const char *preferred_node, cib_t * cib_conn)
+ban_resource(const char *rsc_id, const char *host, GListPtr allnodes, cib_t * cib_conn)
 {
     char *later_s = NULL;
     int rc = pcmk_ok;
     char *id = NULL;
-    xmlNode *rule = NULL;
-    xmlNode *expr = NULL;
-    xmlNode *constraints = NULL;
     xmlNode *fragment = NULL;
+    xmlNode *location = NULL;
 
-    xmlNode *can_run = NULL;
-    xmlNode *dont_run = NULL;
+    if(host == NULL) {
+        GListPtr n = allnodes;
+        for(; n && rc == pcmk_ok; n = n->next) {
+            node_t *target = n->data;
 
-    fragment = create_xml_node(NULL, XML_CIB_TAG_CONSTRAINTS);
-    constraints = fragment;
-
-    id = crm_concat("cli-prefer", rsc_id, '-');
-    can_run = create_xml_node(NULL, XML_CONS_TAG_RSC_LOCATION);
-    crm_xml_add(can_run, XML_ATTR_ID, id);
-    free(id);
-
-    id = crm_concat("cli-standby", rsc_id, '-');
-    dont_run = create_xml_node(NULL, XML_CONS_TAG_RSC_LOCATION);
-    crm_xml_add(dont_run, XML_ATTR_ID, id);
-    free(id);
-
-    if (move_lifetime) {
-        crm_time_t *now = NULL;
-        crm_time_t *later = NULL;
-        crm_time_t *duration = crm_time_parse_duration(move_lifetime);
-
-        if (duration == NULL) {
-            CMD_ERR("Invalid duration specified: %s\n", move_lifetime);
-            CMD_ERR("Please refer to"
-                    " http://en.wikipedia.org/wiki/ISO_8601#Duration"
-                    " for examples of valid durations\n");
-            return -EINVAL;
+            rc = ban_resource(rsc_id, target->details->uname, NULL, cib_conn);
         }
-        now = crm_time_new(NULL);
-        later = crm_time_add(now, duration);
-        crm_time_log(LOG_INFO, "now     ", now, crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);
-        crm_time_log(LOG_INFO, "later   ", later, crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);
-        crm_time_log(LOG_INFO, "duration", duration, crm_time_log_date | crm_time_log_timeofday);
-        later_s = crm_time_as_string(later, crm_time_log_date | crm_time_log_timeofday);
-        printf("Migration will take effect until: %s\n", later_s);
-
-        crm_time_free(duration);
-        crm_time_free(later);
-        crm_time_free(now);
+        return rc;
     }
 
-    if (existing_node == NULL) {
-        crm_log_xml_notice(can_run, "Deleting");
-        rc = cib_conn->cmds->delete(cib_conn, XML_CIB_TAG_CONSTRAINTS, dont_run, cib_options);
-        if (rc == -ENXIO) {
-            rc = pcmk_ok;
+    later_s = parse_cli_lifetime(move_lifetime);
+    if(move_lifetime && later_s == NULL) {
+        return -EINVAL;
+    }
 
-        } else if (rc != pcmk_ok) {
-            goto bail;
-        }
+    fragment = create_xml_node(NULL, XML_CIB_TAG_CONSTRAINTS);
+
+    id = g_strdup_printf("cli-ban-%s-on-%s", rsc_id, host);
+    location = create_xml_node(fragment, XML_CONS_TAG_RSC_LOCATION);
+    crm_xml_add(location, XML_ATTR_ID, id);
+    free(id);
+
+    if (BE_QUIET == FALSE) {
+        CMD_ERR("WARNING: Creating rsc_location constraint '%s'"
+                " with a score of -INFINITY for resource %s"
+                " on %s.\n", ID(location), rsc_id, host);
+        CMD_ERR("\tThis will prevent %s from %s"
+                " on %s until the constraint is removed using"
+                " the 'crm_resource --clear' command or manually"
+                " with cibadmin\n", rsc_id, scope_master?"being promoted":"running", host);
+        CMD_ERR("\tThis will be the case even if %s is"
+                " the last node in the cluster\n", host);
+        CMD_ERR("\tThis message can be disabled with --quiet\n");
+    }
+
+    crm_xml_add(location, XML_COLOC_ATTR_SOURCE, rsc_id);
+    if(scope_master) {
+        crm_xml_add(location, XML_RULE_ATTR_ROLE, RSC_ROLE_MASTER_S);
+    } else {
+        crm_xml_add(location, XML_RULE_ATTR_ROLE, RSC_ROLE_STARTED_S);
+    }
+
+    if (later_s == NULL) {
+        /* Short form */
+        crm_xml_add(location, XML_CIB_TAG_NODE, host);
+        crm_xml_add(location, XML_RULE_ATTR_SCORE, MINUS_INFINITY_S);
 
     } else {
-        if (BE_QUIET == FALSE) {
-            fprintf(stderr,
-                    "WARNING: Creating rsc_location constraint '%s'"
-                    " with a score of -INFINITY for resource %s"
-                    " on %s.\n", ID(dont_run), rsc_id, existing_node);
-            CMD_ERR("\tThis will prevent %s from running"
-                    " on %s until the constraint is removed using"
-                    " the 'crm_resource -U' command or manually"
-                    " with cibadmin\n", rsc_id, existing_node);
-            CMD_ERR("\tThis will be the case even if %s is"
-                    " the last node in the cluster\n", existing_node);
-            CMD_ERR("\tThis message can be disabled with -Q\n");
-        }
+        xmlNode *rule = create_xml_node(location, XML_TAG_RULE);
+        xmlNode *expr = create_xml_node(rule, XML_TAG_EXPRESSION);
 
-        crm_xml_add(dont_run, "rsc", rsc_id);
-
-        rule = create_xml_node(dont_run, XML_TAG_RULE);
-        expr = create_xml_node(rule, XML_TAG_EXPRESSION);
-        id = crm_concat("cli-standby-rule", rsc_id, '-');
+        id = g_strdup_printf("cli-ban-%s-on-%s-rule", rsc_id, host);
         crm_xml_add(rule, XML_ATTR_ID, id);
         free(id);
 
         crm_xml_add(rule, XML_RULE_ATTR_SCORE, MINUS_INFINITY_S);
         crm_xml_add(rule, XML_RULE_ATTR_BOOLEAN_OP, "and");
 
-        id = crm_concat("cli-standby-expr", rsc_id, '-');
+        id = g_strdup_printf("cli-ban-%s-on-%s-expr", rsc_id, host);
         crm_xml_add(expr, XML_ATTR_ID, id);
         free(id);
 
         crm_xml_add(expr, XML_EXPR_ATTR_ATTRIBUTE, "#uname");
         crm_xml_add(expr, XML_EXPR_ATTR_OPERATION, "eq");
-        crm_xml_add(expr, XML_EXPR_ATTR_VALUE, existing_node);
+        crm_xml_add(expr, XML_EXPR_ATTR_VALUE, host);
         crm_xml_add(expr, XML_EXPR_ATTR_TYPE, "string");
 
-        if (later_s) {
-            expr = create_xml_node(rule, "date_expression");
-            id = crm_concat("cli-standby-lifetime-end", rsc_id, '-');
-            crm_xml_add(expr, XML_ATTR_ID, id);
-            free(id);
+        expr = create_xml_node(rule, "date_expression");
+        id = g_strdup_printf("cli-ban-%s-on-%s-lifetime", rsc_id, host);
+        crm_xml_add(expr, XML_ATTR_ID, id);
+        free(id);
 
-            crm_xml_add(expr, "operation", "lt");
-            crm_xml_add(expr, "end", later_s);
-        }
-
-        add_node_copy(constraints, dont_run);
+        crm_xml_add(expr, "operation", "lt");
+        crm_xml_add(expr, "end", later_s);
     }
 
-    if (preferred_node == NULL) {
-        crm_log_xml_notice(can_run, "Deleting");
-        rc = cib_conn->cmds->delete(cib_conn, XML_CIB_TAG_CONSTRAINTS, can_run, cib_options);
-        if (rc == -ENXIO) {
-            rc = pcmk_ok;
+    crm_log_xml_notice(fragment, "Modify");
+    rc = cib_conn->cmds->update(cib_conn, XML_CIB_TAG_CONSTRAINTS, fragment, cib_options);
 
-        } else if (rc != pcmk_ok) {
-            goto bail;
-        }
+    free_xml(fragment);
+    free(later_s);
+    return rc;
+}
+
+static int
+prefer_resource(const char *rsc_id, const char *host, cib_t * cib_conn)
+{
+    char *later_s = parse_cli_lifetime(move_lifetime);
+    int rc = pcmk_ok;
+    char *id = NULL;
+    xmlNode *location = NULL;
+    xmlNode *fragment = NULL;
+
+    if(move_lifetime && later_s == NULL) {
+        return -EINVAL;
+    }
+
+    if(cib_conn == NULL) {
+        free(later_s);
+        return -ENOTCONN;
+    }
+
+    fragment = create_xml_node(NULL, XML_CIB_TAG_CONSTRAINTS);
+
+    id = g_strdup_printf("cli-prefer-%s", rsc_id);
+    location = create_xml_node(fragment, XML_CONS_TAG_RSC_LOCATION);
+    crm_xml_add(location, XML_ATTR_ID, id);
+    free(id);
+
+    crm_xml_add(location, XML_COLOC_ATTR_SOURCE, rsc_id);
+    if(scope_master) {
+        crm_xml_add(location, XML_RULE_ATTR_ROLE, RSC_ROLE_MASTER_S);
+    } else {
+        crm_xml_add(location, XML_RULE_ATTR_ROLE, RSC_ROLE_STARTED_S);
+    }
+
+    if (later_s == NULL) {
+        /* Short form */
+        crm_xml_add(location, XML_CIB_TAG_NODE, host);
+        crm_xml_add(location, XML_RULE_ATTR_SCORE, INFINITY_S);
 
     } else {
-        crm_xml_add(can_run, "rsc", rsc_id);
+        xmlNode *rule = create_xml_node(location, XML_TAG_RULE);
+        xmlNode *expr = create_xml_node(rule, XML_TAG_EXPRESSION);
 
-        rule = create_xml_node(can_run, XML_TAG_RULE);
-        expr = create_xml_node(rule, XML_TAG_EXPRESSION);
         id = crm_concat("cli-prefer-rule", rsc_id, '-');
         crm_xml_add(rule, XML_ATTR_ID, id);
         free(id);
@@ -929,32 +1029,77 @@ move_resource(const char *rsc_id,
 
         crm_xml_add(expr, XML_EXPR_ATTR_ATTRIBUTE, "#uname");
         crm_xml_add(expr, XML_EXPR_ATTR_OPERATION, "eq");
-        crm_xml_add(expr, XML_EXPR_ATTR_VALUE, preferred_node);
+        crm_xml_add(expr, XML_EXPR_ATTR_VALUE, host);
         crm_xml_add(expr, XML_EXPR_ATTR_TYPE, "string");
 
-        if (later_s) {
-            expr = create_xml_node(rule, "date_expression");
-            id = crm_concat("cli-prefer-lifetime-end", rsc_id, '-');
-            crm_xml_add(expr, XML_ATTR_ID, id);
-            free(id);
+        expr = create_xml_node(rule, "date_expression");
+        id = crm_concat("cli-prefer-lifetime-end", rsc_id, '-');
+        crm_xml_add(expr, XML_ATTR_ID, id);
+        free(id);
 
-            crm_xml_add(expr, "operation", "lt");
-            crm_xml_add(expr, "end", later_s);
-        }
-
-        add_node_copy(constraints, can_run);
+        crm_xml_add(expr, "operation", "lt");
+        crm_xml_add(expr, "end", later_s);
     }
 
-    if (preferred_node != NULL || existing_node != NULL) {
-        crm_log_xml_notice(fragment, "CLI Update");
-        rc = cib_conn->cmds->update(cib_conn, XML_CIB_TAG_CONSTRAINTS, fragment, cib_options);
+    crm_log_xml_info(fragment, "Modify");
+    rc = cib_conn->cmds->update(cib_conn, XML_CIB_TAG_CONSTRAINTS, fragment, cib_options);
+
+    free_xml(fragment);
+    free(later_s);
+    return rc;
+}
+
+static int
+clear_resource(const char *rsc_id, const char *host, GListPtr allnodes, cib_t * cib_conn)
+{
+    char *id = NULL;
+    int rc = pcmk_ok;
+    xmlNode *fragment = NULL;
+    xmlNode *location = NULL;
+
+    if(cib_conn == NULL) {
+        return -ENOTCONN;
+    }
+
+    fragment = create_xml_node(NULL, XML_CIB_TAG_CONSTRAINTS);
+
+    if(host) {
+        id = g_strdup_printf("cli-ban-%s-on-%s", rsc_id, host);
+        location = create_xml_node(fragment, XML_CONS_TAG_RSC_LOCATION);
+        crm_xml_add(location, XML_ATTR_ID, id);
+        free(id);
+
+    } else {
+        GListPtr n = allnodes;
+        for(; n; n = n->next) {
+            node_t *target = n->data;
+
+            id = g_strdup_printf("cli-ban-%s-on-%s", rsc_id, target->details->uname);
+            location = create_xml_node(fragment, XML_CONS_TAG_RSC_LOCATION);
+            crm_xml_add(location, XML_ATTR_ID, id);
+            free(id);
+        }
+    }
+
+    id = g_strdup_printf("cli-prefer-%s", rsc_id);
+    location = create_xml_node(fragment, XML_CONS_TAG_RSC_LOCATION);
+    crm_xml_add(location, XML_ATTR_ID, id);
+    if(host && do_force == FALSE) {
+        crm_xml_add(location, XML_CIB_TAG_NODE, host);
+    }
+    free(id);
+
+    crm_log_xml_info(fragment, "Delete");
+    rc = cib_conn->cmds->delete(cib_conn, XML_CIB_TAG_CONSTRAINTS, fragment, cib_options);
+    if (rc == -ENXIO) {
+        rc = pcmk_ok;
+
+    } else if (rc != pcmk_ok) {
+        goto bail;
     }
 
   bail:
     free_xml(fragment);
-    free_xml(dont_run);
-    free_xml(can_run);
-    free(later_s);
     return rc;
 }
 
@@ -967,17 +1112,25 @@ list_resource_operations(const char *rsc_id, const char *host_uname, gboolean ac
     GListPtr ops = find_operations(rsc_id, host_uname, active, data_set);
     GListPtr lpc = NULL;
 
+    if (print_pending) {
+        opts |= pe_print_pending;
+    }
+
     for (lpc = ops; lpc != NULL; lpc = lpc->next) {
         xmlNode *xml_op = (xmlNode *) lpc->data;
 
         const char *op_rsc = crm_element_value(xml_op, "resource");
-        const char *last = crm_element_value(xml_op, "last_run");
+        const char *last = crm_element_value(xml_op, XML_RSC_OP_LAST_CHANGE);
         const char *status_s = crm_element_value(xml_op, XML_LRM_ATTR_OPSTATUS);
         const char *op_key = crm_element_value(xml_op, XML_LRM_ATTR_TASK_KEY);
         int status = crm_parse_int(status_s, "0");
 
         rsc = pe_find_resource(data_set->resources, op_rsc);
-        rsc->fns->print(rsc, "", opts, stdout);
+        if(rsc) {
+            rsc->fns->print(rsc, "", opts, stdout);
+        } else {
+            fprintf(stdout, "Unknown resource %s", op_rsc);
+        }
 
         fprintf(stdout, ": %s (node=%s, call=%s, rc=%s",
                 op_key ? op_key : ID(xml_op),
@@ -987,15 +1140,13 @@ list_resource_operations(const char *rsc_id, const char *host_uname, gboolean ac
         if (last) {
             time_t run_at = crm_parse_int(last, "0");
 
-            fprintf(stdout, ", last-run=%s, exec=%sms\n",
-                    ctime(&run_at), crm_element_value(xml_op, "exec_time"));
+            fprintf(stdout, ", last-rc-change=%s, exec=%sms",
+                    crm_strip_trailing_newline(ctime(&run_at)), crm_element_value(xml_op, XML_RSC_OP_T_EXEC));
         }
         fprintf(stdout, "): %s\n", services_lrm_status_str(status));
     }
     return pcmk_ok;
 }
-
-#include "../pengine/pengine.h"
 
 static void
 show_location(resource_t * rsc, const char *prefix)
@@ -1088,7 +1239,7 @@ show_colocation(resource_t * rsc, gboolean dependants, gboolean recursive, int o
 }
 
 static GHashTable *
-generate_resource_params(resource_t *rsc, pe_working_set_t * data_set)
+generate_resource_params(resource_t * rsc, pe_working_set_t * data_set)
 {
     GHashTable *params = NULL;
     GHashTable *meta = NULL;
@@ -1100,12 +1251,14 @@ generate_resource_params(resource_t *rsc, pe_working_set_t * data_set)
         return NULL;
     }
 
-    params = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
+    params =
+        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
     meta = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
-    combined = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
+    combined =
+        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
 
-    get_rsc_attributes(params, rsc, NULL/* TODO: Pass in local node */, data_set);
-    get_meta_attributes(meta, rsc, NULL/* TODO: Pass in local node */, data_set);
+    get_rsc_attributes(params, rsc, NULL /* TODO: Pass in local node */ , data_set);
+    get_meta_attributes(meta, rsc, NULL /* TODO: Pass in local node */ , data_set);
 
     if (params) {
         char *key = NULL;
@@ -1150,7 +1303,8 @@ static struct crm_option long_options[] = {
     {"list-raw",   0, 0, 'l', "\tList the IDs of all instantiated resources (no groups/clones/...)"},
     {"list-cts",   0, 0, 'c', NULL, 1},
     {"list-operations", 0, 0, 'O', "\tList active resource operations.  Optionally filtered by resource (-r) and/or node (-N)"},
-    {"list-all-operations", 0, 0, 'o', "List all resource operations.  Optionally filtered by resource (-r) and/or node (-N)\n"},    
+    {"list-all-operations", 0, 0, 'o', "List all resource operations.  Optionally filtered by resource (-r) and/or node (-N)"},
+    {"pending",    0, 0, 'j', "\t\tDisplay pending state if 'record-pending' is enabled\n"},
 
     {"list-standards",        0, 0, 0, "\tList supported standards"},
     {"list-ocf-providers",    0, 0, 0, "List all available OCF providers"},
@@ -1165,47 +1319,73 @@ static struct crm_option long_options[] = {
     {"constraints",0, 0, 'a', "\tDisplay the (co)location constraints that apply to a resource"},
 
     {"-spacer-",	1, 0, '-', "\nCommands:"},
+    {"cleanup",         0, 0, 'C', "\t\tDelete the resource history and re-check the current state. Optional: --resource"},
     {"set-parameter",   1, 0, 'p', "Set the named parameter for a resource. See also -m, --meta"},
     {"get-parameter",   1, 0, 'g', "Display the named parameter for a resource. See also -m, --meta"},
     {"delete-parameter",1, 0, 'd', "Delete the named parameter for a resource. See also -m, --meta"},
     {"get-property",    1, 0, 'G', "Display the 'class', 'type' or 'provider' of a resource", 1},
     {"set-property",    1, 0, 'S', "(Advanced) Set the class, type or provider of a resource", 1},
-    {"move",    0, 0, 'M',
-     "\t\tMove a resource from its current location, optionally specifying a destination (-N) and/or a period for which it should take effect (-u)"
-     "\n\t\t\t\tIf -N is not specified, the cluster will force the resource to move by creating a rule for the current location and a score of -INFINITY"
-     "\n\t\t\t\tNOTE: This will prevent the resource from running on this node until the constraint is removed with -U"},
-    {"un-move", 0, 0, 'U', "\t\tRemove all constraints created by a move command"},
-    
-    {"-spacer-",	1, 0, '-', "\nAdvanced Commands:"},
+
+    {"-spacer-",	1, 0, '-', "\nResource location:"},
+    {
+        "move",    0, 0, 'M',
+        "\t\tMove a resource from its current location to the named destination.\n  "
+        "\t\t\t\tRequires: --host. Optional: --lifetime, --master\n\n"
+        "\t\t\t\tNOTE: This may prevent the resource from running on the previous location node until the implicit constraints expire or are removed with --unban\n"
+    },
+    {
+        "ban",    0, 0, 'B',
+        "\t\tPrevent the named resource from running on the named --host.  \n"
+        "\t\t\t\tRequires: --resource. Optional: --host, --lifetime, --master\n\n"
+        "\t\t\t\tIf --host is not specified, it defaults to:\n"
+        "\t\t\t\t * the curent location for primitives and groups, or\n\n"
+        "\t\t\t\t * the curent location of the master for m/s resources with master-max=1\n\n"
+        "\t\t\t\tAll other situations result in an error as there is no sane default.\n\n"
+        "\t\t\t\tNOTE: This will prevent the resource from running on this node until the constraint expires or is removed with --clear\n"
+    },
+    {
+        "clear", 0, 0, 'U', "\t\tRemove all constraints created by the --ban and/or --move commands.  \n"
+        "\t\t\t\tRequires: --resource. Optional: --host, --master\n\n"
+        "\t\t\t\tIf --host is not specified, all constraints created by --ban and --move will be removed for the named resource.\n"
+    },
+    {"lifetime",   1, 0, 'u', "\tLifespan of constraints created by the --ban and --move commands"},
+    {
+        "master",  0, 0,  0,
+        "\t\tLimit the scope of the --ban, --move and --clear  commands to the Master role.\n"
+        "\t\t\t\tFor --ban and --move, the previous master can still remain active in the Slave role."
+    },
+
+    {"-spacer-",   1, 0, '-', "\nAdvanced Commands:"},
     {"delete",     0, 0, 'D', "\t\t(Advanced) Delete a resource from the CIB"},
     {"fail",       0, 0, 'F', "\t\t(Advanced) Tell the cluster this resource has failed"},
-    {"refresh",    0, 0, 'R', "\t\t(Advanced) Refresh the CIB from the LRM"},
-    {"cleanup",    0, 0, 'C', "\t\t(Advanced) Delete a resource from the LRM"},
-    {"reprobe",    0, 0, 'P', "\t\t(Advanced) Re-check for resources started outside of the CRM\n"},
-    {"force-stop", 0, 0,  0,  "\t(Advanced) Bypass the cluster and stop a resource on the local node"},
-    {"force-start",0, 0,  0,  "\t(Advanced) Bypass the cluster and start a resource on the local node"},
-    {"force-check",0, 0,  0,  "\t(Advanced) Bypass the cluster and check the state of a resource on the local node\n"},
-    
+    {"force-stop", 0, 0,  0,  "\t(Advanced) Bypass the cluster and stop a resource on the local node. Additional detail with -V"},
+    {"force-start",0, 0,  0,  "\t(Advanced) Bypass the cluster and start a resource on the local node. Additional detail with -V"},
+    {"force-check",0, 0,  0,  "\t(Advanced) Bypass the cluster and check the state of a resource on the local node. Additional detail with -V\n"},
+
     {"-spacer-",	1, 0, '-', "\nAdditional Options:"},
     {"node",		1, 0, 'N', "\tHost uname"},
+    {"recursive",       0, 0,  0,  "\tFollow colocation chains when using --set-parameter"},
     {"resource-type",	1, 0, 't', "Resource type (primitive, clone, group, ...)"},
-    {"parameter-value", 1, 0, 'v', "Value to use with -p, -g or -d"},
-    {"lifetime",	1, 0, 'u', "\tLifespan of migration constraints\n"},
+    {"parameter-value", 1, 0, 'v', "Value to use with -p or -S"},
     {"meta",		0, 0, 'm', "\t\tModify a resource's configuration option rather than one which is passed to the resource agent script. For use with -p, -g, -d"},
     {"utilization",	0, 0, 'z', "\tModify a resource's utilization attribute. For use with -p, -g, -d"},
     {"set-name",        1, 0, 's', "\t(Advanced) ID of the instance_attributes object to change"},
-    {"nvpair",          1, 0, 'i', "\t(Advanced) ID of the nvpair object to change/delete"},    
-    {"force",		0, 0, 'f', "\n" /* Is this actually true anymore? 
+    {"nvpair",          1, 0, 'i', "\t(Advanced) ID of the nvpair object to change/delete"},
+    {"force",		0, 0, 'f', "\n" /* Is this actually true anymore?
 					   "\t\tForce the resource to move by creating a rule for the current location and a score of -INFINITY"
 					   "\n\t\tThis should be used if the resource's stickiness and constraint scores total more than INFINITY (Currently 100,000)"
 					   "\n\t\tNOTE: This will prevent the resource from running on this node until the constraint is removed with -U or the --lifetime duration expires\n"*/ },
-    
+
     {"xml-file", 1, 0, 'x', NULL, 1},\
 
     /* legacy options */
     {"host-uname", 1, 0, 'H', NULL, 1},
     {"migrate",    0, 0, 'M', NULL, 1},
     {"un-migrate", 0, 0, 'U', NULL, 1},
+    {"un-move",    0, 0, 'U', NULL, 1},
+
+    {"refresh",    0, 0, 'R', NULL, 1},
+    {"reprobe",    0, 0, 'P', NULL, 1},
 
     {"-spacer-",	1, 0, '-', "\nExamples:", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', "List the configured resources:", pcmk_option_paragraph},
@@ -1234,7 +1414,7 @@ static struct crm_option long_options[] = {
     {"-spacer-",	1, 0, '-', "The cluster will 'forget' the existing resource state (including any errors) and attempt to recover the resource."},
     {"-spacer-",	1, 0, '-', "Useful when a resource had failed permanently and has been repaired by an administrator.", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', " crm_resource --resource myResource --cleanup --node aNode", pcmk_option_example},
-    
+
     {0, 0, 0, 0}
 };
 /* *INDENT-ON* */
@@ -1245,10 +1425,11 @@ main(int argc, char **argv)
     const char *longname = NULL;
     pe_working_set_t data_set;
     xmlNode *cib_xml_copy = NULL;
-
     cib_t *cib_conn = NULL;
-    int rc = pcmk_ok;
+    bool do_trace = FALSE;
+    bool recursive = FALSE;
 
+    int rc = pcmk_ok;
     int option_index = 0;
     int argerr = 0;
     int flag;
@@ -1268,25 +1449,32 @@ main(int argc, char **argv)
 
         switch (flag) {
             case 0:
-                if(safe_str_eq("force-stop", longname)
-                   || safe_str_eq("force-start", longname)
-                   || safe_str_eq("force-check", longname)) {
+                if (safe_str_eq("master", longname)) {
+                    scope_master = TRUE;
+
+                } else if(safe_str_eq(longname, "recursive")) {
+                    recursive = TRUE;
+
+                } else if (safe_str_eq("force-stop", longname)
+                    || safe_str_eq("force-start", longname)
+                    || safe_str_eq("force-check", longname)) {
                     rsc_cmd = flag;
                     rsc_long_cmd = longname;
 
-                } else if(safe_str_eq("list-ocf-providers", longname)
-                          || safe_str_eq("list-ocf-alternatives", longname)
-                          || safe_str_eq("list-standards", longname)) {
+                } else if (safe_str_eq("list-ocf-providers", longname)
+                           || safe_str_eq("list-ocf-alternatives", longname)
+                           || safe_str_eq("list-standards", longname)) {
                     const char *text = NULL;
                     lrmd_list_t *list = NULL;
                     lrmd_list_t *iter = NULL;
                     lrmd_t *lrmd_conn = lrmd_api_new();
 
-                    if(safe_str_eq("list-ocf-providers", longname) || safe_str_eq("list-ocf-alternatives", longname)) {
+                    if (safe_str_eq("list-ocf-providers", longname)
+                        || safe_str_eq("list-ocf-alternatives", longname)) {
                         rc = lrmd_conn->cmds->list_ocf_providers(lrmd_conn, optarg, &list);
                         text = "OCF providers";
 
-                    } else if(safe_str_eq("list-standards", longname)) {
+                    } else if (safe_str_eq("list-standards", longname)) {
                         rc = lrmd_conn->cmds->list_standards(lrmd_conn, &list);
                         text = "standards";
                     }
@@ -1299,16 +1487,16 @@ main(int argc, char **argv)
                         }
                         lrmd_list_freeall(list);
 
-                    } else if(optarg) {
+                    } else if (optarg) {
                         fprintf(stderr, "No %s found for %s\n", text, optarg);
                     } else {
                         fprintf(stderr, "No %s found\n", text);
                     }
 
                     lrmd_api_delete(lrmd_conn);
-                    return rc;
+                    return crm_exit(rc);
 
-                } else if(safe_str_eq("show-metadata", longname)) {
+                } else if (safe_str_eq("show-metadata", longname)) {
                     char standard[512];
                     char provider[512];
                     char type[512];
@@ -1316,26 +1504,30 @@ main(int argc, char **argv)
                     lrmd_t *lrmd_conn = lrmd_api_new();
 
                     rc = sscanf(optarg, "%[^:]:%[^:]:%s", standard, provider, type);
-                    if(rc == 3) {
-                        rc = lrmd_conn->cmds->get_metadata(lrmd_conn, standard, provider, type, &metadata, 0);
+                    if (rc == 3) {
+                        rc = lrmd_conn->cmds->get_metadata(lrmd_conn, standard, provider, type,
+                                                           &metadata, 0);
 
-                    } else if(rc == 2) {
-                        rc = lrmd_conn->cmds->get_metadata(lrmd_conn, standard, NULL, provider, &metadata, 0);
+                    } else if (rc == 2) {
+                        rc = lrmd_conn->cmds->get_metadata(lrmd_conn, standard, NULL, provider,
+                                                           &metadata, 0);
 
-                    } else if(rc < 2) {
-                        fprintf(stderr, "Please specify standard:type or standard:provider:type, not %s\n", optarg);
+                    } else if (rc < 2) {
+                        fprintf(stderr,
+                                "Please specify standard:type or standard:provider:type, not %s\n",
+                                optarg);
                         rc = -EINVAL;
                     }
 
-                    if(metadata) {
+                    if (metadata) {
                         printf("%s\n", metadata);
                     } else {
                         fprintf(stderr, "Metadata query for %s failed: %d\n", optarg, rc);
                     }
                     lrmd_api_delete(lrmd_conn);
-                    return rc;
+                    return crm_exit(rc);
 
-                } else if(safe_str_eq("list-agents", longname)) {
+                } else if (safe_str_eq("list-agents", longname)) {
                     lrmd_list_t *list = NULL;
                     lrmd_list_t *iter = NULL;
                     char standard[512];
@@ -1343,12 +1535,12 @@ main(int argc, char **argv)
                     lrmd_t *lrmd_conn = lrmd_api_new();
 
                     rc = sscanf(optarg, "%[^:]:%s", standard, provider);
-                    if(rc == 1) {
+                    if (rc == 1) {
                         rc = lrmd_conn->cmds->list_agents(lrmd_conn, &list, optarg, NULL);
                         provider[0] = '*';
                         provider[1] = 0;
 
-                    } else if(rc == 2) {
+                    } else if (rc == 2) {
                         rc = lrmd_conn->cmds->list_agents(lrmd_conn, &list, standard, provider);
                     }
 
@@ -1361,17 +1553,19 @@ main(int argc, char **argv)
                         lrmd_list_freeall(list);
                         rc = 0;
                     } else {
-                        fprintf(stderr, "No agents found for standard=%s, provider=%s\n", standard, provider);
+                        fprintf(stderr, "No agents found for standard=%s, provider=%s\n", standard,
+                                provider);
                         rc = -1;
                     }
                     lrmd_api_delete(lrmd_conn);
-                    return rc;
+                    return crm_exit(rc);
 
                 } else {
                     crm_err("Unhandled long option: %s", longname);
                 }
                 break;
             case 'V':
+                do_trace = TRUE;
                 crm_bump_log_level(argc, argv);
                 break;
             case '$':
@@ -1411,9 +1605,10 @@ main(int argc, char **argv)
             case 't':
                 rsc_type = optarg;
                 break;
+            case 'C':
             case 'R':
             case 'P':
-                rsc_cmd = flag;
+                rsc_cmd = 'C';
                 break;
             case 'L':
             case 'c':
@@ -1422,15 +1617,18 @@ main(int argc, char **argv)
             case 'w':
             case 'D':
             case 'F':
-            case 'C':
             case 'W':
             case 'M':
             case 'U':
+            case 'B':
             case 'O':
             case 'o':
             case 'A':
             case 'a':
                 rsc_cmd = flag;
+                break;
+            case 'j':
+                print_pending = TRUE;
                 break;
             case 'p':
             case 'g':
@@ -1483,24 +1681,26 @@ main(int argc, char **argv)
     }
 
     set_working_set_defaults(&data_set);
-    if (rsc_cmd != 'P') {
+    if (rsc_cmd != 'P' || rsc_id) {
         resource_t *rsc = NULL;
 
         cib_conn = cib_new();
         rc = cib_conn->cmds->signon(cib_conn, crm_system_name, cib_command);
         if (rc != pcmk_ok) {
             CMD_ERR("Error signing on to the CIB service: %s\n", pcmk_strerror(rc));
-            return rc;
+            return crm_exit(rc);
         }
 
         if (xml_file != NULL) {
             cib_xml_copy = filename2xml(xml_file);
 
         } else {
-            cib_xml_copy = get_cib_copy(cib_conn);
+            rc = cib_conn->cmds->query(cib_conn, NULL, &cib_xml_copy, cib_scope_local | cib_sync_call);
         }
 
-        if (cli_config_update(&cib_xml_copy, NULL, FALSE) == FALSE) {
+        if(rc != pcmk_ok) {
+            goto bail;
+        } else if (cli_config_update(&cib_xml_copy, NULL, FALSE) == FALSE) {
             rc = -ENOKEY;
             goto bail;
         }
@@ -1512,14 +1712,15 @@ main(int argc, char **argv)
         if (rsc_id) {
             rsc = find_rsc_or_clone(rsc_id, &data_set);
         }
-        if (rsc == NULL) {
+        if (rsc == NULL && rsc_cmd != 'C') {
             rc = -ENXIO;
         }
     }
 
     if (rsc_cmd == 'R' || rsc_cmd == 'C' || rsc_cmd == 'F' || rsc_cmd == 'P') {
         xmlNode *xml = NULL;
-        mainloop_io_t *source = mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &crm_callbacks);
+        mainloop_io_t *source =
+            mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &crm_callbacks);
         crmd_channel = mainloop_get_ipc_client(source);
 
         if (crmd_channel == NULL) {
@@ -1557,8 +1758,8 @@ main(int argc, char **argv)
 
     } else if (rsc_cmd == 0 && rsc_long_cmd) {
         svc_action_t *op = NULL;
-        const char *rtype  = NULL;
-        const char *rprov  = NULL;
+        const char *rtype = NULL;
+        const char *rprov = NULL;
         const char *rclass = NULL;
         const char *action = NULL;
         GHashTable *params = NULL;
@@ -1570,31 +1771,55 @@ main(int argc, char **argv)
             goto bail;
         }
 
-        if(safe_str_eq(rsc_long_cmd, "force-stop")) {
+        if (safe_str_eq(rsc_long_cmd, "force-stop")) {
             action = "stop";
-        } else if(safe_str_eq(rsc_long_cmd, "force-start")) {
+        } else if (safe_str_eq(rsc_long_cmd, "force-start")) {
             action = "start";
-        } else if(safe_str_eq(rsc_long_cmd, "force-check")) {
+            if(rsc->variant >= pe_clone) {
+                rc = do_find_resource(rsc_id, NULL, &data_set);
+                if(rc > 0 && do_force == FALSE) {
+                    CMD_ERR("It is not safe to start %s here: the cluster claims it is already active", rsc_id);
+                    CMD_ERR("Try setting target-role=stopped first or specifying --force");
+                    crm_exit(EPERM);
+                }
+            }
+
+        } else if (safe_str_eq(rsc_long_cmd, "force-check")) {
             action = "monitor";
         }
 
         rclass = crm_element_value(rsc->xml, XML_AGENT_ATTR_CLASS);
-        rprov  = crm_element_value(rsc->xml, XML_AGENT_ATTR_PROVIDER);
-        rtype  = crm_element_value(rsc->xml, XML_ATTR_TYPE);
+        rprov = crm_element_value(rsc->xml, XML_AGENT_ATTR_PROVIDER);
+        rtype = crm_element_value(rsc->xml, XML_ATTR_TYPE);
+
+        if(safe_str_eq(rclass, "stonith")){
+            CMD_ERR("Sorry, --%s doesn't support %s resources yet\n", rsc_long_cmd, rclass);
+            crm_exit(EOPNOTSUPP);
+        }
+
         params = generate_resource_params(rsc, &data_set);
+        op = resources_action_create(rsc->id, rclass, rprov, rtype, action, 0, -1, params);
 
-        op = resources_action_create(
-            rsc->id, rclass, rprov, rtype, action, 0, -1, params);
+        if(do_trace) {
+            setenv("OCF_TRACE_RA", "1", 1);
+        }
 
-        if(services_action_sync(op)) {
+        if(op == NULL) {
+            /* Re-run but with stderr enabled so we can display a sane error message */
+            crm_enable_stderr(TRUE);
+            resources_action_create(rsc->id, rclass, rprov, rtype, action, 0, -1, params);
+            return crm_exit(EINVAL);
+
+        } else if (services_action_sync(op)) {
             int more, lpc, last;
             char *local_copy = NULL;
-            if(op->status == PCMK_LRM_OP_DONE) {
+
+            if (op->status == PCMK_LRM_OP_DONE) {
                 printf("Operation %s for %s (%s:%s:%s) returned %d\n",
-                       action, rsc->id, rclass, rprov?rprov:"", rtype, op->rc);
+                       action, rsc->id, rclass, rprov ? rprov : "", rtype, op->rc);
             } else {
                 printf("Operation %s for %s (%s:%s:%s) failed: %d\n",
-                       action, rsc->id, rclass, rprov?rprov:"", rtype, op->status);
+                       action, rsc->id, rclass, rprov ? rprov : "", rtype, op->status);
             }
 
             if (op->stdout_data) {
@@ -1602,11 +1827,11 @@ main(int argc, char **argv)
                 more = strlen(local_copy);
                 last = 0;
 
-                for(lpc = 0; lpc < more; lpc++) {
-                    if(local_copy[lpc] == '\n' || local_copy[lpc] == 0) {
+                for (lpc = 0; lpc < more; lpc++) {
+                    if (local_copy[lpc] == '\n' || local_copy[lpc] == 0) {
                         local_copy[lpc] = 0;
-                        printf(" >  stdout: %s\n", local_copy+last);
-                        last = lpc+1;
+                        printf(" >  stdout: %s\n", local_copy + last);
+                        last = lpc + 1;
                     }
                 }
                 free(local_copy);
@@ -1616,11 +1841,11 @@ main(int argc, char **argv)
                 more = strlen(local_copy);
                 last = 0;
 
-                for(lpc = 0; lpc < more; lpc++) {
-                    if(local_copy[lpc] == '\n' || local_copy[lpc] == 0) {
+                for (lpc = 0; lpc < more; lpc++) {
+                    if (local_copy[lpc] == '\n' || local_copy[lpc] == 0) {
                         local_copy[lpc] = 0;
-                        printf(" >  stderr: %s\n", local_copy+last);
-                        last = lpc+1;
+                        printf(" >  stderr: %s\n", local_copy + last);
+                        last = lpc + 1;
                     }
                 }
                 free(local_copy);
@@ -1628,7 +1853,7 @@ main(int argc, char **argv)
         }
         rc = op->rc;
         services_action_free(op);
-        return rc;
+        return crm_exit(rc);
 
     } else if (rsc_cmd == 'A' || rsc_cmd == 'a') {
         GListPtr lpc = NULL;
@@ -1675,14 +1900,6 @@ main(int argc, char **argv)
         }
         print_cts_constraints(&data_set);
 
-    } else if (rsc_cmd == 'C') {
-        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
-
-        rc = delete_lrm_rsc(crmd_channel, host_uname, rsc, &data_set);
-        if (rc == pcmk_ok) {
-            start_mainloop();
-        }
-
     } else if (rsc_cmd == 'F') {
         rc = fail_lrm_rsc(crmd_channel, host_uname, rsc_id, &data_set);
         if (rc == pcmk_ok) {
@@ -1696,7 +1913,7 @@ main(int argc, char **argv)
         rc = list_resource_operations(rsc_id, host_uname, FALSE, &data_set);
 
     } else if (rc == -ENXIO) {
-        CMD_ERR("Resource %s not found: %s\n", crm_str(rsc_id), pcmk_strerror(rc));
+        CMD_ERR("Resource '%s' not found: %s\n", crm_str(rsc_id), pcmk_strerror(rc));
 
     } else if (rsc_cmd == 'W') {
         if (rsc_id == NULL) {
@@ -1723,57 +1940,189 @@ main(int argc, char **argv)
         rc = dump_resource(rsc_id, &data_set, FALSE);
 
     } else if (rsc_cmd == 'U') {
+        node_t *dest = NULL;
+
         if (rsc_id == NULL) {
-            CMD_ERR("Must supply a resource id with -r\n");
+            CMD_ERR("No value specified for --resource\n");
             rc = -ENXIO;
             goto bail;
         }
-        /* coverity[var_deref_model] False positive */
-        rc = move_resource(rsc_id, NULL, NULL, cib_conn);
 
-    } else if (rsc_cmd == 'M') {
-        node_t *dest = NULL;
+        if (host_uname) {
+            dest = pe_find_node(data_set.nodes, host_uname);
+            if (dest == NULL) {
+                CMD_ERR("Unknown node: %s\n", host_uname);
+                rc = -ENXIO;
+                goto bail;
+            }
+            rc = clear_resource(rsc_id, dest->details->uname, NULL, cib_conn);
+
+        } else {
+            rc = clear_resource(rsc_id, NULL, data_set.nodes, cib_conn);
+        }
+
+    } else if (rsc_cmd == 'M' && host_uname) {
+
+        int count = 0;
         node_t *current = NULL;
-        const char *current_uname = NULL;
+        node_t *dest = pe_find_node(data_set.nodes, host_uname);
         resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
 
-        if (rsc != NULL && rsc->running_on != NULL) {
-            current = rsc->running_on->data;
-            if (current != NULL) {
-                current_uname = current->details->uname;
+        rc = -EINVAL;
+
+        if (rsc == NULL) {
+            CMD_ERR("Resource '%s' not moved: not found\n", rsc_id);
+            rc = -ENXIO;
+            goto bail;
+
+        } else if (scope_master && rsc->variant < pe_master) {
+            resource_t *p = uber_parent(rsc);
+            if(p->variant == pe_master) {
+                CMD_ERR("Using parent '%s' for --move command instead of '%s'.\n", rsc->id, rsc_id);
+                rsc_id = p->id;
+                rsc = p;
+
+            } else {
+                CMD_ERR("Ignoring '--master' option: not valid for %s resources.\n",
+                        get_resource_typename(rsc->variant));
+                scope_master = FALSE;
             }
         }
 
-        if (host_uname != NULL) {
-            dest = pe_find_node(data_set.nodes, host_uname);
+        if(rsc->variant == pe_master) {
+            GListPtr iter = NULL;
+
+            for(iter = rsc->children; iter; iter = iter->next) {
+                resource_t *child = (resource_t *)iter->data;
+                enum rsc_role_e child_role = child->fns->state(child, TRUE);
+
+                if(child_role == RSC_ROLE_MASTER) {
+                    rsc = child;
+                    count++;
+                }
+            }
+
+            if(scope_master == FALSE && count == 0) {
+                count = g_list_length(rsc->running_on);
+            }
+
+        } else if (rsc->variant > pe_group) {
+            count = g_list_length(rsc->running_on);
+
+        } else if (g_list_length(rsc->running_on) > 1) {
+            CMD_ERR("Resource '%s' not moved: active on multiple nodes\n", rsc_id);
+            goto bail;
         }
 
-        if (rsc == NULL) {
-            CMD_ERR("Resource %s not moved:" " not found\n", rsc_id);
-
-        } else if (rsc->variant == pe_native && g_list_length(rsc->running_on) > 1) {
-            CMD_ERR("Resource %s not moved:" " active on multiple nodes\n", rsc_id);
-
-        } else if (host_uname != NULL && dest == NULL) {
-            CMD_ERR("Error performing operation: " "%s is not a known node\n", host_uname);
+        if(dest == NULL) {
+            CMD_ERR("Error performing operation: node '%s' is unknown\n", host_uname);
             rc = -ENXIO;
+            goto bail;
+        }
 
-        } else if (host_uname != NULL && safe_str_eq(current_uname, host_uname)) {
-            CMD_ERR("Error performing operation: "
-                    "%s is already active on %s\n", rsc_id, host_uname);
+        if(g_list_length(rsc->running_on) == 1) {
+            current = rsc->running_on->data;
+        }
 
-        } else if (current_uname != NULL && (do_force || host_uname == NULL)) {
-            /* coverity[var_deref_model] False positive */
-            rc = move_resource(rsc_id, current_uname, host_uname, cib_conn);
+        if(current == NULL) {
+            /* Nothing to check */
 
-        } else if (host_uname != NULL) {
-            /* coverity[var_deref_model] False positive */
-            rc = move_resource(rsc_id, NULL, host_uname, cib_conn);
+        } else if(scope_master && rsc->fns->state(rsc, TRUE) != RSC_ROLE_MASTER) {
+            crm_trace("%s is already active on %s but not in correct state", rsc_id, dest->details->uname);
+
+        } else if (safe_str_eq(current->details->uname, dest->details->uname)) {
+            CMD_ERR("Error performing operation: %s is already %s on %s\n",
+                    rsc_id, scope_master?"promoted":"active", dest->details->uname);
+            goto bail;
+        }
+
+        /* Clear any previous constraints for 'dest' */
+        clear_resource(rsc_id, dest->details->uname, data_set.nodes, cib_conn);
+
+        /* Record an explicit preference for 'dest' */
+        rc = prefer_resource(rsc_id, dest->details->uname, cib_conn);
+
+        crm_trace("%s%s now prefers node %s%s",
+                  rsc->id, scope_master?" (master)":"", dest->details->uname, do_force?"(forced)":"");
+
+        if(do_force) {
+            /* Ban the original location if possible */
+            if(current) {
+                ban_resource(rsc_id, current->details->uname, NULL, cib_conn);
+
+            } else if(count > 1) {
+                CMD_ERR("Resource '%s' is currently %s in %d locations.  One may now move one to %s\n",
+                        rsc_id, scope_master?"promoted":"active", count, dest->details->uname);
+                CMD_ERR("You can prevent '%s' from being %s at a specific location with:"
+                        " --ban %s--host <name>\n", rsc_id, scope_master?"promoted":"active", scope_master?"--master ":"");
+
+            } else {
+                crm_trace("Not banning %s from it's current location: not active", rsc_id);
+            }
+        }
+
+    } else if (rsc_cmd == 'B' && host_uname) {
+        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
+        node_t *dest = pe_find_node(data_set.nodes, host_uname);
+
+        rc = -ENXIO;
+        if (rsc_id == NULL) {
+            CMD_ERR("No value specified for --resource\n");
+            goto bail;
+        } else if(rsc == NULL) {
+            CMD_ERR("Resource '%s' not moved: unknown\n", rsc_id);
+
+        } else if (dest == NULL) {
+            CMD_ERR("Error performing operation: node '%s' is unknown\n", host_uname);
+            goto bail;
+        }
+        rc = ban_resource(rsc_id, dest->details->uname, NULL, cib_conn);
+
+    } else if (rsc_cmd == 'B' || rsc_cmd == 'M') {
+        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
+
+        rc = -ENXIO;
+        if (rsc_id == NULL) {
+            CMD_ERR("No value specified for --resource\n");
+            goto bail;
+        }
+
+        rc = -EINVAL;
+        if(rsc == NULL) {
+            CMD_ERR("Resource '%s' not moved: unknown\n", rsc_id);
+
+        } else if(g_list_length(rsc->running_on) == 1) {
+            node_t *current = rsc->running_on->data;
+            rc = ban_resource(rsc_id, current->details->uname, NULL, cib_conn);
+
+        } else if(rsc->variant == pe_master) {
+            int count = 0;
+            GListPtr iter = NULL;
+            node_t *current = NULL;
+
+            for(iter = rsc->children; iter; iter = iter->next) {
+                resource_t *child = (resource_t *)iter->data;
+                enum rsc_role_e child_role = child->fns->state(child, TRUE);
+
+                if(child_role == RSC_ROLE_MASTER) {
+                    count++;
+                    current = child->running_on->data;
+                }
+            }
+
+            if(count == 1 && current) {
+                rc = ban_resource(rsc_id, current->details->uname, NULL, cib_conn);
+
+            } else {
+                CMD_ERR("Resource '%s' not moved: active in %d locations (promoted in %d).\n", rsc_id, g_list_length(rsc->running_on), count);
+                CMD_ERR("You can prevent '%s' from running on a specific location with: --ban --host <name>\n", rsc_id);
+                CMD_ERR("You can prevent '%s' from being promoted at a specific location with:"
+                        " --ban --master --host <name>\n", rsc_id);
+            }
 
         } else {
-            CMD_ERR("Resource %s not moved: "
-                    "not-active and no preferred location" " specified.\n", rsc_id);
-            rc = -EINVAL;
+            CMD_ERR("Resource '%s' not moved: active in %d locations.\n", rsc_id, g_list_length(rsc->running_on));
+            CMD_ERR("You can prevent '%s' from running on a specific location with: --ban --host <name>\n", rsc_id);
         }
 
     } else if (rsc_cmd == 'G') {
@@ -1832,9 +2181,10 @@ main(int argc, char **argv)
             rc = -EINVAL;
             goto bail;
         }
+
         /* coverity[var_deref_model] False positive */
         rc = set_resource_attr(rsc_id, prop_set, prop_id, prop_name,
-                               prop_value, cib_conn, &data_set);
+                               prop_value, recursive, cib_conn, &data_set);
 
     } else if (rsc_cmd == 'd') {
         if (rsc_id == NULL) {
@@ -1845,21 +2195,31 @@ main(int argc, char **argv)
         /* coverity[var_deref_model] False positive */
         rc = delete_resource_attr(rsc_id, prop_set, prop_id, prop_name, cib_conn, &data_set);
 
-    } else if (rsc_cmd == 'P') {
+    } else if (rsc_cmd == 'C' && rsc_id) {
+        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
+
+        crm_debug("Re-checking the state of %s on %s", rsc_id, host_uname);
+        if(rsc) {
+            crmd_replies_needed = 0;
+            rc = delete_lrm_rsc(cib_conn, crmd_channel, host_uname, rsc, &data_set);
+        } else {
+            rc = -ENODEV;
+        }
+
+        if (rc == pcmk_ok) {
+            start_mainloop();
+        }
+
+    } else if (rsc_cmd == 'C') {
         xmlNode *cmd = create_request(CRM_OP_REPROBE, NULL, host_uname,
                                       CRM_SYSTEM_CRMD, crm_system_name, our_pid);
 
+        crm_debug("Re-checking the state of all resources on %s", host_uname);
         if (crm_ipc_send(crmd_channel, cmd, 0, 0, NULL) > 0) {
             start_mainloop();
         }
 
         free_xml(cmd);
-
-    } else if (rsc_cmd == 'R') {
-        rc = refresh_lrm(crmd_channel, host_uname);
-        if (rc == pcmk_ok) {
-            start_mainloop();
-        }
 
     } else if (rsc_cmd == 'D') {
         xmlNode *msg_data = NULL;
@@ -1892,13 +2252,13 @@ main(int argc, char **argv)
 
   bail:
 
-    if (cib_conn != NULL) {
+    if (data_set.input != NULL) {
         cleanup_alloc_calculations(&data_set);
+    }
+    if (cib_conn != NULL) {
         cib_conn->cmds->signoff(cib_conn);
         cib_delete(cib_conn);
     }
-
-    crm_xml_cleanup();
 
     if (rc == -pcmk_err_no_quorum) {
         CMD_ERR("Error performing operation: %s\n", pcmk_strerror(rc));
@@ -1908,6 +2268,5 @@ main(int argc, char **argv)
         CMD_ERR("Error performing operation: %s\n", pcmk_strerror(rc));
     }
 
-    qb_log_fini();
-    return rc;
+    return crm_exit(rc);
 }

@@ -1,6 +1,6 @@
 /* crm_internal.h */
 
-/* 
+/*
  * Copyright (C) 2006 - 2008
  *     Andrew Beekhof <andrew@beekhof.net>
  *
@@ -31,6 +31,7 @@
 
 #  include <crm/lrmd.h>
 #  include <crm/common/logging.h>
+#  include <crm/common/ipcs.h>
 
 /* Dynamic loading of libraries */
 void *find_library_function(void **handle, const char *lib, const char *fn, int fatal);
@@ -38,7 +39,8 @@ void *convert_const_pointer(const void *ptr);
 
 /* For ACLs */
 char *uid2username(uid_t uid);
-void determine_request_user(char *user, xmlNode * request, const char *field);
+void determine_request_user(const char *user, xmlNode * request, const char *field);
+const char *crm_acl_get_set_user(xmlNode * request, const char *field, const char *peer_user);
 
 #  if ENABLE_ACL
 #    include <string.h>
@@ -88,10 +90,11 @@ struct crm_option {
     long flags;
 };
 
-void crm_set_options(const char *short_options, const char *usage, struct crm_option *long_options, const char *app_desc);
+void crm_set_options(const char *short_options, const char *usage, struct crm_option *long_options,
+                     const char *app_desc);
 int crm_get_option(int argc, char **argv, int *index);
 int crm_get_option_long(int argc, char **argv, int *index, const char **longname);
-void crm_help(char cmd, int exit_code);
+int crm_help(char cmd, int exit_code);
 
 /* Cluster Option Processing */
 typedef struct pe_cluster_option_s {
@@ -111,7 +114,8 @@ typedef struct pe_cluster_option_s {
 const char *cluster_option(GHashTable * options, gboolean(*validate) (const char *),
                            const char *name, const char *old_name, const char *def_value);
 
-const char *get_cluster_pref(GHashTable * options, pe_cluster_option * option_list, int len, const char *name);
+const char *get_cluster_pref(GHashTable * options, pe_cluster_option * option_list, int len,
+                             const char *name);
 
 void config_metadata(const char *name, const char *version, const char *desc_short,
                      const char *desc_long, pe_cluster_option * option_list, int len);
@@ -121,21 +125,22 @@ gboolean check_time(const char *value);
 gboolean check_timer(const char *value);
 gboolean check_boolean(const char *value);
 gboolean check_number(const char *value);
+gboolean check_utilization(const char *value);
 
 /* Shared PE/crmd functionality */
 void filter_action_parameters(xmlNode * param_set, const char *version);
 void filter_reload_parameters(xmlNode * param_set, const char *restart_string);
 
 /* Resource operation updates */
-xmlNode *create_operation_update(xmlNode * parent, lrmd_event_data_t *event, const char *caller_version,
-                                 int target_rc, const char *origin, int level);
+xmlNode *create_operation_update(xmlNode * parent, lrmd_event_data_t * event,
+                                 const char *caller_version, int target_rc, const char *origin,
+                                 int level);
 
 /* char2score */
 extern int node_score_red;
 extern int node_score_green;
 extern int node_score_yellow;
 extern int node_score_infinity;
-
 
 /* Assorted convenience functions */
 static inline int
@@ -145,12 +150,15 @@ crm_strlen_zero(const char *s)
 }
 
 char *add_list_element(char *list, const char *value);
-char *generate_series_filename(const char *directory, const char *series, int sequence, gboolean bzip);
+char *generate_series_filename(const char *directory, const char *series, int sequence,
+                               gboolean bzip);
 int get_last_sequence(const char *directory, const char *series);
 void write_last_sequence(const char *directory, const char *series, int sequence, int max);
 
+int crm_pid_active(long pid);
 void crm_make_daemon(const char *name, gboolean daemonize, const char *pidfile);
-gboolean crm_is_writable(const char *dir, const char *file, const char *user, const char *group, gboolean need_both);
+gboolean crm_is_writable(const char *dir, const char *file, const char *user, const char *group,
+                         gboolean need_both);
 
 char *generate_op_key(const char *rsc_id, const char *op_type, int interval);
 char *generate_notify_key(const char *rsc_id, const char *notify_type, const char *op_type);
@@ -163,7 +171,7 @@ crm_clear_bit(const char *function, const char *target, long long word, long lon
 {
     long long rc = (word & ~bit);
 
-    if(rc == word) {
+    if (rc == word) {
         /* Unchanged */
     } else if (target) {
         crm_trace("Bit 0x%.8llx for %s cleared by %s", bit, target, function);
@@ -177,9 +185,9 @@ crm_clear_bit(const char *function, const char *target, long long word, long lon
 static inline long long
 crm_set_bit(const char *function, const char *target, long long word, long long bit)
 {
-    long long rc = (word|bit);
+    long long rc = (word | bit);
 
-    if(rc == word) {
+    if (rc == word) {
         /* Unchanged */
     } else if (target) {
         crm_trace("Bit 0x%.8llx for %s set by %s", bit, target, function);
@@ -190,20 +198,71 @@ crm_set_bit(const char *function, const char *target, long long word, long long 
     return rc;
 }
 
-#  define set_bit(word, bit) word = crm_set_bit(__PRETTY_FUNCTION__, NULL, word, bit)
-#  define clear_bit(word, bit) word = crm_clear_bit(__PRETTY_FUNCTION__, NULL, word, bit)
+#  define set_bit(word, bit) word = crm_set_bit(__FUNCTION__, NULL, word, bit)
+#  define clear_bit(word, bit) word = crm_clear_bit(__FUNCTION__, NULL, word, bit)
 
 void g_hash_destroy_str(gpointer data);
 
 long long crm_int_helper(const char *text, char **end_text);
 char *crm_concat(const char *prefix, const char *suffix, char join);
 char *generate_hash_key(const char *crm_msg_reference, const char *sys);
-xmlNode *crm_recv_remote_msg(void *session, gboolean encrypted);
-void crm_send_remote_msg(void *session, xmlNode * msg, gboolean encrypted);
+
+bool crm_compress_string(const char *data, int length, int max, char **result,
+                         unsigned int *result_len);
+
+/*! remote tcp/tls helper functions */
+typedef struct crm_remote_s crm_remote_t;
+
+int crm_remote_send(crm_remote_t * remote, xmlNode * msg);
+int crm_remote_ready(crm_remote_t * remote, int total_timeout /*ms */ );
+gboolean crm_remote_recv(crm_remote_t * remote, int total_timeout /*ms */ , int *disconnected);
+xmlNode *crm_remote_parse_buffer(crm_remote_t * remote);
+int crm_remote_tcp_connect(const char *host, int port);
+int crm_remote_tcp_connect_async(const char *host, int port, int timeout,       /*ms */
+                                 void *userdata, void (*callback) (void *userdata, int sock));
+
+#  ifdef HAVE_GNUTLS_GNUTLS_H
+/*!
+ * \internal
+ * \brief Initiate the client handshake after establishing the tcp socket.
+ * \note This is a blocking function, it will block until the entire handshake
+ *       is complete or until the timeout period is reached.
+ * \retval 0 success
+ * \retval negative, failure
+ */
+int crm_initiate_client_tls_handshake(crm_remote_t * remote, int timeout_ms);
+
+/*!
+ * \internal
+ * \brief Create client or server session for anon DH encryption credentials
+ * \param sock, the socket the session will use for transport
+ * \param type, GNUTLS_SERVER or GNUTLS_CLIENT
+ * \param credentials, gnutls_anon_server_credentials_t or gnutls_anon_client_credentials_t
+ *
+ * \retval gnutls_session_t * on success
+ * \retval NULL on failure
+ */
+void *crm_create_anon_tls_session(int sock, int type, void *credentials);
+
+/*!
+ * \internal
+ * \brief Create client or server session for PSK credentials
+ * \param sock, the socket the session will use for transport
+ * \param type, GNUTLS_SERVER or GNUTLS_CLIENT
+ * \param credentials, gnutls_psk_server_credentials_t or gnutls_osk_client_credentials_t
+ *
+ * \retval gnutls_session_t * on success
+ * \retval NULL on failure
+ */
+void *create_psk_tls_session(int csock, int type, void *credentials);
+#  endif
+
+#  define REMOTE_MSG_TERMINATOR "\r\n\r\n"
 
 const char *daemon_option(const char *option);
 void set_daemon_option(const char *option, const char *value);
 gboolean daemon_option_enabled(const char *daemon, const char *option);
+void strip_text_nodes(xmlNode * xml);
 
 #  define crm_config_err(fmt...) { crm_config_error = TRUE; crm_err(fmt); }
 #  define crm_config_warn(fmt...) { crm_config_warning = TRUE; crm_warn(fmt); }
@@ -214,11 +273,15 @@ gboolean daemon_option_enabled(const char *daemon, const char *option);
 #  define F_ATTRD_TASK		"task"
 #  define F_ATTRD_VALUE		"attr_value"
 #  define F_ATTRD_SET		"attr_set"
+#  define F_ATTRD_IS_REMOTE	"attr_is_remote"
 #  define F_ATTRD_SECTION	"attr_section"
 #  define F_ATTRD_DAMPEN	"attr_dampening"
 #  define F_ATTRD_IGNORE_LOCALLY "attr_ignore_locally"
 #  define F_ATTRD_HOST		"attr_host"
+#  define F_ATTRD_HOST_ID	"attr_host_id"
 #  define F_ATTRD_USER		"attr_user"
+#  define F_ATTRD_WRITER	"attr_writer"
+#  define F_ATTRD_VERSION	"attr_version"
 
 #  if SUPPORT_COROSYNC
 #    if CS_USES_LIBQB
@@ -252,5 +315,23 @@ typedef struct {
 } __attribute__ ((aligned(8))) cs_ipc_header_response_t;
 
 #  endif
+
+void
+attrd_ipc_server_init(qb_ipcs_service_t **ipcs, struct qb_ipcs_service_handlers *cb);
+void
+stonith_ipc_server_init(qb_ipcs_service_t **ipcs, struct qb_ipcs_service_handlers *cb);
+
+qb_ipcs_service_t *
+crmd_ipc_server_init(struct qb_ipcs_service_handlers *cb);
+
+void cib_ipc_servers_init(qb_ipcs_service_t **ipcs_ro,
+        qb_ipcs_service_t **ipcs_rw,
+        qb_ipcs_service_t **ipcs_shm,
+        struct qb_ipcs_service_handlers *ro_cb,
+        struct qb_ipcs_service_handlers *rw_cb);
+
+void cib_ipc_servers_destroy(qb_ipcs_service_t *ipcs_ro,
+        qb_ipcs_service_t *ipcs_rw,
+        qb_ipcs_service_t *ipcs_shm);
 
 #endif                          /* CRM_INTERNAL__H */

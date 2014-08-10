@@ -1,15 +1,15 @@
  # Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- # 
+ #
  # This program is free software; you can redistribute it and/or
  # modify it under the terms of the GNU General Public
  # License as published by the Free Software Foundation; either
  # version 2.1 of the License, or (at your option) any later version.
- # 
+ #
  # This software is distributed in the hope that it will be useful,
  # but WITHOUT ANY WARRANTY; without even the implied warranty of
  # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  # General Public License for more details.
- # 
+ #
  # You should have received a copy of the GNU General Public
  # License along with this library; if not, write to the Free Software
  # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
@@ -20,7 +20,7 @@ num_failed=0
 num_tests=0
 force_local=0
 VALGRIND_CMD=""
-diff_opts="--ignore-all-space -u -N"
+diff_opts="--ignore-all-space --ignore-blank-lines -u -N"
 
 test_home=`dirname $0`
 test_name=`basename $0`
@@ -47,19 +47,20 @@ io_dir=$test_home/test10
 test_binary=@abs_top_builddir@/tools/crm_simulate
 PCMK_schema_directory=@abs_top_builddir@/xml
 
+
 failed=$test_home/.regression.failed.diff
 single_test=
 
 while true ; do
     case "$1" in
 	-V|--verbose) verbose=1; shift;;
-	-v|--valgrind) 
+	-v|--valgrind)
 	    export G_SLICE=always-malloc
-	    VALGRIND_CMD="valgrind -q --log-file=%q{valgrind_output} --show-reachable=no --leak-check=full --trace-children=no --time-stamp=yes --num-callers=20 --suppressions=$test_home/ptest.supp"
+	    VALGRIND_CMD="valgrind -q --gen-suppressions=all --log-file=%q{valgrind_output} --show-reachable=no --leak-check=full --trace-children=no --time-stamp=yes --num-callers=20 --suppressions=@datadir@/@PACKAGE@/tests/valgrind-pcmk.suppressions"
 	    test_binary=
 	    shift;;
-	--valgrind-dhat) 
-	    VALGRIND_CMD="valgrind --log-file=%q{valgrind_output} --show-top-n=100 --num-callers=4 --time-stamp=yes --trace-children=no --tool=exp-dhat --suppressions=$test_home/ptest.supp"
+	--valgrind-dhat)
+	    VALGRIND_CMD="valgrind --log-file=%q{valgrind_output} --show-top-n=100 --num-callers=4 --time-stamp=yes --trace-children=no --tool=exp-dhat"
 	    test_binary=
 	    shift;;
 	--valgrind-skip-output)
@@ -67,6 +68,7 @@ while true ; do
 	    shift;;
 	--run) single_test="$2"; shift; shift; break;;
 	-b|--binary) test_binary=$2; PCMK_schema_directory=""; shift; shift;;
+	-i|--io-dir) io_dir=$2; shift; shift;;
 	-?|--help) echo "$0 [--binary name] [--force-local]"; shift; exit 0;;
 	--) shift ; break ;;
 	"") break;;
@@ -243,7 +245,7 @@ function do_test {
 	cp "$dot_output" "$dot_expected"
 	cp "$score_output" "$scores"
 	cp "$summary_output" "$summary"
-	info "	Created expected outputs" 
+	info "	Created expected outputs"
     fi
 
     diff $diff_opts $summary $summary_output >/dev/null
@@ -262,10 +264,11 @@ function do_test {
 	diff $diff_opts $dot_expected $dot_output 2>/dev/null >> $failed
 	echo "" >> $failed
 	did_fail=1
-    else 
+    else
 	rm -f $dot_output
     fi
 
+    sed -i -e 's/crm_feature_set="[^"]*"//' -e 's/batch-limit="[0-9]*"//' $expected $output
     diff $diff_opts $expected $output >/dev/null
     rc2=$?
     if [ $rc2 != 0 ]; then
@@ -274,7 +277,7 @@ function do_test {
 	echo "" >> $failed
 	did_fail=1
     fi
-    
+
     diff $diff_opts $scores $score_output >/dev/null
     rc=$?
     if [ $rc != 0 ]; then
@@ -312,5 +315,6 @@ else
     failed=.single
     > $failed
     do_test $single_test "Single shot" $*
+    cat $failed
     exit $?
 fi

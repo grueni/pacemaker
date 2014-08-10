@@ -1,25 +1,32 @@
 # Semi-random collection of tasks we'd like to get done
 
-## Targeted for 1.2
-- Need a way to indicate when unfencing operations need to be initiated from the host to be unfenced
- 
-## Targeted for 1.2.x
+## Targeted for this year
+
+- Implement:
+ - crm_node --standby
+ - crm_resource --enable --recursive :  set target role for anything we depend on
+ - merge all the crmd global variables into a single struct 
+
+- Only bump epoch if we have quorum when we are elected the DC 
+- Bump epoch if we gain quorum and are the DC
+
+- Make sure crm_attribute/crmd writes direct to cib if attrd is not around
+- See if anywhere should be using clock_gettime() instead of time(NULL)
+- Make sure fail counts etc are removed on resource deletion
+
+- Test and merge ipc-dispatch.patch
+- Process election votes as soon as they happen
+  notice: do_election_count_vote: Election 6 (current: 6, owner: 101): Processed no-vote from east-04 (Peer is not part of our cluster)
 
 - Support
   http://cgit.freedesktop.org/systemd/systemd/commit/?id=96342de68d0d6de71a062d984dafd2a0905ed9fe
-- Allow stonith_admin to optionally route fencing requests via the CIB (terminate=true)
-- Add corosync to ComponentFail cts test
 - Support 'yesterday' and 'thursday' and '24-04' as dates in crm_report 
 - Allow the N in 'give up after N failed fencing attempts' to be configurable 
-- Check for uppercase letters in node names, warn if found
-- Imply startup-failure-is-fatal from on-fail="restart" 
 - Show an english version of the config with crm_resource --rules
 - Convert cts/CIB.py into a supported Python API for the CIB
-- Reduce the amount of stonith-ng logging
-- Use dlopen for snmp in crm_mon
 - Re-implement no-quorum filter for cib updates?
 
-## Targeted for 1.4
+## Targeted for next year and beyond
 
 - Support A colocated with (B || C || D)
 - Implement a truely atomic version of attrd
@@ -46,7 +53,6 @@
 # Documentation
 - Clusters from Scratch: Mail
 - Clusters from Scratch: MySQL
-- Document reload in Pacemaker Explained
 - Document advanced fencing logic in Pacemaker Explained
 - Use ann:defaultValue="..." instead of <optional> in the schema more often
 - Document in CFS an Appendix detailing with re-enabling firewall

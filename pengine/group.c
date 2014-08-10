@@ -59,20 +59,11 @@ group_color(resource_t * rsc, node_t * prefer, pe_working_set_t * data_set)
         g_list_concat(group_data->first_child->rsc_cons, rsc->rsc_cons);
     rsc->rsc_cons = NULL;
 
-    group_data->first_child->rsc_cons_lhs =
-        g_list_concat(group_data->first_child->rsc_cons_lhs, rsc->rsc_cons_lhs);
+    group_data->last_child->rsc_cons_lhs =
+        g_list_concat(group_data->last_child->rsc_cons_lhs, rsc->rsc_cons_lhs);
     rsc->rsc_cons_lhs = NULL;
 
-    gIter = rsc->rsc_tickets;
-    for (; gIter != NULL; gIter = gIter->next) {
-        rsc_ticket_t *rsc_ticket = (rsc_ticket_t *) gIter->data;
-
-        if (rsc_ticket->ticket->granted == FALSE || rsc_ticket->ticket->standby) {
-            rsc_ticket_constraint(rsc, rsc_ticket, data_set);
-        }
-    }
-
-    dump_node_scores(show_scores ? 0 : scores_log_level, rsc, __PRETTY_FUNCTION__,
+    dump_node_scores(show_scores ? 0 : scores_log_level, rsc, __FUNCTION__,
                      rsc->allowed_nodes);
 
     gIter = rsc->children;
@@ -185,6 +176,7 @@ group_internal_constraints(resource_t * rsc, pe_working_set_t * data_set)
 {
     GListPtr gIter = rsc->children;
     resource_t *last_rsc = NULL;
+    resource_t *last_active = NULL;
     resource_t *top = uber_parent(rsc);
     group_variant_data_t *group_data = NULL;
 
@@ -246,7 +238,7 @@ group_internal_constraints(resource_t * rsc, pe_working_set_t * data_set)
             child_rsc->restart_type = pe_restart_restart;
 
             order_start_start(last_rsc, child_rsc, start);
-            order_stop_stop(child_rsc, last_rsc, pe_order_optional|pe_order_restart);
+            order_stop_stop(child_rsc, last_rsc, pe_order_optional | pe_order_restart);
 
             if (top->variant == pe_master) {
                 new_rsc_order(last_rsc, RSC_PROMOTE, child_rsc, RSC_PROMOTE, start, data_set);
@@ -268,6 +260,18 @@ group_internal_constraints(resource_t * rsc, pe_working_set_t * data_set)
                 new_rsc_order(rsc, RSC_PROMOTE, child_rsc, RSC_PROMOTE, flags, data_set);
             }
 
+        }
+
+        /* Look for partially active groups
+         * Make sure they still shut down in sequence
+         */
+        if (child_rsc->running_on) {
+            if (group_data->ordered
+                && last_rsc
+                && last_rsc->running_on == NULL && last_active && last_active->running_on) {
+                order_stop_stop(child_rsc, last_active, pe_order_optional);
+            }
+            last_active = child_rsc;
         }
 
         last_rsc = child_rsc;
@@ -383,21 +387,23 @@ group_action_flags(action_t * action, node_t * node)
 
             if (is_set(flags, pe_action_optional)
                 && is_set(child_flags, pe_action_optional) == FALSE) {
-                pe_rsc_trace(action->rsc, "%s is manditory because of %s", action->uuid, child_action->uuid);
+                pe_rsc_trace(action->rsc, "%s is manditory because of %s", action->uuid,
+                             child_action->uuid);
                 clear_bit(flags, pe_action_optional);
                 pe_clear_action_bit(action, pe_action_optional);
             }
             if (safe_str_neq(task_s, action->task)
                 && is_set(flags, pe_action_runnable)
                 && is_set(child_flags, pe_action_runnable) == FALSE) {
-                pe_rsc_trace(action->rsc, "%s is not runnable because of %s", action->uuid, child_action->uuid);
+                pe_rsc_trace(action->rsc, "%s is not runnable because of %s", action->uuid,
+                             child_action->uuid);
                 clear_bit(flags, pe_action_runnable);
                 pe_clear_action_bit(action, pe_action_runnable);
             }
 
-        } else if (task != stop_rsc) {
-            pe_rsc_trace(action->rsc, "%s is not runnable because of %s (not found in %s)", action->uuid, task_s,
-                      child->id);
+        } else if (task != stop_rsc && task != action_demote) {
+            pe_rsc_trace(action->rsc, "%s is not runnable because of %s (not found in %s)",
+                         action->uuid, task_s, child->id);
             clear_bit(flags, pe_action_runnable);
         }
     }
@@ -498,7 +504,7 @@ group_merge_weights(resource_t * rsc, const char *rhs, GHashTable * nodes, const
 
         nodes = native_merge_weights(constraint->rsc_lh, rsc->id, nodes,
                                      constraint->node_attribute,
-                                     (float) constraint->score / INFINITY, flags);
+                                     (float)constraint->score / INFINITY, flags);
     }
 
     clear_bit(rsc->flags, pe_rsc_merging);

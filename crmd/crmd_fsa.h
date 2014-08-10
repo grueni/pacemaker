@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -25,20 +25,12 @@
 #  include <crm/common/xml.h>
 #  include <crm/common/mainloop.h>
 #  include <crm/cluster.h>
-#  include <crm/common/ipc.h>
+#  include <crm/cluster/election.h>
+#  include <crm/common/ipcs.h>
 
 #  if SUPPORT_HEARTBEAT
 extern ll_cluster_t *fsa_cluster_conn;
 #  endif
-
-typedef struct crmd_client_s {
-    char *sub_sys;
-    char *uuid;
-    char *table_key;
-    char *user;
-    qb_ipcs_connection_t *ipc;
-} crmd_client_t;
-
 
 /* copy from struct client_child in heartbeat.h
  *
@@ -50,10 +42,10 @@ struct crm_subsystem_s {
     const char *path;           /* Command location */
     const char *command;        /* Command with path */
     const char *args;           /* Command arguments */
-    crmd_client_t *client;      /* Client connection object */
+    crm_client_t *client;       /* Client connection object */
 
     gboolean sent_kill;
-    mainloop_io_t *source;     /* How can we communicate with it */
+    mainloop_io_t *source;      /* How can we communicate with it */
     long long flag_connected;   /*  */
     long long flag_required;    /*  */
 };
@@ -63,7 +55,7 @@ struct fsa_timer_s {
     guint source_id;            /* timer source id */
     int period_ms;              /* timer period */
     enum crmd_fsa_input fsa_input;
-    gboolean(*callback) (gpointer data);
+     gboolean(*callback) (gpointer data);
     gboolean repeat;
     int counter;
 };
@@ -94,7 +86,6 @@ extern volatile enum crmd_fsa_state fsa_state;
 extern volatile long long fsa_input_register;
 extern volatile long long fsa_actions;
 
-extern lrmd_t *fsa_lrm_conn;
 extern cib_t *fsa_cib_conn;
 
 extern char *fsa_our_uname;
@@ -104,6 +95,9 @@ extern char *fsa_our_dc;
 extern char *fsa_our_dc_version;
 extern GListPtr fsa_message_queue;
 
+extern char *fsa_cluster_name;
+
+extern election_t *fsa_election;   /*  */
 extern fsa_timer_t *election_trigger;   /*  */
 extern fsa_timer_t *election_timeout;   /*  */
 extern fsa_timer_t *shutdown_escalation_timer;  /*  */
@@ -120,15 +114,8 @@ extern struct crm_subsystem_s *cib_subsystem;
 extern struct crm_subsystem_s *te_subsystem;
 extern struct crm_subsystem_s *pe_subsystem;
 
-extern GHashTable *welcomed_nodes;
-extern GHashTable *integrated_nodes;
-extern GHashTable *finalized_nodes;
-extern GHashTable *confirmed_nodes;
-extern GHashTable *crmd_peer_state;
-
 /* these two should be moved elsewhere... */
 extern void do_update_cib_nodes(gboolean overwrite, const char *caller);
-extern gboolean do_dc_heartbeat(gpointer data);
 
 #  define AM_I_DC is_set(fsa_input_register, R_THE_DC)
 #  define AM_I_OPERATIONAL (is_set(fsa_input_register, R_STARTING)==FALSE)
@@ -138,7 +125,7 @@ extern gboolean ever_had_quorum;
 #  include <fsa_proto.h>
 #  include <crmd_utils.h>
 
-#define trigger_fsa(source) crm_trace("Triggering FSA: %s", __FUNCTION__); \
+#  define trigger_fsa(source) crm_trace("Triggering FSA: %s", __FUNCTION__); \
 	mainloop_set_trigger(source);
 
 #endif

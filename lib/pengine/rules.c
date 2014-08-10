@@ -152,7 +152,7 @@ find_expression_type(xmlNode * expr)
     } else if (safe_str_neq(tag, "expression")) {
         return not_expr;
 
-    } else if (safe_str_eq(attr, "#uname") || safe_str_eq(attr, "#id")) {
+    } else if (safe_str_eq(attr, "#uname") || safe_str_eq(attr, "#kind") || safe_str_eq(attr, "#id")) {
         return loc_expr;
 
     } else if (safe_str_eq(attr, "#role")) {
@@ -411,7 +411,6 @@ decodeNVpair(const char *srcstring, char separator, char **name, char **value)
     return FALSE;
 }
 
-
 #define cron_check(xml_field, time_field)				\
     value = crm_element_value(cron_spec, xml_field);			\
     if(value != NULL) {							\
@@ -455,7 +454,7 @@ cron_range_satisfied(crm_time_t * now, xmlNode * cron_spec)
     CRM_CHECK(now != NULL, return FALSE);
 
     crm_time_get_timeofday(now, &h, &m, &s);
-    
+
     cron_check("seconds", s);
     cron_check("minutes", m);
     cron_check("hours", h);
@@ -608,7 +607,7 @@ sort_pairs(gconstpointer a, gconstpointer b)
 }
 
 static void
-populate_hash(xmlNode * nvpair_list, GHashTable * hash, gboolean overwrite)
+populate_hash(xmlNode * nvpair_list, GHashTable * hash, gboolean overwrite, xmlNode * top)
 {
     const char *name = NULL;
     const char *value = NULL;
@@ -623,10 +622,18 @@ populate_hash(xmlNode * nvpair_list, GHashTable * hash, gboolean overwrite)
 
     for (an_attr = __xml_first_child(list); an_attr != NULL; an_attr = __xml_next(an_attr)) {
         if (crm_str_eq((const char *)an_attr->name, XML_CIB_TAG_NVPAIR, TRUE)) {
+            xmlNode *ref_nvpair = expand_idref(an_attr, top);
+
             name = crm_element_value(an_attr, XML_NVPAIR_ATTR_NAME);
+            if (name == NULL) {
+                name = crm_element_value(ref_nvpair, XML_NVPAIR_ATTR_NAME);
+            }
 
             crm_trace("Setting attribute: %s", name);
             value = crm_element_value(an_attr, XML_NVPAIR_ATTR_VALUE);
+            if (value == NULL) {
+                value = crm_element_value(ref_nvpair, XML_NVPAIR_ATTR_VALUE);
+            }
 
             if (name == NULL || value == NULL) {
                 continue;
@@ -658,6 +665,7 @@ struct unpack_data_s {
     GHashTable *node_hash;
     GHashTable *hash;
     crm_time_t *now;
+    xmlNode *top;
 };
 
 static void
@@ -671,7 +679,7 @@ unpack_attr_set(gpointer data, gpointer user_data)
     }
 
     crm_trace("Adding attributes from %s", pair->name);
-    populate_hash(pair->attr_set, unpack_data->hash, unpack_data->overwrite);
+    populate_hash(pair->attr_set, unpack_data->hash, unpack_data->overwrite, unpack_data->top);
 }
 
 void
@@ -718,6 +726,7 @@ unpack_instance_attributes(xmlNode * top, xmlNode * xml_obj, const char *set_nam
         data.node_hash = node_hash;
         data.now = now;
         data.overwrite = overwrite;
+        data.top = top;
     }
 
     sorted = g_list_sort(unsorted, sort_pairs);

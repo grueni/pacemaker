@@ -23,33 +23,33 @@ Online: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
      ip-booth	(ocf::heartbeat:IPaddr2):	Started lustre02-left
      boothd	(ocf::pacemaker:booth-site):	Started lustre02-left
  Master/Slave Set: ms-drbd-mgs [drbd-mgs]
-     Stopped: [ drbd-mgs:0 drbd-mgs:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-mdt0000 [drbd-testfs-mdt0000]
-     Stopped: [ drbd-testfs-mdt0000:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-mdt0000-left [drbd-testfs-mdt0000-left]
-     Stopped: [ drbd-testfs-mdt0000-left:0 drbd-testfs-mdt0000-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0000 [drbd-testfs-ost0000]
-     Stopped: [ drbd-testfs-ost0000:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0000-left [drbd-testfs-ost0000-left]
-     Stopped: [ drbd-testfs-ost0000-left:0 drbd-testfs-ost0000-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0001 [drbd-testfs-ost0001]
-     Stopped: [ drbd-testfs-ost0001:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0001-left [drbd-testfs-ost0001-left]
-     Stopped: [ drbd-testfs-ost0001-left:0 drbd-testfs-ost0001-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0002 [drbd-testfs-ost0002]
-     Stopped: [ drbd-testfs-ost0002:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0002-left [drbd-testfs-ost0002-left]
-     Stopped: [ drbd-testfs-ost0002-left:0 drbd-testfs-ost0002-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0003 [drbd-testfs-ost0003]
-     Stopped: [ drbd-testfs-ost0003:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0003-left [drbd-testfs-ost0003-left]
-     Stopped: [ drbd-testfs-ost0003-left:0 drbd-testfs-ost0003-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
 
 Transition Summary:
  * Start   drbd-stacked	(lustre02-left)
  * Start   drbd-testfs-local	(lustre03-left)
  * Migrate lustre	(Started lustre03-left -> lustre04-left)
- * Migrate testfs	(Started lustre02-left -> lustre03-left)
+ * Move    testfs	(Started lustre02-left -> lustre03-left)
  * Start   drbd-mgs:0	(lustre01-left)
  * Start   drbd-mgs:1	(lustre02-left)
 
@@ -57,18 +57,16 @@ Executing cluster transition:
  * Resource action: drbd-stacked    start on lustre02-left
  * Resource action: drbd-testfs-local start on lustre03-left
  * Resource action: lustre          migrate_to on lustre03-left
- * Resource action: testfs          migrate_to on lustre02-left
+ * Resource action: testfs          stop on lustre02-left
  * Resource action: testfs          stop on lustre01-left
  * Pseudo action:   ms-drbd-mgs_pre_notify_start_0
  * Resource action: lustre          migrate_from on lustre04-left
  * Resource action: lustre          stop on lustre03-left
- * Resource action: testfs          migrate_from on lustre03-left
- * Resource action: testfs          stop on lustre02-left
+ * Resource action: testfs          start on lustre03-left
  * Pseudo action:   ms-drbd-mgs_confirmed-pre_notify_start_0
  * Pseudo action:   ms-drbd-mgs_start_0
  * Pseudo action:   all_stopped
  * Pseudo action:   lustre_start_0
- * Pseudo action:   testfs_start_0
  * Resource action: drbd-mgs:0      start on lustre01-left
  * Resource action: drbd-mgs:1      start on lustre02-left
  * Pseudo action:   ms-drbd-mgs_running_0
@@ -105,23 +103,23 @@ Online: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-mgs [drbd-mgs]
      Slaves: [ lustre01-left lustre02-left ]
  Master/Slave Set: ms-drbd-testfs-mdt0000 [drbd-testfs-mdt0000]
-     Stopped: [ drbd-testfs-mdt0000:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-mdt0000-left [drbd-testfs-mdt0000-left]
-     Stopped: [ drbd-testfs-mdt0000-left:0 drbd-testfs-mdt0000-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0000 [drbd-testfs-ost0000]
-     Stopped: [ drbd-testfs-ost0000:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0000-left [drbd-testfs-ost0000-left]
-     Stopped: [ drbd-testfs-ost0000-left:0 drbd-testfs-ost0000-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0001 [drbd-testfs-ost0001]
-     Stopped: [ drbd-testfs-ost0001:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0001-left [drbd-testfs-ost0001-left]
-     Stopped: [ drbd-testfs-ost0001-left:0 drbd-testfs-ost0001-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0002 [drbd-testfs-ost0002]
-     Stopped: [ drbd-testfs-ost0002:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0002-left [drbd-testfs-ost0002-left]
-     Stopped: [ drbd-testfs-ost0002-left:0 drbd-testfs-ost0002-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0003 [drbd-testfs-ost0003]
-     Stopped: [ drbd-testfs-ost0003:0 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
  Master/Slave Set: ms-drbd-testfs-ost0003-left [drbd-testfs-ost0003-left]
-     Stopped: [ drbd-testfs-ost0003-left:0 drbd-testfs-ost0003-left:1 ]
+     Stopped: [ lustre01-left lustre02-left lustre03-left lustre04-left ]
 

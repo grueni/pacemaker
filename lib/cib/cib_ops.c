@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -60,6 +60,13 @@ cib_process_query(const char *op, int options, const char *section, xmlNode * re
     if (obj_root == NULL) {
         result = -ENXIO;
 
+    } else if (options & cib_no_children) {
+        const char *tag = TYPE(obj_root);
+        xmlNode *shallow = create_xml_node(*answer, tag);
+
+        copy_in_properties(shallow, obj_root);
+        *answer = shallow;
+
     } else {
         *answer = obj_root;
     }
@@ -81,10 +88,10 @@ cib_process_erase(const char *op, int options, const char *section, xmlNode * re
     crm_trace("Processing \"%s\" event", op);
     *answer = NULL;
     free_xml(*result_cib);
-    *result_cib = createEmptyCib();
+    *result_cib = createEmptyCib(0);
 
     copy_in_properties(*result_cib, existing_cib);
-    cib_update_counter(*result_cib, XML_ATTR_GENERATION, FALSE);
+    cib_update_counter(*result_cib, XML_ATTR_GENERATION_ADMIN, FALSE);
 
     return result;
 }
@@ -97,18 +104,26 @@ cib_process_upgrade(const char *op, int options, const char *section, xmlNode * 
     int rc = 0;
     int new_version = 0;
     int current_version = 0;
-
-    const char *value = crm_element_value(existing_cib, XML_ATTR_VALIDATION);;
+    int max_version = 0;
+    const char *max = crm_element_value(req, F_CIB_SCHEMA_MAX);
+    const char *value = crm_element_value(existing_cib, XML_ATTR_VALIDATION);
 
     *answer = NULL;
-    crm_trace("Processing \"%s\" event", op);
+    crm_trace("Processing \"%s\" event with max=%s", op, max);
 
     if (value != NULL) {
         current_version = get_schema_version(value);
     }
 
-    rc = update_validation(result_cib, &new_version, TRUE, TRUE);
+    if (max) {
+        max_version = get_schema_version(max);
+    }
+
+    rc = update_validation(result_cib, &new_version, max_version, TRUE, TRUE);
     if (new_version > current_version) {
+        cib_update_counter(*result_cib, XML_ATTR_GENERATION_ADMIN, FALSE);
+        cib_update_counter(*result_cib, XML_ATTR_GENERATION, TRUE);
+        cib_update_counter(*result_cib, XML_ATTR_NUMUPDATES, TRUE);
         return pcmk_ok;
     }
 
@@ -200,12 +215,15 @@ cib_process_replace(const char *op, int options, const char *section, xmlNode * 
         const char *peer = crm_element_value(req, F_ORIG);
         const char *digest = crm_element_value(req, XML_ATTR_DIGEST);
 
-        if(digest) {
+        if (digest) {
             const char *version = crm_element_value(req, XML_ATTR_CRM_VERSION);
-            char *digest_verify = calculate_xml_versioned_digest(input, FALSE, TRUE, version?version:CRM_FEATURE_SET);
+            char *digest_verify = calculate_xml_versioned_digest(input, FALSE, TRUE,
+                                                                 version ? version :
+                                                                 CRM_FEATURE_SET);
 
-            if(safe_str_neq(digest_verify, digest)) {
-                crm_err("Digest mis-match on replace from %s: %s vs. %s (expected)", peer, digest_verify, digest);
+            if (safe_str_neq(digest_verify, digest)) {
+                crm_err("Digest mis-match on replace from %s: %s vs. %s (expected)", peer,
+                        digest_verify, digest);
                 reason = "digest mismatch";
 
             } else {
@@ -237,7 +255,7 @@ cib_process_replace(const char *op, int options, const char *section, xmlNode * 
         }
 
         if (reason != NULL) {
-            crm_warn("Replacement %d.%d.%d from %s not applied to %d.%d.%d:"
+            crm_info("Replacement %d.%d.%d from %s not applied to %d.%d.%d:"
                      " current %s is greater than the replacement",
                      replace_admin_epoch, replace_epoch,
                      replace_updates, peer, admin_epoch, epoch, updates, reason);
@@ -285,8 +303,16 @@ cib_process_delete(const char *op, int options, const char *section, xmlNode * r
     }
 
     obj_root = get_object_root(section, *result_cib);
-    if (replace_xml_child(NULL, obj_root, input, TRUE) == FALSE) {
-        crm_trace("No matching object to delete");
+    if(safe_str_eq(crm_element_name(input), section)) {
+        xmlNode *child = NULL;
+        for(child = __xml_first_child(input); child; child = __xml_next(child)) {
+            if (replace_xml_child(NULL, obj_root, child, TRUE) == FALSE) {
+                crm_trace("No matching object to delete: %s=%s", child->name, ID(child));
+            }
+        }
+
+    } else if (replace_xml_child(NULL, obj_root, input, TRUE) == FALSE) {
+            crm_trace("No matching object to delete: %s=%s", input->name, ID(input));
     }
 
     return pcmk_ok;
@@ -336,6 +362,23 @@ cib_process_modify(const char *op, int options, const char *section, xmlNode * r
         }
     }
 
+    if(options & cib_mixed_update) {
+        int max = 0, lpc;
+        xmlXPathObjectPtr xpathObj = xpath_search(*result_cib, "//@__delete__");
+
+        if (xpathObj) {
+            max = numXpathResults(xpathObj);
+            crm_log_xml_trace(*result_cib, "Mixed result");
+        }
+
+        for (lpc = 0; lpc < max; lpc++) {
+            xmlNode *match = getXpathResult(xpathObj, lpc);
+            crm_debug("Destroying %s", (char *)xmlGetNodePath(match));
+            free_xml(match);
+        }
+
+        freeXpathObject(xpathObj);
+    }
     return pcmk_ok;
 }
 
@@ -544,242 +587,43 @@ int
 cib_process_diff(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,
                  xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)
 {
-    unsigned int log_level = LOG_DEBUG;
-    const char *reason = NULL;
-    gboolean apply_diff = TRUE;
-    int result = pcmk_ok;
+    const char *originator = NULL;
 
-    int this_updates = 0;
-    int this_epoch = 0;
-    int this_admin_epoch = 0;
-
-    int diff_add_updates = 0;
-    int diff_add_epoch = 0;
-    int diff_add_admin_epoch = 0;
-
-    int diff_del_updates = 0;
-    int diff_del_epoch = 0;
-    int diff_del_admin_epoch = 0;
-
-    const char *originator = crm_element_value(req, F_ORIG);
-    crm_trace("Processing \"%s\" event", op);
-
-    cib_diff_version_details(input,
-                             &diff_add_admin_epoch, &diff_add_epoch, &diff_add_updates,
-                             &diff_del_admin_epoch, &diff_del_epoch, &diff_del_updates);
-
-    crm_element_value_int(existing_cib, XML_ATTR_GENERATION, &this_epoch);
-    crm_element_value_int(existing_cib, XML_ATTR_NUMUPDATES, &this_updates);
-    crm_element_value_int(existing_cib, XML_ATTR_GENERATION_ADMIN, &this_admin_epoch);
-
-    if (this_epoch < 0) {
-        this_epoch = 0;
-    }
-    if (this_updates < 0) {
-        this_updates = 0;
-    }
-    if (this_admin_epoch < 0) {
-        this_admin_epoch = 0;
+    if (req != NULL) {
+        originator = crm_element_value(req, F_ORIG);
     }
 
-    if (diff_del_admin_epoch == diff_add_admin_epoch
-        && diff_del_epoch == diff_add_epoch && diff_del_updates == diff_add_updates) {
-        if (options & cib_force_diff) {
-            apply_diff = FALSE;
-            log_level = LOG_ERR;
-            reason = "+ and - versions in the diff did not change in global update";
-            crm_log_xml_warn(input, "Bad global update");
+    crm_trace("Processing \"%s\" event from %s %s",
+              op, originator, is_set(options, cib_force_diff)?"(global update)":"");
 
-        } else if (diff_add_admin_epoch == -1 && diff_add_epoch == -1 && diff_add_updates == -1) {
-            diff_add_epoch = this_epoch;
-            diff_add_updates = this_updates + 1;
-            diff_add_admin_epoch = this_admin_epoch;
-            diff_del_epoch = this_epoch;
-            diff_del_updates = this_updates;
-            diff_del_admin_epoch = this_admin_epoch;
-
-        } else {
-            apply_diff = FALSE;
-            log_level = LOG_ERR;
-            reason = "+ and - versions in the diff did not change";
-            log_cib_diff(LOG_ERR, input, __FUNCTION__);
-        }
-    }
-
-    if (apply_diff && diff_del_admin_epoch > this_admin_epoch) {
-        result = -pcmk_err_diff_resync;
-        apply_diff = FALSE;
-        log_level = LOG_INFO;
-        reason = "current \"" XML_ATTR_GENERATION_ADMIN "\" is less than required";
-
-    } else if (apply_diff && diff_del_admin_epoch < this_admin_epoch) {
-        apply_diff = FALSE;
-        log_level = LOG_WARNING;
-        reason = "current \"" XML_ATTR_GENERATION_ADMIN "\" is greater than required";
-
-    } else if (apply_diff && diff_del_epoch > this_epoch) {
-        result = -pcmk_err_diff_resync;
-        apply_diff = FALSE;
-        log_level = LOG_INFO;
-        reason = "current \"" XML_ATTR_GENERATION "\" is less than required";
-
-    } else if (apply_diff && diff_del_epoch < this_epoch) {
-        apply_diff = FALSE;
-        log_level = LOG_WARNING;
-        reason = "current \"" XML_ATTR_GENERATION "\" is greater than required";
-
-    } else if (apply_diff && diff_del_updates > this_updates) {
-        result = -pcmk_err_diff_resync;
-        apply_diff = FALSE;
-        log_level = LOG_INFO;
-        reason = "current \"" XML_ATTR_NUMUPDATES "\" is less than required";
-
-    } else if (apply_diff && diff_del_updates < this_updates) {
-        apply_diff = FALSE;
-        log_level = LOG_WARNING;
-        reason = "current \"" XML_ATTR_NUMUPDATES "\" is greater than required";
-    }
-
-    if (apply_diff) {
-        free_xml(*result_cib);
-        *result_cib = NULL;
-        if (apply_xml_diff(existing_cib, input, result_cib) == FALSE) {
-            log_level = LOG_NOTICE;
-            reason = "Failed application of an update diff";
-
-            if (options & cib_force_diff) {
-                result = -pcmk_err_diff_resync;
-            }
-        }
-    }
-
-    if (reason != NULL) {
-        do_crm_log(log_level,
-                   "Diff %d.%d.%d -> %d.%d.%d from %s not applied to %d.%d.%d: %s",
-                   diff_del_admin_epoch, diff_del_epoch, diff_del_updates,
-                   diff_add_admin_epoch, diff_add_epoch, diff_add_updates,
-                   originator?originator:"local", this_admin_epoch, this_epoch, this_updates, reason);
-
-        crm_log_xml_trace(input, "Discarded diff");
-        if (result == pcmk_ok) {
-            result = -pcmk_err_diff_failed;
-        }
-
-    } else if (apply_diff) {
-        crm_trace("Diff %d.%d.%d -> %d.%d.%d from %s was applied to %d.%d.%d",
-                  diff_del_admin_epoch, diff_del_epoch, diff_del_updates,
-                  diff_add_admin_epoch, diff_add_epoch, diff_add_updates,
-                  originator?originator:"local", this_admin_epoch, this_epoch, this_updates);
-
-    }
-    return result;
-}
-
-gboolean
-apply_cib_diff(xmlNode * old, xmlNode * diff, xmlNode ** new)
-{
-    gboolean result = TRUE;
-    const char *value = NULL;
-
-    int this_updates = 0;
-    int this_epoch = 0;
-    int this_admin_epoch = 0;
-
-    int diff_add_updates = 0;
-    int diff_add_epoch = 0;
-    int diff_add_admin_epoch = 0;
-
-    int diff_del_updates = 0;
-    int diff_del_epoch = 0;
-    int diff_del_admin_epoch = 0;
-
-    CRM_CHECK(diff != NULL, return FALSE);
-    CRM_CHECK(old != NULL, return FALSE);
-
-    value = crm_element_value(old, XML_ATTR_GENERATION_ADMIN);
-    this_admin_epoch = crm_parse_int(value, "0");
-    crm_trace("%s=%d (%s)", XML_ATTR_GENERATION_ADMIN, this_admin_epoch, value);
-
-    value = crm_element_value(old, XML_ATTR_GENERATION);
-    this_epoch = crm_parse_int(value, "0");
-    crm_trace("%s=%d (%s)", XML_ATTR_GENERATION, this_epoch, value);
-
-    value = crm_element_value(old, XML_ATTR_NUMUPDATES);
-    this_updates = crm_parse_int(value, "0");
-    crm_trace("%s=%d (%s)", XML_ATTR_NUMUPDATES, this_updates, value);
-
-    cib_diff_version_details(diff,
-                             &diff_add_admin_epoch, &diff_add_epoch, &diff_add_updates,
-                             &diff_del_admin_epoch, &diff_del_epoch, &diff_del_updates);
-
-    value = NULL;
-    if (result && diff_del_admin_epoch != this_admin_epoch) {
-        value = XML_ATTR_GENERATION_ADMIN;
-        result = FALSE;
-        crm_trace("%s=%d", value, diff_del_admin_epoch);
-
-    } else if (result && diff_del_epoch != this_epoch) {
-        value = XML_ATTR_GENERATION;
-        result = FALSE;
-        crm_trace("%s=%d", value, diff_del_epoch);
-
-    } else if (result && diff_del_updates != this_updates) {
-        value = XML_ATTR_NUMUPDATES;
-        result = FALSE;
-        crm_trace("%s=%d", value, diff_del_updates);
-    }
-
-    if (result) {
-        xmlNode *tmp = NULL;
-        xmlNode *diff_copy = copy_xml(diff);
-
-        tmp = find_xml_node(diff_copy, "diff-removed", TRUE);
-        if (tmp != NULL) {
-            xml_remove_prop(tmp, XML_ATTR_GENERATION_ADMIN);
-            xml_remove_prop(tmp, XML_ATTR_GENERATION);
-            xml_remove_prop(tmp, XML_ATTR_NUMUPDATES);
-        }
-
-        tmp = find_xml_node(diff_copy, "diff-added", TRUE);
-        if (tmp != NULL) {
-            xml_remove_prop(tmp, XML_ATTR_GENERATION_ADMIN);
-            xml_remove_prop(tmp, XML_ATTR_GENERATION);
-            xml_remove_prop(tmp, XML_ATTR_NUMUPDATES);
-        }
-
-        result = apply_xml_diff(old, diff_copy, new);
-        free_xml(diff_copy);
-
-    } else {
-        crm_err("target and diff %s values didnt match", value);
-    }
-
-    return result;
+    free_xml(*result_cib);
+    *result_cib = copy_xml(existing_cib);
+    return xml_apply_patchset(*result_cib, input, TRUE);
 }
 
 gboolean
 cib_config_changed(xmlNode * last, xmlNode * next, xmlNode ** diff)
 {
+    int lpc = 0, max = 0;
     gboolean config_changes = FALSE;
     xmlXPathObject *xpathObj = NULL;
 
     CRM_ASSERT(diff != NULL);
 
-    if (last != NULL && next != NULL) {
+    if (*diff == NULL && last != NULL && next != NULL) {
         *diff = diff_xml_object(last, next, FALSE);
     }
+
     if (*diff == NULL) {
         goto done;
     }
 
     xpathObj = xpath_search(*diff, "//" XML_CIB_TAG_CONFIGURATION);
-    if (xpathObj && xpathObj->nodesetval->nodeNr > 0) {
+    if (numXpathResults(xpathObj) > 0) {
         config_changes = TRUE;
         goto done;
-
-    } else if (xpathObj) {
-        xmlXPathFreeObject(xpathObj);
     }
+    freeXpathObject(xpathObj);
 
     /*
      * Do not check XML_TAG_DIFF_ADDED "//" XML_TAG_CIB
@@ -787,63 +631,41 @@ cib_config_changed(xmlNode * last, xmlNode * next, xmlNode ** diff)
      * every time if the checked value existed
      */
     xpathObj = xpath_search(*diff, "//" XML_TAG_DIFF_REMOVED "//" XML_TAG_CIB);
-    if (xpathObj) {
-        int lpc = 0, max = xpathObj->nodesetval->nodeNr;
+    max = numXpathResults(xpathObj);
 
-        for (lpc = 0; lpc < max; lpc++) {
-            xmlNode *top = getXpathResult(xpathObj, lpc);
+    for (lpc = 0; lpc < max; lpc++) {
+        xmlNode *top = getXpathResult(xpathObj, lpc);
 
-            if (crm_element_value(top, XML_ATTR_GENERATION) != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
-            if (crm_element_value(top, XML_ATTR_GENERATION_ADMIN) != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
+        if (crm_element_value(top, XML_ATTR_GENERATION) != NULL) {
+            config_changes = TRUE;
+            goto done;
+        }
+        if (crm_element_value(top, XML_ATTR_GENERATION_ADMIN) != NULL) {
+            config_changes = TRUE;
+            goto done;
+        }
 
-            if (crm_element_value(top, XML_ATTR_VALIDATION) != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
-            if (crm_element_value(top, XML_ATTR_CRM_VERSION) != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
-            if (crm_element_value(top, "remote-clear-port") != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
-            if (crm_element_value(top, "remote-tls-port") != NULL) {
-                config_changes = TRUE;
-                goto done;
-            }
+        if (crm_element_value(top, XML_ATTR_VALIDATION) != NULL) {
+            config_changes = TRUE;
+            goto done;
+        }
+        if (crm_element_value(top, XML_ATTR_CRM_VERSION) != NULL) {
+            config_changes = TRUE;
+            goto done;
+        }
+        if (crm_element_value(top, "remote-clear-port") != NULL) {
+            config_changes = TRUE;
+            goto done;
+        }
+        if (crm_element_value(top, "remote-tls-port") != NULL) {
+            config_changes = TRUE;
+            goto done;
         }
     }
 
   done:
-    if (xpathObj) {
-        xmlXPathFreeObject(xpathObj);
-    }
+    freeXpathObject(xpathObj);
     return config_changes;
-}
-
-xmlNode *
-diff_cib_object(xmlNode * old_cib, xmlNode * new_cib, gboolean suppress)
-{
-    char *digest = NULL;
-    xmlNode *diff = NULL;
-    const char *version = crm_element_value(new_cib, XML_ATTR_CRM_VERSION);
-    gboolean changed = cib_config_changed(old_cib, new_cib, &diff);
-
-    fix_cib_diff(old_cib, new_cib, diff, changed);
-
-    digest = calculate_xml_versioned_digest(new_cib, FALSE, TRUE, version);
-    crm_xml_add(diff, XML_ATTR_DIGEST, digest);
-
-    free(digest);
-
-    return diff;
 }
 
 int
@@ -865,9 +687,7 @@ cib_process_xpath(const char *op, int options, const char *section, xmlNode * re
         xpathObj = xpath_search(*result_cib, section);
     }
 
-    if (xpathObj != NULL && xpathObj->nodesetval != NULL) {
-        max = xpathObj->nodesetval->nodeNr;
-    }
+    max = numXpathResults(xpathObj);
 
     if (max < 1 && safe_str_eq(op, CIB_OP_DELETE)) {
         crm_debug("%s was already removed", section);
@@ -923,6 +743,47 @@ cib_process_xpath(const char *op, int options, const char *section, xmlNode * re
                     *answer = shallow;
                 }
 
+            } else if (options & cib_xpath_address) {
+
+                int path_len = 0;
+                char *path = NULL;
+                xmlNode *parent = match;
+
+                while (parent && parent->type == XML_ELEMENT_NODE) {
+                    int extra = 1;
+                    char *new_path = NULL;
+                    const char *id = crm_element_value(parent, XML_ATTR_ID);
+
+                    extra += strlen((const char *)parent->name);
+                    if (id) {
+                        extra += 8;     /* [@id=""] */
+                        extra += strlen(id);
+                    }
+
+                    path_len += extra;
+                    new_path = malloc(path_len + 1);
+                    if(new_path == NULL) {
+                        break;
+
+                    } else if (id) {
+                        snprintf(new_path, path_len + 1, "/%s[@id='%s']%s", parent->name, id,
+                                 path ? path : "");
+                    } else {
+                        snprintf(new_path, path_len + 1, "/%s%s", parent->name, path ? path : "");
+                    }
+                    free(path);
+                    path = new_path;
+                    parent = parent->parent;
+                }
+                crm_trace("Got: %s\n", path);
+
+                if (*answer == NULL) {
+                    *answer = create_xml_node(NULL, "xpath-query");
+                }
+                parent = create_xml_node(*answer, "xpath-query-path");
+                crm_xml_add(parent, XML_ATTR_ID, path);
+                free(path);
+
             } else if (*answer) {
                 add_node_copy(*answer, match);
 
@@ -944,10 +805,7 @@ cib_process_xpath(const char *op, int options, const char *section, xmlNode * re
         }
     }
 
-    if (xpathObj) {
-        xmlXPathFreeObject(xpathObj);
-    }
-
+    freeXpathObject(xpathObj);
     return rc;
 }
 

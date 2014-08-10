@@ -189,13 +189,6 @@ cib_client_erase(cib_t * cib, xmlNode ** output_data, int call_options)
     return cib_internal_op(cib, CIB_OP_ERASE, NULL, NULL, NULL, output_data, call_options, NULL);
 }
 
-static int
-cib_client_quit(cib_t * cib, int call_options)
-{
-    op_common(cib);
-    return cib_internal_op(cib, CRM_OP_QUIT, NULL, NULL, NULL, NULL, call_options, NULL);
-}
-
 static void
 cib_destroy_op_callback(gpointer data)
 {
@@ -295,7 +288,7 @@ cib_new(void)
 {
     const char *value = getenv("CIB_shadow");
 
-    if (value) {
+    if (value && value[0] != 0) {
         return cib_shadow_new(value);
     }
 
@@ -357,7 +350,7 @@ cib_new_variant(void)
     new_cib->call_id = 1;
     new_cib->variant = cib_undefined;
 
-    new_cib->type = cib_none;
+    new_cib->type = cib_no_connection;
     new_cib->state = cib_disconnected;
 
     new_cib->op_callback = NULL;
@@ -394,7 +387,6 @@ cib_new_variant(void)
     new_cib->cmds->replace = cib_client_replace;
     new_cib->cmds->delete = cib_client_delete;
     new_cib->cmds->erase = cib_client_erase;
-    new_cib->cmds->quit = cib_client_quit;
 
     new_cib->cmds->delete_absolute = cib_client_delete_absolute;
 
@@ -404,7 +396,10 @@ cib_new_variant(void)
 void
 cib_delete(cib_t * cib)
 {
-    GList *list = cib->notify_list;
+    GList *list = NULL;
+    if(cib) {
+        list = cib->notify_list;
+    }
 
     while (list != NULL) {
         cib_notify_client_t *client = g_list_nth_data(list, 0);
@@ -413,10 +408,14 @@ cib_delete(cib_t * cib)
         free(client);
     }
 
-    g_hash_table_destroy(cib_op_callback_table);
-    cib_op_callback_table = NULL;
-    cib->cmds->free(cib);
-    cib = NULL;
+    if(cib_op_callback_table) {
+        g_hash_table_destroy(cib_op_callback_table);
+        cib_op_callback_table = NULL;
+    }
+
+    if(cib) {
+        cib->cmds->free(cib);
+    }
 }
 
 int

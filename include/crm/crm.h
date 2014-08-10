@@ -1,22 +1,28 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef CRM__H
 #  define CRM__H
+
+/**
+ * \file
+ * \brief A dumping ground
+ * \ingroup core
+ */
 
 #  include <crm_config.h>
 #  include <stdlib.h>
@@ -29,9 +35,7 @@
 
 #  include <libxml/tree.h>
 
-#  define CRM_FEATURE_SET		"3.0.6"
-#  define MINIMUM_SCHEMA_VERSION	"pacemaker-1.0"
-#  define LATEST_SCHEMA_VERSION         "pacemaker-"CRM_DTD_VERSION
+#  define CRM_FEATURE_SET		"3.0.9"
 
 #  define EOS		'\0'
 #  define DIMOF(a)	((int) (sizeof(a)/sizeof(a[0])) )
@@ -50,7 +54,7 @@
 
 #  define CRM_META			"CRM_meta"
 
-extern const char *crm_system_name;
+extern char *crm_system_name;
 
 /* *INDENT-OFF* */
 
@@ -59,6 +63,8 @@ extern const char *crm_system_name;
 #  define APPNAME_LEN	256
 #  define MAX_IPC_FAIL	5
 #  define MAX_IPC_DELAY   120
+
+#  define DAEMON_RESPAWN_STOP 100
 
 #  define MSG_LOG			1
 #  define DOT_FSA_ACTIONS		1
@@ -94,6 +100,7 @@ extern const char *crm_system_name;
 #  define CRM_OP_DIE		"die_no_respawn"
 #  define CRM_OP_RETRIVE_CIB	"retrieve_cib"
 #  define CRM_OP_PING		"ping"
+#  define CRM_OP_THROTTLE	"throttle"
 #  define CRM_OP_VOTE		"vote"
 #  define CRM_OP_NOVOTE		"no-vote"
 #  define CRM_OP_HELLO		"hello"
@@ -113,14 +120,16 @@ extern const char *crm_system_name;
 #  define CRM_OP_TETIMEOUT	"te_timeout"
 #  define CRM_OP_TRANSITION	"transition"
 #  define CRM_OP_REGISTER		"register"
+#  define CRM_OP_IPC_FWD		"ipc_fwd"
 #  define CRM_OP_DEBUG_UP		"debug_inc"
 #  define CRM_OP_DEBUG_DOWN	"debug_dec"
 #  define CRM_OP_INVOKE_LRM	"lrm_invoke"
-#  define CRM_OP_LRM_REFRESH	"lrm_refresh"
+#  define CRM_OP_LRM_REFRESH	"lrm_refresh" /* Deprecated */
 #  define CRM_OP_LRM_QUERY	"lrm_query"
 #  define CRM_OP_LRM_DELETE	"lrm_delete"
 #  define CRM_OP_LRM_FAIL		"lrm_fail"
 #  define CRM_OP_PROBED		"probe_complete"
+#  define CRM_OP_NODES_PROBED	"probe_nodes_complete"
 #  define CRM_OP_REPROBE		"probe_again"
 #  define CRM_OP_CLEAR_FAILCOUNT  "clear_failcount"
 #  define CRM_OP_RELAXED_SET  "one-or-more"
@@ -185,6 +194,7 @@ typedef GList *GListPtr;
 
 #  define crm_str_hash g_str_hash_traditional
 
+guint crm_strcase_hash(gconstpointer v);
 guint g_str_hash_traditional(gconstpointer v);
 
 #endif

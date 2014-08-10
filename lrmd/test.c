@@ -35,6 +35,7 @@ static struct crm_option long_options[] = {
     {"help",             0, 0, '?'},
     {"verbose",          0, 0, 'V', "\t\tPrint out logs and events to screen"},
     {"quiet",            0, 0, 'Q', "\t\tSuppress all output to screen"},
+    {"tls",              0, 0, 'S', "\t\tUse tls backend for local connection"},
     {"listen",           1, 0, 'l', "\tListen for a specific event string"},
     {"api-call",         1, 0, 'c', "\tDirectly relates to lrmd api functions"},
     {"no-wait",          0, 0, 'w', "\tMake api call and do not wait for result."},
@@ -63,6 +64,8 @@ cib_t *cib_conn = NULL;
 static int exec_call_id = 0;
 static int exec_call_opts = 0;
 extern void cleanup_alloc_calculations(pe_working_set_t * data_set);
+static gboolean start_test(gpointer user_data);
+static void try_connect(void);
 
 static struct {
     int verbose;
@@ -94,7 +97,7 @@ static void
 test_exit(int rc)
 {
     lrmd_api_delete(lrmd_conn);
-    exit(rc);
+    crm_exit(rc);
 }
 
 #define print_result(result) \
@@ -107,7 +110,7 @@ test_exit(int rc)
              lrmd_event_type2str(event->type),                          \
              event->rsc_id,                                             \
              event->op_type ? event->op_type : "none",                  \
-             lrmd_event_rc2str(event->rc),                              \
+             services_ocf_exitcode_str(event->rc),                              \
              services_lrm_status_str(event->op_status));                \
     crm_info("%s", event_buf_v0);;
 
@@ -154,20 +157,39 @@ timeout_err(gpointer data)
 }
 
 static void
+connection_events(lrmd_event_data_t * event)
+{
+    int rc = event->connection_rc;
+
+    if (event->type != lrmd_event_connect) {
+        /* ignore */
+        return;
+    }
+
+    if (!rc) {
+        crm_info("lrmd client connection established");
+        start_test(NULL);
+        return;
+    } else {
+        sleep(1);
+        try_connect();
+        crm_notice("lrmd client connection failed");
+    }
+}
+
+static void
 try_connect(void)
 {
     int tries = 10;
-    int i = 0;
+    static int num_tries = 0;
     int rc = 0;
 
-    for (i = 0; i < tries; i++) {
-        rc = lrmd_conn->cmds->connect(lrmd_conn, "lrmd", NULL);
+    lrmd_conn->cmds->set_callback(lrmd_conn, connection_events);
+    for (; num_tries < tries; num_tries++) {
+        rc = lrmd_conn->cmds->connect_async(lrmd_conn, "lrmd", 3000);
 
         if (!rc) {
-            crm_info("lrmd client connection established");
-            return;
-        } else {
-            crm_info("lrmd client connection failed");
+            return;             /* we'll hear back in async callback */
         }
         sleep(1);
     }
@@ -182,7 +204,11 @@ start_test(gpointer user_data)
     int rc = 0;
 
     if (!options.no_connect) {
-        try_connect();
+        if (!lrmd_conn->cmds->is_connected(lrmd_conn)) {
+            try_connect();
+            /* async connect, this funciton will get called back into. */
+            return 0;
+        }
     }
     lrmd_conn->cmds->set_callback(lrmd_conn, read_events);
 
@@ -358,11 +384,14 @@ generate_params(void)
         goto param_gen_bail;
     }
 
-    cib_xml_copy = get_cib_copy(cib_conn);
+    rc = cib_conn->cmds->query(cib_conn, NULL, &cib_xml_copy, cib_scope_local | cib_sync_call);
+    if (rc != pcmk_ok) {
+        crm_err("Error retrieving cib copy: %s (%d)", pcmk_strerror(rc), rc);
+        goto param_gen_bail;
 
-    if (!cib_xml_copy) {
-        crm_err("Error retrieving cib copy.");
-        rc = -1;
+    } else if (cib_xml_copy == NULL) {
+        rc = -ENODATA;
+        crm_err("Error retrieving cib copy: %s (%d)", pcmk_strerror(rc), rc);
         goto param_gen_bail;
     }
 
@@ -432,6 +461,7 @@ main(int argc, char **argv)
     int flag;
     char *key = NULL;
     char *val = NULL;
+    gboolean use_tls = FALSE;
     crm_trigger_t *trig;
 
     crm_set_options(NULL, "mode [options]", long_options,
@@ -478,7 +508,9 @@ main(int argc, char **argv)
                 options.rsc_id = optarg;
                 break;
             case 'x':
-                options.cancel_call_id = atoi(optarg);
+                if(optarg) {
+                    options.cancel_call_id = atoi(optarg);
+                }
                 break;
             case 'P':
                 options.provider = optarg;
@@ -490,13 +522,19 @@ main(int argc, char **argv)
                 options.type = optarg;
                 break;
             case 'i':
-                options.interval = atoi(optarg);
+                if(optarg) {
+                    options.interval = atoi(optarg);
+                }
                 break;
             case 't':
-                options.timeout = atoi(optarg);
+                if(optarg) {
+                    options.timeout = atoi(optarg);
+                }
                 break;
             case 's':
-                options.start_delay = atoi(optarg);
+                if(optarg) {
+                    options.start_delay = atoi(optarg);
+                }
                 break;
             case 'k':
                 key = optarg;
@@ -511,6 +549,9 @@ main(int argc, char **argv)
                     options.params = lrmd_key_value_add(options.params, key, val);
                     key = val = NULL;
                 }
+                break;
+            case 'S':
+                use_tls = TRUE;
                 break;
             default:
                 ++argerr;
@@ -562,7 +603,11 @@ main(int argc, char **argv)
         return 0;
     }
 
-    lrmd_conn = lrmd_api_new();
+    if (use_tls) {
+        lrmd_conn = lrmd_remote_api_new(NULL, "localhost", 0);
+    } else {
+        lrmd_conn = lrmd_api_new();
+    }
     trig = mainloop_add_trigger(G_PRIORITY_HIGH, start_test, NULL);
     mainloop_set_trigger(trig);
     mainloop_add_signal(SIGTERM, test_shutdown);

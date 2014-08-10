@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2009 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -38,14 +38,15 @@
 cib_t *global_cib = NULL;
 GListPtr op_fail = NULL;
 gboolean quiet = FALSE;
+gboolean bringing_nodes_online = FALSE;
+gboolean print_pending = FALSE;
+char *temp_shadow = NULL;
 
 #define new_node_template "//"XML_CIB_TAG_NODE"[@uname='%s']"
 #define node_template "//"XML_CIB_TAG_STATE"[@uname='%s']"
 #define rsc_template "//"XML_CIB_TAG_STATE"[@uname='%s']//"XML_LRM_TAG_RESOURCE"[@id='%s']"
 #define op_template  "//"XML_CIB_TAG_STATE"[@uname='%s']//"XML_LRM_TAG_RESOURCE"[@id='%s']/"XML_LRM_TAG_RSC_OP"[@id='%s']"
 /* #define op_template  "//"XML_CIB_TAG_STATE"[@uname='%s']//"XML_LRM_TAG_RESOURCE"[@id='%s']/"XML_LRM_TAG_RSC_OP"[@id='%s' and @"XML_LRM_ATTR_CALLID"='%d']" */
-
-#define FAKE_TE_ID	"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 #define quiet_log(fmt, args...) do {		\
 	if(quiet == FALSE) {			\
@@ -85,7 +86,7 @@ find_resource(xmlNode * cib_node, const char *resource)
 }
 
 static void
-create_node_entry(cib_t * cib_conn, char *node)
+create_node_entry(cib_t * cib_conn, const char *node)
 {
     int rc = pcmk_ok;
     int max = strlen(new_node_template) + strlen(node) + 1;
@@ -114,7 +115,7 @@ create_node_entry(cib_t * cib_conn, char *node)
 }
 
 static xmlNode *
-inject_node_state(cib_t * cib_conn, char *node)
+inject_node_state(cib_t * cib_conn, const char *node, const char *uuid)
 {
     int rc = pcmk_ok;
     int max = strlen(rsc_template) + strlen(node) + 1;
@@ -123,33 +124,40 @@ inject_node_state(cib_t * cib_conn, char *node)
 
     xpath = calloc(1, max);
 
-    create_node_entry(cib_conn, node);
+    if (bringing_nodes_online) {
+        create_node_entry(cib_conn, node);
+    }
 
     snprintf(xpath, max, node_template, node);
     rc = cib_conn->cmds->query(cib_conn, xpath, &cib_object,
                                cib_xpath | cib_sync_call | cib_scope_local);
 
-    if(cib_object && ID(cib_object) == NULL) {
+    if (cib_object && ID(cib_object) == NULL) {
         crm_err("Detected multiple node_state entries for xpath=%s, bailing", xpath);
         crm_log_xml_warn(cib_object, "Duplicates");
-        exit(1);
+        crm_exit(ENOTUNIQ);
     }
 
     if (rc == -ENXIO) {
-        char *uuid = NULL;
+        char *found_uuid = NULL;
 
-        query_node_uuid(cib_conn, node, &uuid);
+        if (uuid == NULL) {
+            query_node_uuid(cib_conn, node, &found_uuid, NULL);
+        } else {
+            found_uuid = strdup(uuid);
+        }
 
         cib_object = create_xml_node(NULL, XML_CIB_TAG_STATE);
-        crm_xml_add(cib_object, XML_ATTR_UUID, uuid);
+        crm_xml_add(cib_object, XML_ATTR_UUID, found_uuid);
         crm_xml_add(cib_object, XML_ATTR_UNAME, node);
         cib_conn->cmds->create(cib_conn, XML_CIB_TAG_STATUS, cib_object,
                                cib_sync_call | cib_scope_local);
         free_xml(cib_object);
-        free(uuid);
+        free(found_uuid);
 
         rc = cib_conn->cmds->query(cib_conn, xpath, &cib_object,
                                    cib_xpath | cib_sync_call | cib_scope_local);
+        crm_trace("injecting node state for %s. rc is %d", node, rc);
     }
 
     free(xpath);
@@ -160,7 +168,7 @@ inject_node_state(cib_t * cib_conn, char *node)
 static xmlNode *
 modify_node(cib_t * cib_conn, char *node, gboolean up)
 {
-    xmlNode *cib_node = inject_node_state(cib_conn, node);
+    xmlNode *cib_node = inject_node_state(cib_conn, node, NULL);
 
     if (up) {
         crm_xml_add(cib_node, XML_NODE_IN_CLUSTER, XML_BOOLEAN_YES);
@@ -235,6 +243,9 @@ inject_resource(xmlNode * cib_node, const char *resource, const char *rclass, co
     } else if (safe_str_neq(rclass, "ocf")
                && safe_str_neq(rclass, "stonith")
                && safe_str_neq(rclass, "heartbeat")
+               && safe_str_neq(rclass, "service")
+               && safe_str_neq(rclass, "upstart")
+               && safe_str_neq(rclass, "systemd")
                && safe_str_neq(rclass, "lsb")) {
         fprintf(stderr, "Invalid class for %s: %s\n", resource, rclass);
         return NULL;
@@ -286,6 +297,8 @@ create_op(xmlNode * cib_resource, const char *task, int interval, int outcome)
     op->rc = outcome;
     op->op_status = 0;
     op->params = NULL;          /* TODO: Fill me in */
+    op->t_run = time(NULL);
+    op->t_rcchange = op->t_run;
 
     op->call_id = 0;
     for (xop = __xml_first_child(cib_resource); xop != NULL; xop = __xml_next(xop)) {
@@ -337,9 +350,10 @@ exec_pseudo_action(crm_graph_t * graph, crm_action_t * action)
 {
     const char *node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
     const char *task = crm_element_value(action->xml, XML_LRM_ATTR_TASK_KEY);
+
     action->confirmed = TRUE;
 
-    quiet_log(" * Pseudo action:   %s%s%s\n", task, node?" on ":"", node?node:"");
+    quiet_log(" * Pseudo action:   %s%s%s\n", task, node ? " on " : "", node ? node : "");
     update_graph(graph, action);
     return TRUE;
 }
@@ -353,11 +367,13 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
     GListPtr gIter = NULL;
     lrmd_event_data_t *op = NULL;
     int target_outcome = 0;
+    gboolean uname_is_uuid = FALSE;
 
     const char *rtype = NULL;
     const char *rclass = NULL;
     const char *resource = NULL;
     const char *rprovider = NULL;
+    const char *operation = crm_element_value(action->xml, "operation");
     const char *target_rc_s = crm_meta_value(action->params, XML_ATTR_TE_TARGET_RC);
 
     xmlNode *cib_node = NULL;
@@ -365,15 +381,18 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
     xmlNode *action_rsc = first_named_child(action->xml, XML_CIB_TAG_RESOURCE);
 
     char *node = crm_element_value_copy(action->xml, XML_LRM_ATTR_TARGET);
+    char *uuid = crm_element_value_copy(action->xml, XML_LRM_ATTR_TARGET_UUID);
+    const char *router_node = crm_element_value(action->xml, XML_LRM_ATTR_ROUTER_NODE);
 
-    if (safe_str_eq(crm_element_value(action->xml, "operation"), "probe_complete")) {
-        crm_info("Skipping %s op for %s\n", crm_element_value(action->xml, "operation"), node);
+    if (safe_str_eq(operation, CRM_OP_PROBED)
+        || safe_str_eq(operation, CRM_OP_REPROBE)) {
+        crm_info("Skipping %s op for %s\n", operation, node);
         goto done;
     }
 
     if (action_rsc == NULL) {
         crm_log_xml_err(action->xml, "Bad");
-        free(node);
+        free(node); free(uuid);
         return FALSE;
     }
 
@@ -382,11 +401,17 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
      * If not found use the preferred name anyway
      */
     resource = crm_element_value(action_rsc, XML_ATTR_ID);
-    if(pe_find_resource(resource_list, resource) == NULL) {
+    if (pe_find_resource(resource_list, resource) == NULL) {
         const char *longname = crm_element_value(action_rsc, XML_ATTR_ID_LONG);
-        if(pe_find_resource(resource_list, longname)) {
+
+        if (pe_find_resource(resource_list, longname)) {
             resource = longname;
         }
+    }
+
+    if (safe_str_eq(operation, "delete")) {
+        quiet_log(" * Resource action: %-15s delete on %s\n", resource, node);
+        goto done;
     }
 
     rclass = crm_element_value(action_rsc, XML_AGENT_ATTR_CLASS);
@@ -400,15 +425,20 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
     CRM_ASSERT(global_cib->cmds->query(global_cib, NULL, NULL, cib_sync_call | cib_scope_local) ==
                pcmk_ok);
 
-    cib_node = inject_node_state(global_cib, node);
+    if (router_node) {
+        uname_is_uuid = TRUE;
+    }
+
+    cib_node = inject_node_state(global_cib, node, uname_is_uuid ? node : uuid);
     CRM_ASSERT(cib_node != NULL);
 
     cib_resource = inject_resource(cib_node, resource, rclass, rtype, rprovider);
     CRM_ASSERT(cib_resource != NULL);
 
     op = convert_graph_action(cib_resource, action, 0, target_outcome);
-    if(op->interval) {
-        quiet_log(" * Resource action: %-15s %s=%d on %s\n", resource, op->op_type, op->interval, node);
+    if (op->interval) {
+        quiet_log(" * Resource action: %-15s %s=%d on %s\n", resource, op->op_type, op->interval,
+                  node);
     } else {
         quiet_log(" * Resource action: %-15s %s on %s\n", resource, op->op_type, node);
     }
@@ -421,7 +451,7 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
         snprintf(key, strlen(spec), "%s_%s_%d@%s=", resource, op->op_type, op->interval, node);
 
         if (strncasecmp(key, spec, strlen(key)) == 0) {
-            rc = sscanf(spec, "%*[^=]=%d", (int *) &op->rc);
+            sscanf(spec, "%*[^=]=%d", (int *)&op->rc);
 
             action->failed = TRUE;
             graph->abort_priority = INFINITY;
@@ -441,7 +471,7 @@ exec_rsc_action(crm_graph_t * graph, crm_action_t * action)
     CRM_ASSERT(rc == pcmk_ok);
 
   done:
-    free(node);
+    free(node); free(uuid);
     free_xml(cib_node);
     action->confirmed = TRUE;
     update_graph(graph, action);
@@ -453,9 +483,15 @@ exec_crmd_action(crm_graph_t * graph, crm_action_t * action)
 {
     const char *node = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
     const char *task = crm_element_value(action->xml, XML_LRM_ATTR_TASK);
+    xmlNode *rsc = first_named_child(action->xml, XML_CIB_TAG_RESOURCE);
+
     action->confirmed = TRUE;
 
-    quiet_log(" * Cluster action:  %s on %s\n", task, node);
+    if(rsc) {
+        quiet_log(" * Cluster action:  %s for %s on %s\n", task, ID(rsc), node);
+    } else {
+        quiet_log(" * Cluster action:  %s on %s\n", task, node);
+    }
     update_graph(graph, action);
     return TRUE;
 }
@@ -464,46 +500,61 @@ exec_crmd_action(crm_graph_t * graph, crm_action_t * action)
 static gboolean
 exec_stonith_action(crm_graph_t * graph, crm_action_t * action)
 {
-    int rc = 0;
-    char xpath[STATUS_PATH_MAX];
+    const char *op = crm_meta_value(action->params, "stonith_action");
     char *target = crm_element_value_copy(action->xml, XML_LRM_ATTR_TARGET);
-    xmlNode *cib_node = modify_node(global_cib, target, FALSE);
 
-    crm_xml_add(cib_node, XML_ATTR_ORIGIN, __FUNCTION__);
-    CRM_ASSERT(cib_node != NULL);
+    quiet_log(" * Fencing %s (%s)\n", target, op);
+    if(safe_str_neq(op, "on")) {
+        int rc = 0;
+        char xpath[STATUS_PATH_MAX];
+        xmlNode *cib_node = modify_node(global_cib, target, FALSE);
 
-    quiet_log(" * Fencing %s\n", target);
-    rc = global_cib->cmds->replace(global_cib, XML_CIB_TAG_STATUS, cib_node,
+        crm_xml_add(cib_node, XML_ATTR_ORIGIN, __FUNCTION__);
+        CRM_ASSERT(cib_node != NULL);
+
+        rc = global_cib->cmds->replace(global_cib, XML_CIB_TAG_STATUS, cib_node,
                                    cib_sync_call | cib_scope_local);
-    CRM_ASSERT(rc == pcmk_ok);
+        CRM_ASSERT(rc == pcmk_ok);
 
-    snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", target, XML_CIB_TAG_LRM);
-    rc = global_cib->cmds->delete(global_cib, xpath, NULL,
-                                  cib_xpath | cib_sync_call | cib_scope_local);
+        snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", target, XML_CIB_TAG_LRM);
+        global_cib->cmds->delete(global_cib, xpath, NULL,
+                                      cib_xpath | cib_sync_call | cib_scope_local);
 
-    snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", target,
-             XML_TAG_TRANSIENT_NODEATTRS);
-    rc = global_cib->cmds->delete(global_cib, xpath, NULL,
-                                  cib_xpath | cib_sync_call | cib_scope_local);
+        snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", target,
+                 XML_TAG_TRANSIENT_NODEATTRS);
+        global_cib->cmds->delete(global_cib, xpath, NULL,
+                                      cib_xpath | cib_sync_call | cib_scope_local);
+
+        free_xml(cib_node);
+    }
 
     action->confirmed = TRUE;
     update_graph(graph, action);
-    free_xml(cib_node);
     free(target);
     return TRUE;
 }
 
 static void
-print_cluster_status(pe_working_set_t * data_set)
+print_cluster_status(pe_working_set_t * data_set, long options)
 {
     char *online_nodes = NULL;
+    char *online_remote_nodes = NULL;
+    char *online_remote_containers = NULL;
     char *offline_nodes = NULL;
+    char *offline_remote_nodes = NULL;
 
     GListPtr gIter = NULL;
 
     for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
         node_t *node = (node_t *) gIter->data;
         const char *node_mode = NULL;
+        char *node_name = NULL;
+
+        if (is_container_remote_node(node)) {
+            node_name = g_strdup_printf("%s:%s", node->details->uname, node->details->remote_rsc->container->id);
+        } else {
+            node_name = g_strdup_printf("%s", node->details->uname);
+        }
 
         if (node->details->unclean) {
             if (node->details->online && node->details->unclean) {
@@ -529,22 +580,47 @@ print_cluster_status(pe_working_set_t * data_set)
                 node_mode = "OFFLINE (standby)";
             }
 
+        } else if (node->details->maintenance) {
+            if (node->details->online) {
+                node_mode = "maintenance";
+            } else {
+                node_mode = "OFFLINE (maintenance)";
+            }
+
         } else if (node->details->online) {
-            node_mode = "online";
-            online_nodes = add_list_element(online_nodes, node->details->uname);
+            if (is_container_remote_node(node)) {
+                online_remote_containers = add_list_element(online_remote_containers, node_name);
+            } else if (is_baremetal_remote_node(node)) {
+                online_remote_nodes = add_list_element(online_remote_nodes, node_name);
+            } else {
+                online_nodes = add_list_element(online_nodes, node_name);
+            }
+            free(node_name);
             continue;
 
         } else {
-            node_mode = "OFFLINE";
-            offline_nodes = add_list_element(offline_nodes, node->details->uname);
+            if (is_baremetal_remote_node(node)) {
+                offline_remote_nodes = add_list_element(offline_remote_nodes, node_name);
+            } else if (is_container_remote_node(node)) {
+                /* ignore offline container nodes */
+            } else {
+                offline_nodes = add_list_element(offline_nodes, node_name);
+            }
+            free(node_name);
             continue;
         }
 
-        if (safe_str_eq(node->details->uname, node->details->id)) {
-            printf("Node %s: %s\n", node->details->uname, node_mode);
+        if (is_container_remote_node(node)) {
+            printf("ContainerNode %s: %s\n", node_name, node_mode);
+        } else if (is_baremetal_remote_node(node)) {
+            printf("RemoteNode %s: %s\n", node_name, node_mode);
+        } else if (safe_str_eq(node->details->uname, node->details->id)) {
+            printf("Node %s: %s\n", node_name, node_mode);
         } else {
-            printf("Node %s (%s): %s\n", node->details->uname, node->details->id, node_mode);
+            printf("Node %s (%s): %s\n", node_name, node->details->id, node_mode);
         }
+
+        free(node_name);
     }
 
     if (online_nodes) {
@@ -555,6 +631,18 @@ print_cluster_status(pe_working_set_t * data_set)
         printf("OFFLINE: [%s ]\n", offline_nodes);
         free(offline_nodes);
     }
+    if (online_remote_nodes) {
+        printf("RemoteOnline: [%s ]\n", online_remote_nodes);
+        free(online_remote_nodes);
+    }
+    if (offline_remote_nodes) {
+        printf("RemoteOFFLINE: [%s ]\n", offline_remote_nodes);
+        free(offline_remote_nodes);
+    }
+    if (online_remote_containers) {
+        printf("Containers: [%s ]\n", online_remote_containers);
+        free(online_remote_containers);
+    }
 
     fprintf(stdout, "\n");
     for (gIter = data_set->resources; gIter != NULL; gIter = gIter->next) {
@@ -564,7 +652,7 @@ print_cluster_status(pe_working_set_t * data_set)
             && rsc->role == RSC_ROLE_STOPPED) {
             continue;
         }
-        rsc->fns->print(rsc, NULL, pe_print_printf, stdout);
+        rsc->fns->print(rsc, NULL, pe_print_printf | options, stdout);
     }
     fprintf(stdout, "\n");
 }
@@ -616,7 +704,7 @@ run_simulation(pe_working_set_t * data_set)
         data_set->now = get_date();
 
         cluster_status(data_set);
-        print_cluster_status(data_set);
+        print_cluster_status(data_set, 0);
     }
 
     if (graph_rc != transition_complete) {
@@ -635,16 +723,16 @@ create_action_name(action_t * action)
 
     if (action->node) {
         action_host = action->node->details->uname;
-    } else if(is_not_set(action->flags, pe_action_pseudo)) {
+    } else if (is_not_set(action->flags, pe_action_pseudo)) {
         action_host = "<none>";
     }
 
     if (safe_str_eq(action->task, RSC_CANCEL)) {
         prefix = "Cancel ";
-        task = "monitor"; /* TO-DO: Hack! */
+        task = "monitor";       /* TO-DO: Hack! */
     }
 
-    if(action->rsc && action->rsc->clone_name) {
+    if (action->rsc && action->rsc->clone_name) {
         char *key = NULL;
         const char *name = action->rsc->clone_name;
         const char *interval_s = g_hash_table_lookup(action->meta, XML_LRM_ATTR_INTERVAL);
@@ -664,20 +752,27 @@ create_action_name(action_t * action)
             key = generate_op_key(name, task, interval);
         }
 
-        if(action_host) {
-            action_name = g_strdup_printf("%s%s %s", prefix?prefix:"", key, action_host);
+        if (action_host) {
+            action_name = g_strdup_printf("%s%s %s", prefix ? prefix : "", key, action_host);
         } else {
-            action_name = g_strdup_printf("%s%s", prefix?prefix:"", key);
+            action_name = g_strdup_printf("%s%s", prefix ? prefix : "", key);
         }
         free(key);
 
-    } else if(action_host) {
-        action_name = g_strdup_printf("%s%s %s", prefix?prefix:"", action->uuid, action_host);
+    } else if (safe_str_eq(action->task, CRM_OP_FENCE)) {
+        const char *op = g_hash_table_lookup(action->meta, "stonith_action");
+
+        action_name = g_strdup_printf("%s%s '%s' %s", prefix ? prefix : "", action->task, op, action_host);
+
+    } else if (action->rsc && action_host) {
+        action_name = g_strdup_printf("%s%s %s", prefix ? prefix : "", action->uuid, action_host);
+
+    } else if (action_host) {
+        action_name = g_strdup_printf("%s%s %s", prefix ? prefix : "", action->task, action_host);
 
     } else {
         action_name = g_strdup_printf("%s", action->uuid);
     }
-
 
     return action_name;
 }
@@ -701,7 +796,7 @@ create_dotfile(pe_working_set_t * data_set, const char *dot_file, gboolean all_a
         const char *color = "black";
         char *action_name = create_action_name(action);
 
-        crm_trace("Action %d: %p", action->id, action);
+        crm_trace("Action %d: %s %s %p", action->id, action_name, action->uuid, action);
 
         if (is_set(action->flags, pe_action_pseudo)) {
             font = "orange";
@@ -731,6 +826,8 @@ create_dotfile(pe_working_set_t * data_set, const char *dot_file, gboolean all_a
         }
 
         set_bit(action->flags, pe_action_dumped);
+        crm_trace("\"%s\" [ style=%s color=\"%s\" fontcolor=\"%s\"]",
+                action_name, style, color, font);
         fprintf(dot_strm, "\"%s\" [ style=%s color=\"%s\" fontcolor=\"%s\"]\n",
                 action_name, style, color, font);
   dont_write:
@@ -769,6 +866,8 @@ create_dotfile(pe_working_set_t * data_set, const char *dot_file, gboolean all_a
             if (all_actions || optional == FALSE) {
                 before_name = create_action_name(before->action);
                 after_name = create_action_name(action);
+                crm_trace("\"%s\" -> \"%s\" [ style = %s]",
+                        before_name, after_name, style);
                 fprintf(dot_strm, "\"%s\" -> \"%s\" [ style = %s]\n",
                         before_name, after_name, style);
                 free(before_name);
@@ -785,7 +884,7 @@ create_dotfile(pe_working_set_t * data_set, const char *dot_file, gboolean all_a
 }
 
 static int
-find_ticket_state(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_state_xml)
+find_ticket_state(cib_t * the_cib, const char *ticket_id, xmlNode ** ticket_state_xml)
 {
     int offset = 0;
     static int xpath_max = 1024;
@@ -798,14 +897,13 @@ find_ticket_state(cib_t * the_cib, const char * ticket_id, xmlNode ** ticket_sta
     *ticket_state_xml = NULL;
 
     xpath_string = calloc(1, xpath_max);
-    offset +=
-        snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
+    offset += snprintf(xpath_string + offset, xpath_max - offset, "%s", "/cib/status/tickets");
 
     if (ticket_id) {
         offset += snprintf(xpath_string + offset, xpath_max - offset, "/%s[@id=\"%s\"]",
-                       XML_CIB_TAG_TICKET_STATE, ticket_id);
+                           XML_CIB_TAG_TICKET_STATE, ticket_id);
     }
-
+    CRM_LOG_ASSERT(offset > 0);
     rc = the_cib->cmds->query(the_cib, xpath_string, &xml_search,
                               cib_sync_call | cib_scope_local | cib_xpath);
 
@@ -900,9 +998,11 @@ modify_configuration(pe_working_set_t * data_set,
         rc = global_cib->cmds->modify(global_cib, XML_CIB_TAG_STATUS, cib_node,
                                       cib_sync_call | cib_scope_local);
         CRM_ASSERT(rc == pcmk_ok);
+        free_xml(cib_node);
     }
 
     for (gIter = node_down; gIter != NULL; gIter = gIter->next) {
+        char xpath[STATUS_PATH_MAX];
         char *node = (char *)gIter->data;
 
         quiet_log(" + Taking node %s offline\n", node);
@@ -912,6 +1012,17 @@ modify_configuration(pe_working_set_t * data_set,
         rc = global_cib->cmds->modify(global_cib, XML_CIB_TAG_STATUS, cib_node,
                                       cib_sync_call | cib_scope_local);
         CRM_ASSERT(rc == pcmk_ok);
+        free_xml(cib_node);
+
+        snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", node, XML_CIB_TAG_LRM);
+        global_cib->cmds->delete(global_cib, xpath, NULL,
+                                      cib_xpath | cib_sync_call | cib_scope_local);
+
+        snprintf(xpath, STATUS_PATH_MAX, "//node_state[@uname='%s']/%s", node,
+                 XML_TAG_TRANSIENT_NODEATTRS);
+        global_cib->cmds->delete(global_cib, xpath, NULL,
+                                      cib_xpath | cib_sync_call | cib_scope_local);
+
     }
 
     for (gIter = node_fail; gIter != NULL; gIter = gIter->next) {
@@ -925,6 +1036,7 @@ modify_configuration(pe_working_set_t * data_set,
         rc = global_cib->cmds->modify(global_cib, XML_CIB_TAG_STATUS, cib_node,
                                       cib_sync_call | cib_scope_local);
         CRM_ASSERT(rc == pcmk_ok);
+        free_xml(cib_node);
     }
 
     for (gIter = ticket_grant; gIter != NULL; gIter = gIter->next) {
@@ -932,7 +1044,7 @@ modify_configuration(pe_working_set_t * data_set,
 
         quiet_log(" + Granting ticket %s\n", ticket_id);
         rc = set_ticket_state_attr(ticket_id, "granted", "true",
-                                  global_cib, cib_sync_call | cib_scope_local);
+                                   global_cib, cib_sync_call | cib_scope_local);
 
         CRM_ASSERT(rc == pcmk_ok);
     }
@@ -942,7 +1054,7 @@ modify_configuration(pe_working_set_t * data_set,
 
         quiet_log(" + Revoking ticket %s\n", ticket_id);
         rc = set_ticket_state_attr(ticket_id, "granted", "false",
-                                  global_cib, cib_sync_call | cib_scope_local);
+                                   global_cib, cib_sync_call | cib_scope_local);
 
         CRM_ASSERT(rc == pcmk_ok);
     }
@@ -952,7 +1064,7 @@ modify_configuration(pe_working_set_t * data_set,
 
         quiet_log(" + Making ticket %s standby\n", ticket_id);
         rc = set_ticket_state_attr(ticket_id, "standby", "true",
-                                  global_cib, cib_sync_call | cib_scope_local);
+                                   global_cib, cib_sync_call | cib_scope_local);
 
         CRM_ASSERT(rc == pcmk_ok);
     }
@@ -962,7 +1074,7 @@ modify_configuration(pe_working_set_t * data_set,
 
         quiet_log(" + Activating ticket %s\n", ticket_id);
         rc = set_ticket_state_attr(ticket_id, "standby", "false",
-                                  global_cib, cib_sync_call | cib_scope_local);
+                                   global_cib, cib_sync_call | cib_scope_local);
 
         CRM_ASSERT(rc == pcmk_ok);
     }
@@ -1004,7 +1116,7 @@ modify_configuration(pe_working_set_t * data_set,
             rtype = crm_element_value(rsc->xml, XML_ATTR_TYPE);
             rprovider = crm_element_value(rsc->xml, XML_AGENT_ATTR_PROVIDER);
 
-            cib_node = inject_node_state(global_cib, node);
+            cib_node = inject_node_state(global_cib, node, NULL);
             CRM_ASSERT(cib_node != NULL);
 
             update_failcounts(cib_node, resource, interval, outcome);
@@ -1043,16 +1155,20 @@ setup_input(const char *input, const char *output)
         rc = cib_conn->cmds->signon(cib_conn, crm_system_name, cib_command);
 
         if (rc == pcmk_ok) {
-            cib_object = get_cib_copy(cib_conn);
+            rc = cib_conn->cmds->query(cib_conn, NULL, &cib_object, cib_scope_local | cib_sync_call);
         }
 
         cib_conn->cmds->signoff(cib_conn);
         cib_delete(cib_conn);
         cib_conn = NULL;
 
-        if (cib_object == NULL) {
+        if (rc != pcmk_ok) {
+            fprintf(stderr, "Live CIB query failed: %s (%d)\n", pcmk_strerror(rc), rc);
+            crm_exit(rc);
+
+        } else if (cib_object == NULL) {
             fprintf(stderr, "Live CIB query failed: empty result\n");
-            exit(3);
+            crm_exit(ENOTCONN);
         }
 
     } else if (safe_str_eq(input, "-")) {
@@ -1068,18 +1184,19 @@ setup_input(const char *input, const char *output)
 
     if (cli_config_update(&cib_object, NULL, FALSE) == FALSE) {
         free_xml(cib_object);
-        exit(-ENOKEY);
+        crm_exit(ENOKEY);
     }
 
     if (validate_xml(cib_object, NULL, FALSE) != TRUE) {
         free_xml(cib_object);
-        exit(-pcmk_err_dtd_validation);
+        crm_exit(pcmk_err_schema_validation);
     }
 
     if (output == NULL) {
         char *pid = crm_itoa(getpid());
 
         local_output = get_shadow_file(pid);
+        temp_shadow = strdup(local_output);
         output = local_output;
         free(pid);
     }
@@ -1090,7 +1207,7 @@ setup_input(const char *input, const char *output)
 
     if (rc < 0) {
         fprintf(stderr, "Could not create '%s': %s\n", output, strerror(errno));
-        exit(rc);
+        crm_exit(rc);
     }
     setenv("CIB_file", output, 1);
     free(local_output);
@@ -1112,13 +1229,20 @@ static struct crm_option long_options[] = {
     {"show-scores",   0, 0, 's', "Show allocation scores"},
     {"show-utilization",   0, 0, 'U', "Show utilization information"},
     {"profile",       1, 0, 'P', "Run all tests in the named directory to create profiling data"},
+    {"pending",       0, 0, 'j', "\tDisplay pending state if 'record-pending' is enabled"},
 
     {"-spacer-",     0, 0, '-', "\nSynthetic Cluster Events:"},
     {"node-up",      1, 0, 'u', "\tBring a node online"},
     {"node-down",    1, 0, 'd', "\tTake a node offline"},
     {"node-fail",    1, 0, 'f', "\tMark a node as failed"},
-    {"op-inject",    1, 0, 'i', "\t$rsc_$task_$interval@$node=$rc - Inject the specified task before running the simulation"},
-    {"op-fail",      1, 0, 'F', "\t$rsc_$task_$interval@$node=$rc - Fail the specified task while running the simulation"},
+    {"op-inject",    1, 0, 'i', "\tGenerate a failure for the cluster to react to in the simulation"},
+    {"-spacer-",     0, 0, '-', "\t\tValue is of the form ${resource}_${task}_${interval}@${node}=${rc}."},
+    {"-spacer-",     0, 0, '-', "\t\tEg. memcached_monitor_20000@bart.example.com=7"},
+    {"-spacer-",     0, 0, '-', "\t\tFor more information on OCF return codes, refer to: http://www.clusterlabs.org/doc/en-US/Pacemaker/1.1/html/Pacemaker_Explained/s-ocf-return-codes.html"},
+    {"op-fail",      1, 0, 'F', "\tIf the specified task occurs during the simulation, have it fail with return code ${rc}"},
+    {"-spacer-",     0, 0, '-', "\t\tValue is of the form ${resource}_${task}_${interval}@${node}=${rc}."},
+    {"-spacer-",     0, 0, '-', "\t\tEg. memcached_stop_0@bart.example.com=1\n"},
+    {"-spacer-",     0, 0, '-', "\t\tThe transition will normally stop at the failed action.  Save the result with --save-output and re-run with --xml-file"},
     {"set-datetime", 1, 0, 't', "Set date/time"},
     {"quorum",       1, 0, 'q', "\tSpecify a value for quorum"},
     {"ticket-grant",     1, 0, 'g', "Grant a ticket"},
@@ -1127,18 +1251,24 @@ static struct crm_option long_options[] = {
     {"ticket-activate",  1, 0, 'e', "Activate a ticket"},
 
     {"-spacer-",     0, 0, '-', "\nOutput Options:"},
-    
+
     {"save-input",   1, 0, 'I', "\tSave the input configuration to the named file"},
     {"save-output",  1, 0, 'O', "Save the output configuration to the named file"},
     {"save-graph",   1, 0, 'G', "\tSave the transition graph (XML format) to the named file"},
     {"save-dotfile", 1, 0, 'D', "Save the transition graph (DOT format) to the named file"},
     {"all-actions",  0, 0, 'a', "\tDisplay all possible actions in the DOT graph - even ones not part of the transition"},
-    
+
     {"-spacer-",    0, 0, '-', "\nData Source:"},
     {"live-check",  0, 0, 'L', "\tConnect to the CIB and use the current contents as input"},
     {"xml-file",    1, 0, 'x', "\tRetrieve XML from the named file"},
     {"xml-pipe",    0, 0, 'p', "\tRetrieve XML from stdin"},
-    
+
+    {"-spacer-",    0, 0, '-', "\nExamples:\n"},
+    {"-spacer-",    0, 0, '-', "Pretend a recurring monitor action found memcached stopped on node fred.example.com and, during recovery, that the memcached stop action failed", pcmk_option_paragraph},
+    {"-spacer-",    0, 0, '-', " crm_simulate -LS --op-inject memcached:0_monitor_20000@bart.example.com=7 --op-fail memcached:0_stop_0@fred.example.com=1 --save-output /tmp/memcached-test.xml", pcmk_option_example},
+    {"-spacer-",    0, 0, '-', "Now see what the reaction to the stop failure would be", pcmk_option_paragraph},
+    {"-spacer-",    0, 0, '-', " crm_simulate -S --xml-file /tmp/memcached-test.xml", pcmk_option_example},
+
     {0, 0, 0, 0}
 };
 /* *INDENT-ON* */
@@ -1187,27 +1317,27 @@ profile_all(const char *dir)
     int file_num = scandir(dir, &namelist, 0, alphasort);
 
     if (file_num > 0) {
-	struct stat prop;
-	char buffer[FILENAME_MAX + 1];
+        struct stat prop;
+        char buffer[FILENAME_MAX + 1];
 
-	while (file_num--) {
-	    if ('.' == namelist[file_num]->d_name[0]) {
-		free(namelist[file_num]);
-		continue;
+        while (file_num--) {
+            if ('.' == namelist[file_num]->d_name[0]) {
+                free(namelist[file_num]);
+                continue;
 
-	    } else if (strstr(namelist[file_num]->d_name, ".xml") == NULL) {
-		free(namelist[file_num]);
-		continue;
-	    }
+            } else if (strstr(namelist[file_num]->d_name, ".xml") == NULL) {
+                free(namelist[file_num]);
+                continue;
+            }
 
-	    lpc++;
-	    snprintf(buffer, FILENAME_MAX, "%s/%s", dir, namelist[file_num]->d_name);
-	    if (stat(buffer, &prop) == 0 && S_ISREG(prop.st_mode)) {
-		profile_one(buffer);
-	    }
-	    free(namelist[file_num]);
-	}
-	free(namelist);
+            lpc++;
+            snprintf(buffer, FILENAME_MAX, "%s/%s", dir, namelist[file_num]->d_name);
+            if (stat(buffer, &prop) == 0 && S_ISREG(prop.st_mode)) {
+                profile_one(buffer);
+            }
+            free(namelist[file_num]);
+        }
+        free(namelist);
     }
 
     return lpc;
@@ -1265,13 +1395,13 @@ main(int argc, char **argv)
 
         switch (flag) {
             case 'V':
-                if(have_stdout == FALSE) {
+                if (have_stdout == FALSE) {
                     /* Redirect stderr to stdout so we can grep the output */
                     have_stdout = TRUE;
                     close(STDERR_FILENO);
                     dup2(STDOUT_FILENO, STDERR_FILENO);
                 }
-                
+
                 crm_bump_log_level(argc, argv);
                 break;
             case '?':
@@ -1292,6 +1422,7 @@ main(int argc, char **argv)
                 break;
             case 'u':
                 modified++;
+                bringing_nodes_online = TRUE;
                 node_up = g_list_append(node_up, optarg);
                 break;
             case 'd':
@@ -1345,6 +1476,9 @@ main(int argc, char **argv)
                 process = TRUE;
                 show_utilization = TRUE;
                 break;
+            case 'j':
+                print_pending = TRUE;
+                break;
             case 'S':
                 process = TRUE;
                 simulate = TRUE;
@@ -1388,8 +1522,8 @@ main(int argc, char **argv)
         crm_help('?', EX_USAGE);
     }
 
-    if(test_dir != NULL) {
-	return profile_all(test_dir);
+    if (test_dir != NULL) {
+        return profile_all(test_dir);
     }
 
     setup_input(xml_file, store ? xml_file : output_file);
@@ -1401,7 +1535,8 @@ main(int argc, char **argv)
 
     if (data_set.now != NULL) {
         quiet_log(" + Setting effective cluster time: %s", use_date);
-        crm_time_log(LOG_WARNING, "Set fake 'now' to", data_set.now, crm_time_log_date | crm_time_log_timeofday);
+        crm_time_log(LOG_WARNING, "Set fake 'now' to", data_set.now,
+                     crm_time_log_date | crm_time_log_timeofday);
     }
 
     rc = global_cib->cmds->query(global_cib, NULL, &input, cib_sync_call | cib_scope_local);
@@ -1412,8 +1547,10 @@ main(int argc, char **argv)
     cluster_status(&data_set);
 
     if (quiet == FALSE) {
+        int options = print_pending ? pe_print_pending : 0;
+
         quiet_log("\nCurrent cluster status:\n");
-        print_cluster_status(&data_set);
+        print_cluster_status(&data_set, options);
     }
 
     if (modified) {
@@ -1456,20 +1593,7 @@ main(int argc, char **argv)
         input = NULL;           /* Don't try and free it twice */
 
         if (graph_file != NULL) {
-            char *msg_buffer = dump_xml_formatted(data_set.graph);
-            FILE *graph_strm = fopen(graph_file, "w");
-
-            if (graph_strm == NULL) {
-                crm_perror(LOG_ERR, "Could not open %s for writing", graph_file);
-
-            } else {
-                if (fprintf(graph_strm, "%s\n\n", msg_buffer) < 0) {
-                    crm_perror(LOG_ERR, "Write to %s failed", graph_file);
-                }
-                fflush(graph_strm);
-                fclose(graph_strm);
-            }
-            free(msg_buffer);
+            write_xml_file(data_set.graph, graph_file, FALSE);
         }
 
         if (dot_file != NULL) {
@@ -1501,8 +1625,11 @@ main(int argc, char **argv)
     global_cib->cmds->signoff(global_cib);
     cib_delete(global_cib);
     free(use_date);
-    crm_xml_cleanup();
     fflush(stderr);
-    qb_log_fini();
-    return rc;
+
+    if (temp_shadow) {
+        unlink(temp_shadow);
+        free(temp_shadow);
+    }
+    return crm_exit(rc);
 }

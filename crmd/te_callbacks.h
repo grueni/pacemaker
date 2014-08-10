@@ -24,9 +24,6 @@ extern void cib_fencing_updated(xmlNode * msg, int call_id, int rc,
 extern void cib_action_updated(xmlNode * msg, int call_id, int rc,
                                xmlNode * output, void *user_data);
 
-extern void cib_failcount_updated(xmlNode * msg, int call_id, int rc,
-                                  xmlNode * output, void *user_data);
-
 extern gboolean global_timer_callback(gpointer data);
 extern gboolean action_timer_callback(gpointer data);
 
@@ -34,6 +31,6 @@ extern gboolean te_graph_trigger(gpointer user_data);
 
 extern void te_update_diff(const char *event, xmlNode * msg);
 
-extern void tengine_stonith_callback(stonith_t * stonith, stonith_callback_data_t *data);
+extern void tengine_stonith_callback(stonith_t * stonith, stonith_callback_data_t * data);
 
 #endif

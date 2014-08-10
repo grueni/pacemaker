@@ -1,16 +1,16 @@
 /*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -47,10 +47,11 @@ log_ais_message(int level, const AIS_Message * msg)
     qb_log_from_external_source(__func__, __FILE__,
                                 "Msg[%d] (dest=%s:%s, from=%s:%s.%d, remote=%s, size=%d): %.90s",
                                 level, __LINE__, 0,
-               msg->id, ais_dest(&(msg->host)), msg_type2text(msg->host.type),
-               ais_dest(&(msg->sender)), msg_type2text(msg->sender.type),
-               msg->sender.pid,
-               msg->sender.uname == local_uname ? "false" : "true", ais_data_len(msg), data);
+                                msg->id, ais_dest(&(msg->host)), msg_type2text(msg->host.type),
+                                ais_dest(&(msg->sender)), msg_type2text(msg->sender.type),
+                                msg->sender.pid,
+                                msg->sender.uname == local_uname ? "false" : "true",
+                                ais_data_len(msg), data);
 /*     do_ais_log(level, */
 /* 	       "Msg[%d] (dest=%s:%s, from=%s:%s.%d, remote=%s, size=%d): %.90s", */
 /* 	       msg->id, ais_dest(&(msg->host)), msg_type2text(msg->host.type), */
@@ -62,7 +63,7 @@ log_ais_message(int level, const AIS_Message * msg)
 }
 
 /*
-static gboolean ghash_find_by_uname(gpointer key, gpointer value, gpointer user_data) 
+static gboolean ghash_find_by_uname(gpointer key, gpointer value, gpointer user_data)
 {
     crm_node_t *node = value;
     int id = GPOINTER_TO_INT(user_data);
@@ -95,39 +96,39 @@ static char *opts_default[] = { NULL, NULL };
 static char *opts_vgrind[] = { NULL, NULL, NULL, NULL, NULL };
 
 static void
-pcmk_setscheduler(crm_child_t *child)
+pcmk_setscheduler(crm_child_t * child)
 {
-#if defined(HAVE_SCHED_GETPARAM) && defined(HAVE_SCHED_SETPARAM) && defined(HAVE_SCHED_GET_PRIORITY_MIN) 
+#if defined(HAVE_SCHED_SETSCHEDULER)
     int policy = sched_getscheduler(0);
+
     if (policy == -1) {
-        ais_perror("Could not get the scheduler policy for %s", child->name);
+        ais_perror("Could not get scheduling policy for %s", child->name);
 
-    } else if (policy == SCHED_RR) {
-        struct sched_param param;
-        if (sched_getparam(0, &param) == -1) {
-            ais_perror("Could not get the scheduling parameters for %s", child->name);
+    } else {
+        int priority = -10;
 
-        } else {
-            int min_priority = sched_get_priority_min(SCHED_RR);
-            if (min_priority == -1) {
-                ais_perror("Could not get the minimum scheduler priority of SCHED_RR policy for %s",
-                           child->name);
+        if (policy != SCHED_OTHER) {
+            struct sched_param sp;
 
-            } else if (param.sched_priority > min_priority){
-                param.sched_priority = min_priority;
-                if (sched_setparam(0, &param)== -1) {
-                    ais_perror("Could not set SCHED_RR to priority %d for %s",
-                               param.sched_priority, child->name);
+            policy = SCHED_OTHER;
+#  if defined(SCHED_RESET_ON_FORK)
+            policy |= SCHED_RESET_ON_FORK;
+#  endif
+            memset(&sp, 0, sizeof(sp));
+            sp.sched_priority = 0;
 
-                } else {
-                    ais_debug("Set SCHED_RR to priority %d for %s",
-                              param.sched_priority, child->name);
-                }
+            if (sched_setscheduler(0, policy, &sp) == -1) {
+                ais_perror("Could not reset scheduling policy to SCHED_OTHER for %s", child->name);
+                return;
             }
+        }
+
+        if (setpriority(PRIO_PROCESS, 0, priority) == -1) {
+            ais_perror("Could not reset process priority to %d for %s", priority, child->name);
         }
     }
 #else
-    ais_info("The Platform is missing process priority setting features. Leaving at default.");
+    ais_info("The platform is missing process priority setting features. Leaving at default.");
 #endif
 }
 
@@ -136,6 +137,7 @@ spawn_child(crm_child_t * child)
 {
     int lpc = 0;
     uid_t uid = 0;
+    gid_t gid = 0;
     struct rlimit oflimits;
     gboolean use_valgrind = FALSE;
     gboolean use_callgrind = FALSE;
@@ -170,10 +172,11 @@ spawn_child(crm_child_t * child)
     }
 
     if (child->uid) {
-        if (pcmk_user_lookup(child->uid, &uid, NULL) < 0) {
+        if (pcmk_user_lookup(child->uid, &uid, &gid) < 0) {
             ais_err("Invalid uid (%s) specified for %s", child->uid, child->name);
             return FALSE;
         }
+        ais_info("Using uid=%u and group=%u for process %s", uid, gid, child->name);
     }
 
     child->pid = fork();
@@ -202,22 +205,8 @@ spawn_child(crm_child_t * child)
         }
         opts_default[0] = ais_strdup(child->command);;
 
-#if 0
-        /* Dont set the group for now - it prevents connection to the cluster */
-        if (gid && setgid(gid) < 0) {
-            ais_perror("Could not set group to %d", gid);
-        }
-#endif
-
-        if (uid) {
-            struct passwd *pwent = getpwuid(uid);
-
-            if(pwent == NULL) {
-                ais_perror("Cannot get password entry of uid: %d", uid);
-
-            } else if (initgroups(pwent->pw_name, pwent->pw_gid) < 0) {
-                ais_perror("Cannot initalize groups for %s (uid=%d)", pwent->pw_name, uid);
-            }
+        if (uid && initgroups(child->uid, gid) < 0) {
+            ais_perror("Cannot initalize groups for %s", child->uid);
         }
 
         if (uid && setuid(uid) < 0) {
@@ -245,7 +234,7 @@ spawn_child(crm_child_t * child)
 /* *INDENT-ON* */
 
         if (pcmk_env.logfile) {
-            setenv("HA_debugfile", pcmk_env.logfile, 1);
+            setenv("HA_logfile", pcmk_env.logfile, 1);
         }
 
         if (use_valgrind) {

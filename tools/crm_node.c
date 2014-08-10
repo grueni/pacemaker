@@ -71,7 +71,8 @@ static struct crm_option long_options[] = {
     {"list",          0, 0, 'l', "\tDisplay all known members (past and present) of this cluster (Not available for heartbeat clusters)"},
     {"partition",     0, 0, 'p', "Display the members of this partition"},
     {"cluster-id",    0, 0, 'i', "Display this node's cluster id"},
-    {"remove",        1, 0, 'R', "(Advanced, AIS-Only) Remove the (stopped) node with the specified nodeid from the cluster"},
+    {"remove",        1, 0, 'R', "(Advanced) Remove the (stopped) node with the specified name from Pacemaker's configuration and caches"},
+    {"-spacer-",      1, 0, '-', "In the case of Heartbeat, CMAN and Corosync 2.0, requires that the node has already been removed from the underlying cluster"},
 
     {"-spacer-", 1, 0, '-', "\nAdditional Options:"},
     {"force",	 0, 0, 'f'},
@@ -79,6 +80,120 @@ static struct crm_option long_options[] = {
     {0, 0, 0, 0}
 };
 /* *INDENT-ON* */
+
+static int
+cib_remove_node(uint32_t id, const char *name)
+{
+    int rc;
+    cib_t *cib = NULL;
+    xmlNode *node = NULL;
+    xmlNode *node_state = NULL;
+
+    crm_trace("Removing %s from the CIB", name);
+
+    /* TODO: Use 'id' instead */
+    if(name == NULL) {
+        return -ENOTUNIQ;
+    }
+
+    node = create_xml_node(NULL, XML_CIB_TAG_NODE);
+    node_state = create_xml_node(NULL, XML_CIB_TAG_STATE);
+
+    crm_xml_add(node, XML_ATTR_UNAME, name);
+    crm_xml_add(node_state, XML_ATTR_UNAME, name);
+
+    cib = cib_new();
+    cib->cmds->signon(cib, crm_system_name, cib_command);
+
+    rc = cib->cmds->delete(cib, XML_CIB_TAG_NODES, node, cib_sync_call);
+    if (rc != pcmk_ok) {
+        printf("Could not remove %s from " XML_CIB_TAG_NODES ": %s", name, pcmk_strerror(rc));
+    }
+    rc = cib->cmds->delete(cib, XML_CIB_TAG_STATUS, node_state, cib_sync_call);
+    if (rc != pcmk_ok) {
+        printf("Could not remove %s from " XML_CIB_TAG_STATUS ": %s", name, pcmk_strerror(rc));
+    }
+
+    cib->cmds->signoff(cib);
+    cib_delete(cib);
+    return rc;
+}
+
+int tools_remove_node_cache(const char *node, const char *target);
+
+int tools_remove_node_cache(const char *node, const char *target)
+{
+    int n = 0;
+    int rc = -1;
+    char *name = NULL;
+    char *admin_uuid = NULL;
+    crm_ipc_t *conn = crm_ipc_new(target, 0);
+    xmlNode *cmd = NULL;
+    xmlNode *hello = NULL;
+    char *endptr = NULL;
+
+    if (!conn) {
+        return -ENOTCONN;
+    }
+
+    if (!crm_ipc_connect(conn)) {
+        crm_ipc_destroy(conn);
+        return -ENOTCONN;
+    }
+
+    if(safe_str_eq(target, CRM_SYSTEM_CRMD)) {
+        admin_uuid = calloc(1, 11);
+        snprintf(admin_uuid, 10, "%d", getpid());
+        admin_uuid[10] = '\0';
+
+        hello = create_hello_message(admin_uuid, "crm_node", "0", "1");
+        rc = crm_ipc_send(conn, hello, 0, 0, NULL);
+
+        free_xml(hello);
+        if (rc < 0) {
+            free(admin_uuid);
+            return rc;
+        }
+    }
+
+    errno = 0;
+    n = strtol(node, &endptr, 10);
+    if (errno != 0 || endptr == node || *endptr != '\0') {
+        /* Argument was not a nodeid */
+        n = 0;
+        name = strdup(node);
+    } else {
+        name = get_node_name(n);
+    }
+
+    crm_trace("Removing %s aka. %s from the membership cache", name, node);
+
+    cmd = create_request(CRM_OP_RM_NODE_CACHE,
+                         NULL, NULL, target, "crm_node", admin_uuid);
+
+    if (n) {
+        char buffer[64];
+
+        if(snprintf(buffer, 63, "%u", n) > 0) {
+            crm_xml_add(cmd, XML_ATTR_ID, buffer);
+        }
+    }
+    crm_xml_add(cmd, XML_ATTR_UNAME, name);
+
+    rc = crm_ipc_send(conn, cmd, 0, 0, NULL);
+    if (rc > 0) {
+        rc = cib_remove_node(n, name);
+    }
+
+    if (conn) {
+        crm_ipc_close(conn);
+        crm_ipc_destroy(conn);
+    }
+    free_xml(cmd);
+    free(admin_uuid);
+    free(name);
+    return rc > 0 ? 0 : rc;
+}
 
 #if SUPPORT_HEARTBEAT
 #  include <ocf/oc_event.h>
@@ -116,7 +231,7 @@ read_local_hb_uuid(void)
     fseek(input, 0L, start);
     if (start != ftell(input)) {
         fprintf(stderr, "fseek not behaving: %ld vs. %ld\n", start, ftell(input));
-        exit(2);
+        crm_exit(pcmk_err_generic);
     }
 
     buffer = malloc(50);
@@ -125,7 +240,7 @@ read_local_hb_uuid(void)
 
     if (read_len != UUID_LEN) {
         fprintf(stderr, "Expected and read bytes differ: %d vs. %ld\n", UUID_LEN, read_len);
-        exit(3);
+        crm_exit(pcmk_err_generic);
 
     } else if (buffer != NULL) {
         cl_uuid_unparse(&uuid, buffer);
@@ -134,7 +249,7 @@ read_local_hb_uuid(void)
 
     } else {
         fprintf(stderr, "No buffer to unparse\n");
-        exit(4);
+        crm_exit(ENODATA);
     }
 
     free(buffer);
@@ -190,7 +305,7 @@ ccm_age_callback(oc_ed_t event, void *cookie, size_t size, const void *data)
         fprintf(stdout, "\n");
     }
     fflush(stdout);
-    exit(0);
+    crm_exit(pcmk_ok);
 }
 
 static gboolean
@@ -249,8 +364,15 @@ try_heartbeat(int command, enum cluster_type_e stack)
 
     if (command == 'i') {
         if (read_local_hb_uuid()) {
-            exit(0);
+            crm_exit(pcmk_ok);
         }
+
+    } else if (command == 'R') {
+        if (tools_remove_node_cache(target_uname, CRM_SYSTEM_CRMD)) {
+            crm_err("Failed to connect to "CRM_SYSTEM_CRMD" to remove node '%s'", target_uname);
+            crm_exit(pcmk_err_generic);
+        }
+        crm_exit(pcmk_ok);
 
     } else if (ccm_age_connect(&ccm_fd)) {
         int rc = 0;
@@ -304,8 +426,9 @@ try_cman(int command, enum cluster_type_e stack)
 
     switch (command) {
         case 'R':
-            fprintf(stderr, "Node removal not supported for cman based clusters\n");
-            exit(-EPROTONOSUPPORT);
+            if (tools_remove_node_cache(target_uname, CRM_SYSTEM_CRMD)) {
+                crm_err("Failed to connect to "CRM_SYSTEM_CRMD" to remove node '%s'", target_uname);
+            }
             break;
 
         case 'e':
@@ -351,11 +474,11 @@ try_cman(int command, enum cluster_type_e stack)
             crm_help('?', EX_USAGE);
     }
     cman_finish(cman_handle);
-    exit(0);
+    crm_exit(pcmk_ok);
 
   cman_bail:
     cman_finish(cman_handle);
-    exit(EX_USAGE);
+    return crm_exit(EINVAL);
 }
 #endif
 
@@ -365,7 +488,7 @@ ais_membership_destroy(gpointer user_data)
 {
     crm_err("AIS connection terminated");
     ais_fd_sync = -1;
-    exit(1);
+    crm_exit(ENOTCONN);
 }
 
 static gint
@@ -388,16 +511,23 @@ crm_add_member(gpointer key, gpointer value, gpointer user_data)
     }
 }
 
-static gboolean
-ais_membership_dispatch(int kind, const char *from, const char *data)
+static void
+ais_membership_dispatch(cpg_handle_t handle,
+                          const struct cpg_name *groupName,
+                          uint32_t nodeid, uint32_t pid, void *msg, size_t msg_len)
 {
+    uint32_t kind = 0;
+    const char *from = NULL;
+    char *data = pcmk_message_common_cs(handle, nodeid, pid, msg, &kind, &from);
+
     switch (kind) {
         case crm_class_members:
         case crm_class_notify:
         case crm_class_quorum:
             break;
         default:
-            return TRUE;
+            free(data);
+            return;
 
             break;
     }
@@ -436,15 +566,25 @@ ais_membership_dispatch(int kind, const char *from, const char *data)
         fprintf(stdout, "\n");
     }
 
-    exit(0);
+    free(data);
+    crm_exit(pcmk_ok);
 
-    return TRUE;
+    return;
 }
 #endif
 
 #ifdef SUPPORT_CS_QUORUM
 #  include <corosync/quorum.h>
 #  include <corosync/cpg.h>
+
+static gint
+compare_node_uname(gconstpointer a, gconstpointer b)
+{
+    const crm_node_t *a_node = a;
+    const crm_node_t *b_node = b;
+    return strcmp(a_node->uname?a_node->uname:"", b_node->uname?b_node->uname:"");
+}
+
 static int
 node_mcp_dispatch(const char *buffer, ssize_t length, gpointer userdata)
 {
@@ -452,27 +592,40 @@ node_mcp_dispatch(const char *buffer, ssize_t length, gpointer userdata)
 
     if (msg) {
         xmlNode *node = NULL;
-        
+        GListPtr nodes = NULL;
+        GListPtr iter = NULL;
+
         crm_log_xml_trace(msg, "message");
-        
+
         for (node = __xml_first_child(msg); node != NULL; node = __xml_next(node)) {
-            const char *uname = crm_element_value(node, "uname");
+            crm_node_t *peer = calloc(1, sizeof(crm_node_t));
+
+            nodes = g_list_insert_sorted(nodes, peer, compare_node_uname);
+            peer->uname = (char*)crm_element_value_copy(node, "uname");
+            peer->state = (char*)crm_element_value_copy(node, "state");
+            crm_element_value_int(node, "id", (int*)&peer->id);
+        }
+
+        for(iter = nodes; iter; iter = iter->next) {
+            crm_node_t *peer = iter->data;
             if (command == 'l') {
-                int id = 0;
-                crm_element_value_int(node, "id", &id);
-                fprintf(stdout, "%u %s\n", id, uname);
-                
+                fprintf(stdout, "%u %s\n", peer->id, peer->uname);
+
             } else if (command == 'p') {
-                fprintf(stdout, "%s ", uname);
+                if(safe_str_eq(peer->state, CRM_NODE_MEMBER)) {
+                    fprintf(stdout, "%s ", peer->uname);
+                }
             }
         }
+
+        g_list_free_full(nodes, free);
         free_xml(msg);
-        
+
         if (command == 'p') {
             fprintf(stdout, "\n");
         }
-        
-        exit(0);
+
+        crm_exit(pcmk_ok);
     }
 
     return 0;
@@ -481,57 +634,7 @@ node_mcp_dispatch(const char *buffer, ssize_t length, gpointer userdata)
 static void
 node_mcp_destroy(gpointer user_data)
 {
-    exit(1);
-}
-
-static int
-crmd_remove_node_cache(int id)
-{
-    int rc = -1;
-    char *admin_uuid = NULL;
-    crm_ipc_t *conn = crm_ipc_new(CRM_SYSTEM_CRMD, 0);
-    xmlNode *cmd = NULL;
-    xmlNode *hello = NULL;
-    xmlNode *msg_data = NULL;
-
-    if (!conn) {
-        goto rm_node_cleanup;
-    }
-
-    if (!crm_ipc_connect(conn)) {
-        goto rm_node_cleanup;
-    }
-
-    admin_uuid = calloc(1, 11);
-    snprintf(admin_uuid, 10, "%d", getpid());
-    admin_uuid[10] = '\0';
-
-    hello = create_hello_message(admin_uuid, "crm_node", "0", "1");
-    rc = crm_ipc_send(conn, hello, 0, 0, NULL);
-    if (rc < 0) {
-        goto rm_node_cleanup;
-    }
-
-    msg_data = create_xml_node(NULL, XML_TAG_OPTIONS);
-    crm_xml_add_int(msg_data, XML_ATTR_ID, id);
-    cmd = create_request(CRM_OP_RM_NODE_CACHE,
-        msg_data,
-        NULL,
-        CRM_SYSTEM_CRMD,
-        "crm_node",
-        admin_uuid);
-
-    rc = crm_ipc_send(conn, cmd, 0, 0, NULL);
-
-rm_node_cleanup:
-    if (conn) {
-        crm_ipc_close(conn);
-        crm_ipc_destroy(conn);
-    }
-    free_xml(cmd);
-    free_xml(hello);
-    free(admin_uuid);
-    return rc > 0 ? 0 : rc;
+    crm_exit(ENOTCONN);
 }
 
 static gboolean
@@ -547,23 +650,28 @@ try_corosync(int command, enum cluster_type_e stack)
     mainloop_io_t *ipc = NULL;
     GMainLoop *amainloop = NULL;
 
-    struct ipc_client_callbacks node_callbacks = 
-        {
-            .dispatch = node_mcp_dispatch,
-            .destroy = node_mcp_destroy
-        };
+    struct ipc_client_callbacks node_callbacks = {
+        .dispatch = node_mcp_dispatch,
+        .destroy = node_mcp_destroy
+    };
 
     switch (command) {
         case 'R':
-            if (crmd_remove_node_cache(atoi(target_uname))) {
-                crm_err("Failed to connect to crmd to remove node id %s", target_uname);
+            if (tools_remove_node_cache(target_uname, CRM_SYSTEM_CRMD)) {
+                crm_err("Failed to connect to "CRM_SYSTEM_CRMD" to remove node '%s'", target_uname);
+                crm_exit(pcmk_err_generic);
             }
+            if (tools_remove_node_cache(target_uname, CRM_SYSTEM_MCP)) {
+                crm_err("Failed to connect to "CRM_SYSTEM_MCP" to remove node '%s'", target_uname);
+                crm_exit(pcmk_err_generic);
+            }
+            crm_exit(pcmk_ok);
             break;
 
         case 'e':
             /* Age makes no sense (yet) in an AIS cluster */
             fprintf(stdout, "1\n");
-            exit(0);
+            crm_exit(pcmk_ok);
 
         case 'q':
             /* Go direct to the Quorum API */
@@ -585,7 +693,7 @@ try_corosync(int command, enum cluster_type_e stack)
                 fprintf(stdout, "0\n");
             }
             quorum_finalize(q_handle);
-            exit(0);
+            crm_exit(pcmk_ok);
 
         case 'i':
             /* Go direct to the CPG API */
@@ -603,15 +711,19 @@ try_corosync(int command, enum cluster_type_e stack)
 
             fprintf(stdout, "%u\n", nodeid);
             cpg_finalize(c_handle);
-            exit(0);
+            crm_exit(pcmk_ok);
 
         case 'l':
         case 'p':
-            /* Go to pacemakerd */ 
+            /* Go to pacemakerd */
             amainloop = g_main_new(FALSE);
-            ipc = mainloop_add_ipc_client(CRM_SYSTEM_MCP, G_PRIORITY_DEFAULT, 0, NULL, &node_callbacks);
-            if(ipc != NULL) {
+            ipc =
+                mainloop_add_ipc_client(CRM_SYSTEM_MCP, G_PRIORITY_DEFAULT, 0, NULL,
+                                        &node_callbacks);
+            if (ipc != NULL) {
+                /* Sending anything will get us a list of nodes */
                 xmlNode *poke = create_xml_node(NULL, "poke");
+
                 crm_ipc_send(mainloop_get_ipc_client(ipc), poke, 0, 0, NULL);
                 free_xml(poke);
                 g_main_run(amainloop);
@@ -627,35 +739,39 @@ static gboolean
 try_openais(int command, enum cluster_type_e stack)
 {
     static crm_cluster_t cluster;
+
     cluster.destroy = ais_membership_destroy;
-    cluster.cs_dispatch = ais_membership_dispatch;
-    
+    cluster.cpg.cpg_deliver_fn = ais_membership_dispatch;
+    cluster.cpg.cpg_confchg_fn = NULL;
+
     if (init_cs_connection_once(&cluster)) {
 
         GMainLoop *amainloop = NULL;
+
         switch (command) {
             case 'R':
-                send_ais_text(crm_class_rmpeer, target_uname, TRUE, NULL, crm_msg_ais);
-                exit(0);
+                send_cluster_text(crm_class_rmpeer, target_uname, TRUE, NULL, crm_msg_ais);
+                cib_remove_node(0, target_uname);
+                crm_exit(pcmk_ok);
 
             case 'e':
                 /* Age makes no sense (yet) in an AIS cluster */
                 fprintf(stdout, "1\n");
-                exit(0);
+                crm_exit(pcmk_ok);
 
             case 'q':
-                send_ais_text(crm_class_quorum, NULL, TRUE, NULL, crm_msg_ais);
+                send_cluster_text(crm_class_quorum, NULL, TRUE, NULL, crm_msg_ais);
                 break;
 
             case 'l':
             case 'p':
                 crm_info("Requesting the list of configured nodes");
-                send_ais_text(crm_class_members, __FUNCTION__, TRUE, NULL, crm_msg_ais);
+                send_cluster_text(crm_class_members, __FUNCTION__, TRUE, NULL, crm_msg_ais);
                 break;
 
             case 'i':
                 printf("%u\n", cluster.nodeid);
-                exit(0);
+                crm_exit(pcmk_ok);
 
             default:
                 fprintf(stderr, "Unknown option '%c'\n", command);
@@ -748,13 +864,13 @@ main(int argc, char **argv)
         crm_help('?', EX_USAGE);
     }
 
-    if(command == 'n') {
+    if (command == 'n') {
         fprintf(stdout, "%s\n", get_local_node_name());
-        exit(0);
+        crm_exit(pcmk_ok);
 
-    } else if(command == 'N') {
+    } else if (command == 'N') {
         fprintf(stdout, "%s\n", get_node_name(nodeid));
-        exit(0);
+        crm_exit(pcmk_ok);
     }
 
     if (dangerous_cmd && force_flag == FALSE) {
@@ -762,7 +878,7 @@ main(int argc, char **argv)
                 "  To prevent accidental destruction of the cluster,"
                 " the --force flag is required in order to proceed.\n");
         fflush(stderr);
-        exit(EX_USAGE);
+        crm_exit(EINVAL);
     }
 
     try_stack = get_cluster_type();

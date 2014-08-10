@@ -1,20 +1,27 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
+
+/**
+ * \file
+ * \brief Cluster Configuration
+ * \ingroup cib
+ */
+
 #ifndef CIB__H
 #  define CIB__H
 
@@ -55,12 +62,16 @@ enum cib_call_options {
 	cib_can_create      = 0x00000008,
 	cib_discard_reply   = 0x00000010,
 	cib_no_children     = 0x00000020,
+        cib_xpath_address   = 0x00000040,
+        cib_mixed_update    = 0x00000080,
 	cib_scope_local     = 0x00000100,
 	cib_dryrun    	    = 0x00000200,
 	cib_sync_call       = 0x00001000,
+	cib_no_mtime        = 0x00002000,
+	cib_zero_copy       = 0x00004000,
 	cib_inhibit_notify  = 0x00010000,
  	cib_quorum_override = 0x00100000,
-	cib_inhibit_bcast   = 0x01000000,
+	cib_inhibit_bcast   = 0x01000000, /* TODO: Remove */
 	cib_force_diff	    = 0x10000000
 };
 
@@ -121,11 +132,9 @@ typedef struct cib_api_operations_s {
 
     int (*register_notification) (cib_t * cib, const char *callback, int enabled);
 
-    gboolean(*register_callback) (cib_t * cib, int call_id, int timeout, gboolean only_success,
+     gboolean(*register_callback) (cib_t * cib, int call_id, int timeout, gboolean only_success,
                                    void *user_data, const char *callback_name,
                                    void (*callback) (xmlNode *, int, int, xmlNode *, void *));
-
-
 
 } cib_api_operations_t;
 
@@ -150,7 +159,7 @@ cib_t *cib_new(void);
 cib_t *cib_native_new(void);
 cib_t *cib_file_new(const char *filename);
 cib_t *cib_remote_new(const char *server, const char *user, const char *passwd, int port,
-                             gboolean encrypted);
+                      gboolean encrypted);
 
 cib_t *cib_new_no_shadow(void);
 char *get_shadow_file(const char *name);
@@ -162,10 +171,12 @@ void cib_dump_pending_callbacks(void);
 int num_cib_op_callbacks(void);
 void remove_cib_op_callback(int call_id, gboolean all_callbacks);
 
-#  define add_cib_op_callback(cib, id, flag, data, fn) cib->cmds->register_callback(cib, id, 120, flag, data, #fn, fn)
-
+/* Deprecated */
+#  define add_cib_op_callback(cib, id, flag, data, fn) do {             \
+        cib->cmds->register_callback(cib, id, 120, flag, data, #fn, fn); \
+    } while(0)
 #  include <crm/cib/util.h>
 
-#  define CIB_LIBRARY "libcib.so.2"
+#  define CIB_LIBRARY "libcib.so.4"
 
 #endif

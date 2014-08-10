@@ -34,14 +34,20 @@ ctslib_PYTHON	=	__init__.py		\
 			CTSaudits.py		\
 			CTStests.py		\
 			CTSscenarios.py		\
-			CIB.py
+			CIB.py			\
+			cib_xml.py		\
+			environment.py		\
+			logging.py		\
+			patterns.py		\
+			remote.py		\
+			watcher.py
 
 cts_DATA	=	README cts.supp
 
-cts_SCRIPTS	=	cluster_test		\
+cts_SCRIPTS	=	cts		\
 			CTSlab.py		\
+			lxc_autogen.sh	\
 			LSBDummy		\
-			$(top_srcdir)/fencing/fence_true \
-			$(top_srcdir)/fencing/fence_false
+			$(top_srcdir)/fencing/fence_dummy
 
 SUBDIRS	= benchmark

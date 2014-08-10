@@ -35,26 +35,14 @@
 
 extern uint32_t local_nodeid;
 
-typedef struct pcmk_peer_s {
-    uint32_t id;
-    uint32_t processes;
-    char *uname;
-} pcmk_peer_t;
+gboolean mcp_read_config(void);
 
-extern gboolean read_config(void);
+gboolean cluster_connect_cfg(uint32_t * nodeid);
+gboolean cluster_disconnect_cfg(void);
 
-extern gboolean cluster_connect_cfg(uint32_t * nodeid);
-extern gboolean cluster_disconnect_cfg(void);
+gboolean update_node_processes(uint32_t node, const char *uname, uint32_t procs);
 
-extern gboolean cluster_connect_cpg(void);
-extern gboolean cluster_disconnect_cpg(void);
-extern gboolean send_cpg_message(struct iovec *iov);
+void enable_mgmtd(gboolean enable);
+void enable_crmd_as_root(gboolean enable);
 
-extern void update_process_clients(void);
-extern void update_process_peers(void);
-extern gboolean update_node_processes(uint32_t node, const char *uname, uint32_t procs);
-
-extern void enable_mgmtd(gboolean enable);
-extern void enable_crmd_as_root(gboolean enable);
-
-extern void pcmk_shutdown(int nsig);
+void pcmk_shutdown(int nsig);

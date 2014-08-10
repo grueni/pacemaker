@@ -181,15 +181,16 @@ usage(const char *cmd, int exit_status)
     stream = exit_status != 0 ? stderr : stdout;
     fflush(stream);
 
-    exit(exit_status);
+    crm_exit(exit_status);
 }
 
 void
 cib_connection_destroy(gpointer user_data)
 {
     cib_t *conn = user_data;
+
     crm_err("Connection to the CIB terminated... exiting");
-    conn->cmds->signoff(conn); /* Ensure IPC is cleaned up */
+    conn->cmds->signoff(conn);  /* Ensure IPC is cleaned up */
     g_main_quit(mainloop);
     return;
 }
@@ -221,7 +222,7 @@ cibmon_diff(const char *event, xmlNode * msg)
     }
 
     if (log_diffs) {
-        log_cib_diff(log_level, diff, op);
+        xml_log_patchset(log_level, op, diff);
     }
 
     if (log_updates && update != NULL) {
@@ -241,7 +242,11 @@ cibmon_diff(const char *event, xmlNode * msg)
     }
 
     if (cib_copy == NULL) {
-        cib_copy = get_cib_copy(cib);
+        rc = cib->cmds->query(cib, NULL, &cib_copy, cib_scope_local | cib_sync_call);
+    }
+
+    if(rc == -EACCES) {
+        crm_exit(rc);
     }
 
     free_xml(cib_last);
@@ -250,5 +255,5 @@ cibmon_diff(const char *event, xmlNode * msg)
 void
 cibmon_shutdown(int nsig)
 {
-    exit(EX_OK);
+    crm_exit(pcmk_ok);
 }

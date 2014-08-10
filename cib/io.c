@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -42,9 +42,13 @@
 #include <crm/cluster.h>
 
 #define CIB_SERIES "cib"
+#define CIB_SERIES_MAX 100
+#define CIB_SERIES_BZIP FALSE /* Must be false due to the way archived
+                               * copies are created - ie. with calls to
+                               * link()
+                               */
 
 extern const char *cib_root;
-static int cib_wrap = 100;
 
 #define CIB_WRITE_PARANOIA	0
 
@@ -74,15 +78,12 @@ xmlNode *status_search = NULL;
 extern int cib_status;
 
 int set_connected_peers(xmlNode * xml_obj);
-void GHFunc_count_peers(gpointer key, gpointer value, gpointer user_data);
 int write_cib_contents(gpointer p);
 extern void cib_cleanup(void);
 
 static gboolean
 validate_cib_digest(xmlNode * local_cib, const char *sigfile)
 {
-    int s_res = -1;
-    struct stat buf;
     char *digest = NULL;
     char *expected = NULL;
     gboolean passed = FALSE;
@@ -90,21 +91,19 @@ validate_cib_digest(xmlNode * local_cib, const char *sigfile)
     int start = 0, length = 0, read_len = 0;
 
     CRM_ASSERT(sigfile != NULL);
-    s_res = stat(sigfile, &buf);
 
-    if (s_res != 0) {
+    expected_strm = fopen(sigfile, "r");
+    if (expected_strm == NULL && errno == ENOENT) {
         crm_warn("No on-disk digest present");
         return TRUE;
+
+    } else if (expected_strm == NULL) {
+        crm_perror(LOG_ERR, "Could not open signature file %s for reading", sigfile);
+        goto bail;
     }
 
     if (local_cib != NULL) {
         digest = calculate_on_disk_digest(local_cib);
-    }
-
-    expected_strm = fopen(sigfile, "r");
-    if (expected_strm == NULL) {
-        crm_perror(LOG_ERR, "Could not open signature file %s for reading", sigfile);
-        goto bail;
     }
 
     start = ftell(expected_strm);
@@ -142,11 +141,11 @@ validate_cib_digest(xmlNode * local_cib, const char *sigfile)
 }
 
 static int
-write_cib_digest(xmlNode * local_cib, const char *digest_file, char *digest)
+write_cib_digest(xmlNode * local_cib, const char *digest_file, int fd, char *digest)
 {
     int rc = 0;
     char *local_digest = NULL;
-    FILE *digest_strm = fopen(digest_file, "w");
+    FILE *digest_strm = fdopen(fd, "w");
 
     if (digest_strm == NULL) {
         crm_perror(LOG_ERR, "Cannot open signature file %s for writing", digest_file);
@@ -216,15 +215,38 @@ validate_on_disk_cib(const char *filename, xmlNode ** on_disk_cib)
     return passed;
 }
 
+static gboolean
+on_disk_cib_corrupt(const char *filename)
+{
+    int s_res = -1;
+    struct stat buf;
+    gboolean corrupt = FALSE;
+
+    CRM_ASSERT(filename != NULL);
+
+    s_res = stat(filename, &buf);
+    if (s_res == 0) {
+        if (buf.st_size == 0) {
+            crm_warn("Cluster configuration file %s is corrupt: size is zero", filename);
+            corrupt = TRUE;
+        }
+    }
+
+    return corrupt;
+}
+
 static int
 cib_rename(const char *old, const char *new)
 {
     int rc = 0;
+    int automatic_fd = 0;
     char *automatic = NULL;
 
     if (new == NULL) {
-        automatic = crm_concat(cib_root, "cib.auto.XXXXXX", '/');
-        automatic = mktemp(automatic);
+        umask(S_IWGRP | S_IWOTH | S_IROTH);
+
+        automatic = g_strdup_printf("%s/cib.auto.XXXXXX", cib_root);
+        automatic_fd = mkstemp(automatic);
         new = automatic;
 
         crm_err("Archiving corrupt or unusable file %s as %s", old, automatic);
@@ -235,6 +257,9 @@ cib_rename(const char *old, const char *new)
         crm_perror(LOG_ERR, "Couldn't rename %s as %s - Disabling disk writes and continuing", old,
                    new);
         cib_writes_enabled = FALSE;
+    }
+    if (automatic_fd > 0) {
+        close(automatic_fd);
     }
     free(automatic);
     return rc;
@@ -279,16 +304,80 @@ retrieveCib(const char *filename, const char *sigfile, gboolean archive_invalid)
     return root;
 }
 
+static int cib_archive_filter(const struct dirent * a)
+{
+    int rc = 0;
+    /* Looking for regular files (d_type = 8) starting with 'cib-' and not ending in .sig */
+    struct stat s;
+    char *a_path = g_strdup_printf("%s/%s", cib_root, a->d_name);
+
+    if(stat(a_path, &s) != 0) {
+        rc = errno;
+        crm_trace("%s - stat failed: %s (%d)", a->d_name, pcmk_strerror(rc), rc);
+        rc = 0;
+
+    } else if ((s.st_mode & S_IFREG) != S_IFREG) {
+        crm_trace("%s - wrong type (%d)", a->d_name, a->d_type);
+
+    } else if(strstr(a->d_name, "cib-") != a->d_name) {
+        crm_trace("%s - wrong prefix", a->d_name);
+
+    } else if(strstr(a->d_name, ".sig") != NULL) {
+        crm_trace("%s - wrong suffix", a->d_name);
+
+    } else {
+        crm_debug("%s - candidate", a->d_name);
+        rc = 1;
+    }
+
+    free(a_path);
+    return rc;
+}
+
+static int cib_archive_sort(const struct dirent ** a, const struct dirent **b)
+{
+    /* Order by creation date - most recently created file first */
+    int rc = 0;
+    struct stat buf;
+
+    time_t a_age = 0;
+    time_t b_age = 0;
+
+    char *a_path = g_strdup_printf("%s/%s", cib_root, a[0]->d_name);
+    char *b_path = g_strdup_printf("%s/%s", cib_root, b[0]->d_name);
+
+    if(stat(a_path, &buf) == 0) {
+        a_age = buf.st_ctime;
+    }
+    if(stat(b_path, &buf) == 0) {
+        b_age = buf.st_ctime;
+    }
+
+    free(a_path);
+    free(b_path);
+
+    if(a_age > b_age) {
+        rc = 1;
+    } else if(a_age < b_age) {
+        rc = -1;
+    }
+
+    crm_trace("%s (%u) vs. %s (%u) : %d", a[0]->d_name, a_age, b[0]->d_name, b_age, rc);
+    return rc;
+}
+
 xmlNode *
 readCibXmlFile(const char *dir, const char *file, gboolean discard_status)
 {
-    int seq = 0;
-    char *backup_file = NULL;
-    char *filename = NULL, *sigfile = NULL;
+    struct dirent **namelist = NULL;
+
+    int lpc = 0;
+    char *sigfile = NULL;
+    char *filename = NULL;
     const char *name = NULL;
     const char *value = NULL;
     const char *validation = NULL;
-    const char *use_valgrind = getenv("HA_VALGRIND_ENABLED");
+    const char *use_valgrind = getenv("PCMK_valgrind_enabled");
 
     xmlNode *root = NULL;
     xmlNode *status = NULL;
@@ -303,40 +392,38 @@ readCibXmlFile(const char *dir, const char *file, gboolean discard_status)
 
     cib_status = pcmk_ok;
     root = retrieveCib(filename, sigfile, TRUE);
+    free(filename);
+    free(sigfile);
 
     if (root == NULL) {
-        crm_warn("Primary configuration corrupt or unusable, trying backup...");
-        seq = get_last_sequence(cib_root, CIB_SERIES);
+        crm_warn("Primary configuration corrupt or unusable, trying backups in %s", cib_root);
+        lpc = scandir(cib_root, &namelist, cib_archive_filter, cib_archive_sort);
+        if (lpc < 0) {
+            crm_perror(LOG_NOTICE, "scandir(%s) failed", cib_root);
+        }
     }
 
-    while (root == NULL) {
-        struct stat buf;
+    while (root == NULL && lpc > 1) {
+        crm_debug("Testing %d candidates", lpc);
 
-        free(sigfile);
+        lpc--;
 
-        if (seq == 0) {
-            seq += cib_wrap;    /* unwrap */
-        }
-
-        backup_file = generate_series_filename(cib_root, CIB_SERIES, seq - 1, FALSE);
+        filename = g_strdup_printf("%s/%s", cib_root, namelist[lpc]->d_name);
         sigfile = crm_concat(filename, "sig", '.');
 
-        if (stat(backup_file, &buf) != 0) {
-            crm_debug("Backup file %s not found", backup_file);
-            break;
+        root = retrieveCib(filename, sigfile, FALSE);
+        if(root) {
+            crm_notice("Continuing with last valid configuration archive: %s", filename);
         }
-        crm_warn("Attempting to load: %s", backup_file);
-        root = retrieveCib(backup_file, sigfile, FALSE);
-        seq--;
+
+        free(namelist[lpc]);
+        free(filename);
+        free(sigfile);
     }
-    free(backup_file);
+    free(namelist);
 
     if (root == NULL) {
-        root = createEmptyCib();
-        crm_xml_add(root, XML_ATTR_GENERATION, "0");
-        crm_xml_add(root, XML_ATTR_NUMUPDATES, "0");
-        crm_xml_add(root, XML_ATTR_GENERATION_ADMIN, "0");
-        crm_xml_add(root, XML_ATTR_VALIDATION, LATEST_SCHEMA_VERSION);
+        root = createEmptyCib(0);
         crm_warn("Continuing with an empty configuration.");
     }
 
@@ -396,23 +483,21 @@ readCibXmlFile(const char *dir, const char *file, gboolean discard_status)
     validation = crm_element_value(root, XML_ATTR_VALIDATION);
     if (validate_xml(root, NULL, TRUE) == FALSE) {
         crm_err("CIB does not validate with %s", crm_str(validation));
-        cib_status = -pcmk_err_dtd_validation;
+        cib_status = -pcmk_err_schema_validation;
 
     } else if (validation == NULL) {
         int version = 0;
 
-        update_validation(&root, &version, FALSE, FALSE);
+        update_validation(&root, &version, 0, FALSE, FALSE);
         if (version > 0) {
             crm_notice("Enabling %s validation on"
                        " the existing (sane) configuration", get_schema_name(version));
         } else {
             crm_err("CIB does not validate with any known DTD or schema");
-            cib_status = -pcmk_err_dtd_validation;
+            cib_status = -pcmk_err_schema_validation;
         }
     }
 
-    free(filename);
-    free(sigfile);
     return root;
 }
 
@@ -530,21 +615,19 @@ activateCibXml(xmlNode * new_cib, gboolean to_disk, const char *op)
     return pcmk_ok;
 }
 
-static void cib_diskwrite_complete(GPid pid, gint status, gpointer user_data) 
+static void
+cib_diskwrite_complete(mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode)
 {
-    int exitcode = -1;
+    if (signo) {
+        crm_notice("Disk write process terminated with signal %d (pid=%d, core=%d)", signo, pid,
+                   core);
 
-    if(WIFSIGNALED(status)) {
-        int signo = WTERMSIG(status);
-        int core = WCOREDUMP(status);
-        crm_notice("Disk write process terminated with signal %d (pid=%d, core=%d)", signo, pid, core);
-
-    } else if(WIFEXITED(status)) {
-        exitcode = WEXITSTATUS(status);
-        do_crm_log(exitcode == 0 ? LOG_TRACE : LOG_ERR, "Disk write process exited (pid=%d, rc=%d)", pid, exitcode);
+    } else  {
+        do_crm_log(exitcode == 0 ? LOG_TRACE : LOG_ERR, "Disk write process exited (pid=%d, rc=%d)",
+                   pid, exitcode);
     }
 
-    if(exitcode != 0 && cib_writes_enabled) {
+    if (exitcode != 0 && cib_writes_enabled) {
         crm_err("Disabling disk writes after write failure");
         cib_writes_enabled = FALSE;
     }
@@ -555,17 +638,18 @@ static void cib_diskwrite_complete(GPid pid, gint status, gpointer user_data)
 int
 write_cib_contents(gpointer p)
 {
-    int exit_rc = EX_OK;
-    gboolean need_archive = FALSE;
-    struct stat buf;
+    int exit_rc = pcmk_ok;
     char *digest = NULL;
     xmlNode *cib_status_root = NULL;
 
-    xmlNode *local_cib = NULL;
-    xmlNode *tmp_cib = NULL;
+    xmlNode *cib_local = NULL;
+    xmlNode *cib_tmp = NULL;
 
-    char *tmp1 = NULL;
-    char *tmp2 = NULL;
+    int tmp_cib_fd = 0;
+    int tmp_digest_fd = 0;
+    char *tmp_cib = NULL;
+    char *tmp_digest = NULL;
+
     char *digest_file = NULL;
     char *primary_file = NULL;
 
@@ -577,7 +661,7 @@ write_cib_contents(gpointer p)
 
     if (p) {
         /* Synchronous write out */
-        local_cib = copy_xml(p);
+        cib_local = copy_xml(p);
 
     } else {
         int pid = 0;
@@ -600,77 +684,77 @@ write_cib_contents(gpointer p)
 
         if (pid) {
             /* Parent */
-            g_child_watch_add(pid, cib_diskwrite_complete, NULL);
-            if(bb_state == QB_LOG_STATE_ENABLED) {
+            mainloop_child_add(pid, 0, "disk-writer", NULL, cib_diskwrite_complete);
+            if (bb_state == QB_LOG_STATE_ENABLED) {
                 /* Re-enable now that it it safe */
                 qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_TRUE);
             }
 
-            return -1; /* -1 means 'still work to do' */
+            return -1;          /* -1 means 'still work to do' */
         }
-        
-        /* A-synchronous write out after a fork() */
 
-        /* Don't log anything unless strictly necessary */
-        set_crm_log_level(LOG_ERR);
+        /* A-synchronous write out after a fork() */
 
         /* In theory we can scribble on "the_cib" here and not affect the parent
          * But lets be safe anyway
          */
-        local_cib = copy_xml(the_cib);
+        cib_local = copy_xml(the_cib);
     }
 
-    epoch = crm_element_value(local_cib, XML_ATTR_GENERATION);
-    admin_epoch = crm_element_value(local_cib, XML_ATTR_GENERATION_ADMIN);
-
-    tmp1 = crm_concat(cib_root, "cib.XXXXXX", '/');
-    tmp2 = crm_concat(cib_root, "cib.XXXXXX", '/');
+    epoch = crm_element_value(cib_local, XML_ATTR_GENERATION);
+    admin_epoch = crm_element_value(cib_local, XML_ATTR_GENERATION_ADMIN);
 
     primary_file = crm_concat(cib_root, "cib.xml", '/');
     digest_file = crm_concat(primary_file, "sig", '.');
 
     /* Always write out with num_updates=0 */
-    crm_xml_add(local_cib, XML_ATTR_NUMUPDATES, "0");
+    crm_xml_add(cib_local, XML_ATTR_NUMUPDATES, "0");
 
-    need_archive = (stat(primary_file, &buf) == 0);
-    if (need_archive) {
+    /* check the admin didnt modify it underneath us */
+    if (on_disk_cib_corrupt(primary_file) == FALSE
+        && validate_on_disk_cib(primary_file, NULL) == FALSE) {
+        crm_err("%s was manually modified while the cluster was active!", primary_file);
+        exit_rc = pcmk_err_cib_modified;
+        goto cleanup;
+
+    } else {
         int rc = 0;
         int seq = get_last_sequence(cib_root, CIB_SERIES);
 
-        /* check the admin didnt modify it underneath us */
-        if (validate_on_disk_cib(primary_file, NULL) == FALSE) {
-            crm_err("%s was manually modified while the cluster was active!", primary_file);
-            exit_rc = 1;
-            goto cleanup;
-        }
-
-        backup_file = generate_series_filename(cib_root, CIB_SERIES, seq, FALSE);
+        backup_file = generate_series_filename(cib_root, CIB_SERIES, seq, CIB_SERIES_BZIP);
         backup_digest = crm_concat(backup_file, "sig", '.');
 
         unlink(backup_file);
         unlink(backup_digest);
+
         rc = link(primary_file, backup_file);
-        if(rc < 0) {
-            exit_rc = 4;
-            crm_perror(LOG_ERR, "Cannot link %s to %s", primary_file, backup_file);
+        if (rc < 0) {
+            rc = errno;
+            switch(rc) {
+                case ENOENT:
+                    /* No file to back up */
+                    goto writeout;
+                    break;
+                default:
+                    exit_rc = pcmk_err_cib_backup;
+                    crm_err("Cannot link %s to %s: %s (%d)", primary_file, backup_file, pcmk_strerror(rc), rc);
+            }
             goto cleanup;
         }
 
-        rc = stat(digest_file, &buf);
-        if (rc == 0) {
-            rc = link(digest_file, backup_digest);
-            if(rc < 0) {
-                exit_rc = 5;
-                crm_perror(LOG_ERR, "Cannot link %s to %s", digest_file, backup_digest);
-                goto cleanup;
-            }
+        rc = link(digest_file, backup_digest);
+        if (rc < 0 && errno != ENOENT) {
+            exit_rc = pcmk_err_cib_backup;
+            crm_perror(LOG_ERR, "Cannot link %s to %s", digest_file, backup_digest);
+            goto cleanup;
         }
-        write_last_sequence(cib_root, CIB_SERIES, seq + 1, cib_wrap);
+        write_last_sequence(cib_root, CIB_SERIES, seq + 1, CIB_SERIES_MAX);
         sync_directory(cib_root);
 
         crm_info("Archived previous version as %s", backup_file);
     }
 
+  writeout:
     /* Given that we discard the status section on startup
      *   there is no point writing it out in the first place
      *   since users just get confused by it
@@ -679,7 +763,7 @@ write_cib_contents(gpointer p)
      */
     crm_debug("Writing CIB to disk");
     if (p == NULL) {
-        cib_status_root = find_xml_node(local_cib, XML_CIB_TAG_STATUS, TRUE);
+        cib_status_root = find_xml_node(cib_local, XML_CIB_TAG_STATUS, TRUE);
         CRM_LOG_ASSERT(cib_status_root != NULL);
 
         if (cib_status_root != NULL) {
@@ -687,33 +771,37 @@ write_cib_contents(gpointer p)
         }
     }
 
-    tmp1 = mktemp(tmp1);        /* cib    */
-    tmp2 = mktemp(tmp2);        /* digest */
+    tmp_cib = g_strdup_printf("%s/cib.XXXXXX", cib_root);
+    tmp_digest = g_strdup_printf("%s/cib.XXXXXX", cib_root);
 
-    if (write_xml_file(local_cib, tmp1, FALSE) <= 0) {
-        crm_err("Changes couldn't be written to %s", tmp1);
-        exit_rc = 2;
+    umask(S_IWGRP | S_IWOTH | S_IROTH);
+
+    tmp_cib_fd = mkstemp(tmp_cib);
+    if (tmp_cib_fd < 0 || write_xml_fd(cib_local, tmp_cib, tmp_cib_fd, FALSE) <= 0) {
+        crm_err("Changes couldn't be written to %s", tmp_cib);
+        exit_rc = pcmk_err_cib_save;
         goto cleanup;
     }
 
     /* Must calculate the digest after writing as write_xml_file() updates the last-written field */
-    digest = calculate_on_disk_digest(local_cib);
+    digest = calculate_on_disk_digest(cib_local);
     crm_info("Wrote version %s.%s.0 of the CIB to disk (digest: %s)",
              admin_epoch ? admin_epoch : "0", epoch ? epoch : "0", digest);
 
-    if (write_cib_digest(local_cib, tmp2, digest) <= 0) {
-        crm_err("Digest couldn't be written to %s", tmp2);
-        exit_rc = 3;
+    tmp_digest_fd = mkstemp(tmp_digest);
+    if (tmp_digest_fd < 0 || write_cib_digest(cib_local, tmp_digest, tmp_digest_fd, digest) <= 0) {
+        crm_err("Digest couldn't be written to %s", tmp_digest);
+        exit_rc = pcmk_err_cib_save;
         goto cleanup;
     }
     crm_debug("Wrote digest %s to disk", digest);
-    tmp_cib = retrieveCib(tmp1, tmp2, FALSE);
-    CRM_ASSERT(tmp_cib != NULL);
+    cib_tmp = retrieveCib(tmp_cib, tmp_digest, FALSE);
+    CRM_ASSERT(cib_tmp != NULL);
     sync_directory(cib_root);
 
-    crm_debug("Activating %s", tmp1);
-    cib_rename(tmp1, primary_file);
-    cib_rename(tmp2, digest_file);
+    crm_debug("Activating %s", tmp_cib);
+    cib_rename(tmp_cib, primary_file);
+    cib_rename(tmp_digest, digest_file);
     sync_directory(cib_root);
 
   cleanup:
@@ -722,11 +810,11 @@ write_cib_contents(gpointer p)
     free(backup_file);
     free(digest_file);
     free(digest);
-    free(tmp2);
-    free(tmp1);
+    free(tmp_digest);
+    free(tmp_cib);
 
-    free_xml(tmp_cib);
-    free_xml(local_cib);
+    free_xml(cib_tmp);
+    free_xml(cib_local);
 
     if (p == NULL) {
         /* exit() could potentially affect the parent by closing things it shouldn't
@@ -735,17 +823,4 @@ write_cib_contents(gpointer p)
         _exit(exit_rc);
     }
     return exit_rc;
-}
-
-void
-GHFunc_count_peers(gpointer key, gpointer value, gpointer user_data)
-{
-    int *active = user_data;
-
-    if (safe_str_eq(value, ONLINESTATUS)) {
-        (*active)++;
-
-    } else if (safe_str_eq(value, JOINSTATUS)) {
-        (*active)++;
-    }
 }

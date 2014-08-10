@@ -51,7 +51,6 @@ static struct crm_option long_options[] = {
 
     {"-spacer-", 1, 0, '-', "\nAdditional Options:"},
     {"cib",	 0, 0, 'c', "\t\tCompare/patch the inputs as a CIB (includes versions details)"},
-    {"filter",	 0, 0, 'f', "\t\tSuppress irrelevant differences between the two inputs"},
     {"stdin",	 0, 0, 's', NULL, 1},
     {"-spacer-", 1, 0, '-', "\nExamples:", pcmk_option_paragraph},
     {"-spacer-", 1, 0, '-', "Obtain the two different configuration files by running cibadmin on the two cluster setups to compare:", pcmk_option_paragraph},
@@ -74,7 +73,6 @@ main(int argc, char **argv)
     gboolean apply = FALSE;
     gboolean raw_1 = FALSE;
     gboolean raw_2 = FALSE;
-    gboolean filter = FALSE;
     gboolean use_stdin = FALSE;
     gboolean as_cib = FALSE;
     int argerr = 0;
@@ -119,9 +117,6 @@ main(int argc, char **argv)
             case 'p':
                 xml_file_2 = optarg;
                 apply = TRUE;
-                break;
-            case 'f':
-                filter = TRUE;
                 break;
             case 's':
                 use_stdin = TRUE;
@@ -181,28 +176,48 @@ main(int argc, char **argv)
     }
 
     if (object_1 == NULL) {
-        fprintf(stderr, "Could not parse the first XML fragment");
+        fprintf(stderr, "Could not parse the first XML fragment\n");
         return 1;
     }
     if (object_2 == NULL) {
-        fprintf(stderr, "Could not parse the second XML fragment");
+        fprintf(stderr, "Could not parse the second XML fragment\n");
         return 1;
     }
 
     if (apply) {
-        if (as_cib == FALSE) {
-            apply_xml_diff(object_1, object_2, &output);
-        } else {
-            apply_cib_diff(object_1, object_2, &output);
-        }
+        int rc;
 
-    } else {
-        if (as_cib == FALSE) {
-            output = diff_xml_object(object_1, object_2, filter);
-        } else {
-            output = diff_cib_object(object_1, object_2, filter);
+        output = copy_xml(object_1);
+        rc = xml_apply_patchset(output, object_2, as_cib);
+        if(rc != pcmk_ok) {
+            fprintf(stderr, "Could not apply patch: %s\n", pcmk_strerror(rc));
+            return rc;
         }
-        log_xml_diff(LOG_NOTICE, output, " ");
+    } else {
+        xml_track_changes(object_2, NULL, object_2, FALSE);
+        xml_calculate_changes(object_1, object_2);
+        crm_log_xml_debug(object_2, xml_file_2?xml_file_2:"target");
+
+        output = xml_create_patchset(0, object_1, object_2, NULL, FALSE, as_cib);
+
+        if(as_cib && output) {
+            int add[] = { 0, 0, 0 };
+            int del[] = { 0, 0, 0 };
+
+            const char *fmt = NULL;
+            const char *digest = NULL;
+
+            xml_patch_versions(output, add, del);
+            fmt = crm_element_value(output, "format");
+            digest = crm_element_value(output, XML_ATTR_DIGEST);
+
+            if (add[2] != del[2] || add[1] != del[1] || add[0] != del[0]) {
+                crm_info("Patch: --- %d.%d.%d %s", del[0], del[1], del[2], fmt);
+                crm_info("Patch: +++ %d.%d.%d %s", add[0], add[1], add[2], digest);
+            }
+        }
+        xml_log_changes(LOG_INFO, __FUNCTION__, object_2);
+        xml_log_patchset(LOG_NOTICE, __FUNCTION__, output);
     }
 
     if (output != NULL) {
@@ -215,6 +230,7 @@ main(int argc, char **argv)
 
         if (apply) {
             const char *version = crm_element_value(output, XML_ATTR_CRM_VERSION);
+
             buffer = calculate_xml_versioned_digest(output, FALSE, TRUE, version);
             crm_trace("Digest: %s\n", crm_str(buffer));
             free(buffer);

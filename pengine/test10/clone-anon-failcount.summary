@@ -22,7 +22,11 @@ Online: [ srv01 srv02 srv03 srv04 ]
  Resource Group: grpStonith4
      prmStonithN4	(stonith:external/ssh):	Started srv03
  Clone Set: clnUMgroup01 [clnUmResource]
-     Started: [ srv01 srv04 ]
+     Resource Group: clnUmResource:0
+         clnUMdummy01	(ocf::pacemaker:Dummy):	FAILED srv04 
+         clnUMdummy02	(ocf::pacemaker:Dummy):	Started srv04 
+     Started: [ srv01 ]
+     Stopped: [ srv02 srv03 ]
  Clone Set: clnPingd [clnPrmPingd]
      Started: [ srv01 srv02 srv03 srv04 ]
  Clone Set: clnDiskd1 [clnPrmDiskd1]
@@ -102,7 +106,7 @@ Online: [ srv01 srv02 srv03 srv04 ]
      prmStonithN4	(stonith:external/ssh):	Started srv03
  Clone Set: clnUMgroup01 [clnUmResource]
      Started: [ srv04 ]
-     Stopped: [ clnUmResource:1 ]
+     Stopped: [ srv01 srv02 srv03 ]
  Clone Set: clnPingd [clnPrmPingd]
      Started: [ srv01 srv02 srv03 srv04 ]
  Clone Set: clnDiskd1 [clnPrmDiskd1]

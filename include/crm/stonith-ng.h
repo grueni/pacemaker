@@ -1,20 +1,27 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
+
+/**
+ * \file
+ * \brief Fencing aka. STONITH
+ * \ingroup fencing
+ */
+
 #ifndef STONITH_NG__H
 #  define STONITH_NG__H
 
@@ -24,8 +31,8 @@
 /* TO-DO: Work out how to drop this requirement */
 #  include <libxml/tree.h>
 
-#define T_STONITH_NOTIFY_DISCONNECT     "st_notify_disconnect"
-#define T_STONITH_NOTIFY_FENCE          "st_notify_fence"
+#  define T_STONITH_NOTIFY_DISCONNECT     "st_notify_disconnect"
+#  define T_STONITH_NOTIFY_FENCE          "st_notify_fence"
 
 /* *INDENT-OFF* */
 enum stonith_state {
@@ -41,7 +48,7 @@ enum stonith_call_options {
 
     st_opt_manual_ack      = 0x00000008,
     st_opt_discard_reply   = 0x00000010,
-    st_opt_all_replies     = 0x00000020,
+/*    st_opt_all_replies     = 0x00000020, */
     st_opt_topology        = 0x00000040,
     st_opt_scope_local     = 0x00000100,
     st_opt_cs_nodeid       = 0x00000200,
@@ -54,7 +61,7 @@ enum stonith_call_options {
 };
 
 #define stonith_default_options = stonith_none
-
+/*! Order matters here, do not change values */
 enum op_state
 {
     st_query,
@@ -79,6 +86,7 @@ typedef struct stonith_history_s {
     int state;
 
     struct stonith_history_s *next;
+    char *client;
 } stonith_history_t;
 
 typedef struct stonith_s stonith_t;
@@ -332,7 +340,7 @@ const char *get_stonith_provider(const char *agent, const char *provider);
 bool stonith_dispatch(stonith_t * st);
 
 stonith_key_value_t *stonith_key_value_add(stonith_key_value_t * kvp, const char *key,
-                                                  const char *value);
+                                           const char *value);
 void stonith_key_value_freeall(stonith_key_value_t * kvp, int keys, int values);
 
 /* Basic helpers that allows nodes to be fenced and the history to be
@@ -340,8 +348,8 @@ void stonith_key_value_freeall(stonith_key_value_t * kvp, int keys, int values);
  *
  * At least one of nodeid and uname are required
  */
-int stonith_api_kick(int nodeid, const char *uname, int timeout, bool off);
-time_t stonith_api_time(int nodeid, const char *uname, bool in_progress);
+int stonith_api_kick(uint32_t nodeid, const char *uname, int timeout, bool off);
+time_t stonith_api_time(uint32_t nodeid, const char *uname, bool in_progress);
 
 /*
  * Helpers for using the above functions without install-time dependancies
@@ -386,7 +394,7 @@ time_t stonith_api_time(int nodeid, const char *uname, bool in_progress);
 #  define STONITH_LIBRARY "libstonithd.so.2"
 
 static inline int
-stonith_api_kick_helper(int nodeid, int timeout, bool off)
+stonith_api_kick_helper(uint32_t nodeid, int timeout, bool off)
 {
     static void *st_library = NULL;
     static int (*st_kick_fn) (int nodeid, const char *uname, int timeout, bool off) = NULL;
@@ -405,7 +413,7 @@ stonith_api_kick_helper(int nodeid, int timeout, bool off)
 }
 
 static inline time_t
-stonith_api_time_helper(int nodeid, bool in_progress)
+stonith_api_time_helper(uint32_t nodeid, bool in_progress)
 {
     static void *st_library = NULL;
     static time_t(*st_time_fn) (int nodeid, const char *uname, bool in_progress) = NULL;

@@ -17,7 +17,7 @@
 #
 MAINTAINERCLEANFILES    = Makefile.in
 
-INCLUDES        = -I$(top_builddir)/include  -I$(top_srcdir)/include  \
+AM_CPPFLAGS        = -I$(top_builddir)/include  -I$(top_srcdir)/include  \
 		  -I$(top_builddir)/libltdl  -I$(top_srcdir)/libltdl
 
 ## libraries
@@ -28,13 +28,8 @@ noinst_HEADERS		=
 libcib_la_SOURCES	= cib_ops.c cib_utils.c cib_client.c cib_native.c cib_attrs.c
 libcib_la_SOURCES      += cib_file.c cib_remote.c
 
-if ENABLE_ACL
-libcib_la_SOURCES       += cib_acl.c
-endif
-
-libcib_la_LDFLAGS	= -version-info 2:0:0 $(top_builddir)/lib/common/libcrmcommon.la $(CRYPTOLIB) \
-			$(top_builddir)/lib/pengine/libpe_rules.la
-
+libcib_la_LDFLAGS	= -version-info 4:0:0 -L$(top_builddir)/lib/pengine/.libs
+libcib_la_LIBADD        = $(CRYPTOLIB) $(top_builddir)/lib/pengine/libpe_rules.la $(top_builddir)/lib/common/libcrmcommon.la
 libcib_la_CFLAGS	= -I$(top_srcdir)
 
 clean-generic:

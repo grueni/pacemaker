@@ -1,17 +1,17 @@
 
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -48,27 +48,13 @@ const char *cib_action = NULL;
 
 cib_t *real_cib = NULL;
 
-int dump_data_element(int depth, char **buffer, int *max, int *offset, const char *prefix,
-                      xmlNode * data, gboolean formatted);
-
-void print_xml_diff(FILE * where, xmlNode * diff);
-
 static int force_flag = 0;
 static int batch_flag = 0;
 
 static char *
 get_shadow_prompt(const char *name)
 {
-    int len = 16;
-    char *prompt = NULL;
-
-    CRM_ASSERT(name != NULL);
-
-    len += strlen(name);
-    prompt = calloc(1, len);
-
-    snprintf(prompt, len, "shadow[%s] # ", name);
-    return prompt;
+    return g_strdup_printf("shadow[%.40s] # ", name);
 }
 
 static void
@@ -131,7 +117,7 @@ static struct crm_option long_options[] = {
     {"help",    0, 0, '?', "\t\tThis text"},
     {"version", 0, 0, '$', "\t\tVersion information"  },
     {"verbose", 0, 0, 'V', "\t\tIncrease debug output"},
-    
+
     {"-spacer-",	1, 0, '-', "\nQueries:"},
     {"which",   no_argument,       NULL, 'w', "\t\tIndicate the active shadow copy"},
     {"display", no_argument,       NULL, 'p', "\t\tDisplay the contents of the active shadow copy"},
@@ -141,16 +127,17 @@ static struct crm_option long_options[] = {
 
     {"-spacer-",	1, 0, '-', "\nCommands:"},
     {"create",		required_argument, NULL, 'c', "\tCreate the named shadow copy of the active cluster configuration"},
-    {"create-empty",	required_argument, NULL, 'e', "Create the named shadow copy with an empty cluster configuration"},
+    {"create-empty",	required_argument, NULL, 'e', "Create the named shadow copy with an empty cluster configuration. Optional: --validate-with"},
     {"commit",  required_argument, NULL, 'C', "\tUpload the contents of the named shadow copy to the cluster"},
     {"delete",  required_argument, NULL, 'D', "\tDelete the contents of the named shadow copy"},
     {"reset",   required_argument, NULL, 'r', "\tRecreate the named shadow copy from the active cluster configuration"},
     {"switch",  required_argument, NULL, 's', "\t(Advanced) Switch to the named shadow copy"},
-    
+
     {"-spacer-",	1, 0, '-', "\nAdditional Options:"},
     {"force",	no_argument, NULL, 'f', "\t\t(Advanced) Force the action to be performed"},
     {"batch",   no_argument, NULL, 'b', "\t\t(Advanced) Don't spawn a new shell" },
     {"all",     no_argument, NULL, 'a', "\t\t(Advanced) Upload the entire CIB, including status, with --commit" },
+    {"validate-with",     required_argument, NULL, 'v', "(Advanced) Create an older configuration version" },
 
     {"-spacer-",	1, 0, '-', "\nExamples:", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', "Create a blank shadow configuration:", pcmk_option_paragraph},
@@ -163,7 +150,7 @@ static struct crm_option long_options[] = {
     {"-spacer-",	1, 0, '-', " crm_shadow --delete myShadow", pcmk_option_example},
     {"-spacer-",	1, 0, '-', "Upload the current shadow configuration (named myShadow) to the running cluster:", pcmk_option_paragraph},
     {"-spacer-",	1, 0, '-', " crm_shadow --commit myShadow", pcmk_option_example},
-    
+
     {0, 0, 0, 0}
 };
 /* *INDENT-ON* */
@@ -175,6 +162,7 @@ main(int argc, char **argv)
     int flag;
     int argerr = 0;
     static int command = '?';
+    const char *validation = NULL;
     char *shadow = NULL;
     char *shadow_file = NULL;
     gboolean full_upload = FALSE;
@@ -209,7 +197,19 @@ main(int argc, char **argv)
             case 'F':
                 command = flag;
                 free(shadow);
-                shadow = strdup(getenv("CIB_shadow"));
+                shadow = NULL;
+                {
+                    const char *env = getenv("CIB_shadow");
+                    if(env) {
+                        shadow = strdup(env);
+                    } else {
+                        fprintf(stderr, "No active shadow configuration defined\n");
+                        crm_exit(ENOENT);
+                    }
+                }
+                break;
+            case 'v':
+                validation = optarg;
                 break;
             case 'e':
             case 'c':
@@ -356,11 +356,11 @@ main(int argc, char **argv)
     }
 
     rc = pcmk_ok;
-    if (command == 'c' || command == 'e') {
+    if (command == 'c' || command == 'e' || command == 'r') {
         xmlNode *output = NULL;
 
         /* create a shadow instance based on the current cluster config */
-        if (command == 'c') {
+        if (command == 'c' || command == 'r') {
             rc = real_cib->cmds->query(real_cib, NULL, &output, command_options);
             if (rc != pcmk_ok) {
                 fprintf(stderr, "Could not connect to the CIB: %s\n", pcmk_strerror(rc));
@@ -368,18 +368,20 @@ main(int argc, char **argv)
             }
 
         } else {
-            output = createEmptyCib();
-            crm_xml_add(output, XML_ATTR_GENERATION, "0");
-            crm_xml_add(output, XML_ATTR_NUMUPDATES, "0");
-            crm_xml_add(output, XML_ATTR_GENERATION_ADMIN, "0");
-            crm_xml_add(output, XML_ATTR_VALIDATION, LATEST_SCHEMA_VERSION);
+            output = createEmptyCib(0);
+            if(validation) {
+                crm_xml_add(output, XML_ATTR_VALIDATION, validation);
+            }
+            printf("Created new %s configuration\n",
+                   crm_element_value(output, XML_ATTR_VALIDATION));
         }
 
         rc = write_xml_file(output, shadow_file, FALSE);
         free_xml(output);
 
         if (rc < 0) {
-            fprintf(stderr, "Could not create the shadow instance '%s': %s\n",
+            fprintf(stderr, "Could not %s the shadow instance '%s': %s\n",
+                    command == 'r' ? "reset" : "create",
                     shadow, strerror(errno));
             goto done;
         }
@@ -431,9 +433,9 @@ main(int argc, char **argv)
             goto done;
         }
 
-        diff = diff_xml_object(old_config, new_config, FALSE);
+        diff = xml_create_patchset(0, old_config, new_config, NULL, FALSE, FALSE);
         if (diff != NULL) {
-            print_xml_diff(stdout, diff);
+            xml_log_patchset(0, "  ", diff);
             rc = 1;
             goto done;
         }
@@ -456,152 +458,13 @@ main(int argc, char **argv)
         if (rc != pcmk_ok) {
             fprintf(stderr, "Could not commit shadow instance '%s' to the CIB: %s\n",
                     shadow, pcmk_strerror(rc));
-            return rc;
+            goto done;
         }
         shadow_teardown(shadow);
         free_xml(input);
     }
   done:
-    crm_xml_cleanup();
-    qb_log_fini();
     free(shadow_file);
     free(shadow);
-    return rc;
-}
-
-#define bhead(buffer, offset) ((*buffer) + (*offset))
-#define bremain(max, offset) ((*max) - (*offset))
-#define update_buffer_head(len) do {		\
-	int total = (*offset) + len + 1;	\
-	if(total >= (*max)) { /* too late */	\
-	    (*buffer) = EOS; return -1;		\
-	} else if(((*max) - total) < 256) {	\
-	    (*max) *= 10;			\
-	    *buffer = realloc(*buffer, (*max));	\
-	}					\
-	(*offset) += len;			\
-    } while(0)
-
-extern int print_spaces(char *buffer, int depth, int max);
-
-int
-dump_data_element(int depth, char **buffer, int *max, int *offset, const char *prefix,
-                  xmlNode * data, gboolean formatted)
-{
-    int printed = 0;
-    int has_children = 0;
-    xmlNode *child = NULL;
-    const char *name = NULL;
-
-    CRM_CHECK(data != NULL, return 0);
-
-    name = crm_element_name(data);
-
-    CRM_CHECK(name != NULL, return 0);
-    CRM_CHECK(buffer != NULL && *buffer != NULL, return 0);
-
-    crm_trace("Dumping %s...", name);
-
-    if (prefix) {
-        printed = snprintf(bhead(buffer, offset), bremain(max, offset), "%s", prefix);
-        update_buffer_head(printed);
-    }
-
-    if (formatted) {
-        printed = print_spaces(bhead(buffer, offset), depth, bremain(max, offset));
-        update_buffer_head(printed);
-    }
-
-    printed = snprintf(bhead(buffer, offset), bremain(max, offset), "<%s", name);
-    update_buffer_head(printed);
-
-    if(data) {
-        xmlAttrPtr xIter = NULL;
-        for(xIter = data->properties; xIter; xIter = xIter->next) {
-            const char *prop_name = (const char *)xIter->name;
-            const char *prop_value = crm_element_value(data, prop_name);
-            crm_trace("Dumping <%s %s=\"%s\"...",
-                        name, prop_name, prop_value);
-            printed = snprintf(bhead(buffer, offset), bremain(max, offset), " %s=\"%s\"", prop_name, prop_value);
-            update_buffer_head(printed);
-        }
-    }
-
-    has_children = xml_has_children(data);
-    printed = snprintf(bhead(buffer, offset), bremain(max, offset), "%s>%s",
-                       has_children == 0 ? "/" : "", formatted ? "\n" : "");
-    update_buffer_head(printed);
-
-    if (has_children == 0) {
-        return 0;
-    }
-
-    for (child = __xml_first_child(data); child != NULL; child = __xml_next(child)) {
-        if (dump_data_element(depth + 1, buffer, max, offset, prefix, child, formatted) < 0) {
-            return -1;
-        }
-    }
-
-    if (prefix) {
-        printed = snprintf(bhead(buffer, offset), bremain(max, offset), "%s", prefix);
-        update_buffer_head(printed);
-    }
-
-    if (formatted) {
-        printed = print_spaces(bhead(buffer, offset), depth, bremain(max, offset));
-        update_buffer_head(printed);
-    }
-
-    printed =
-        snprintf(bhead(buffer, offset), bremain(max, offset), "</%s>%s", name,
-                 formatted ? "\n" : "");
-    update_buffer_head(printed);
-    crm_trace("Dumped %s...", name);
-
-    return has_children;
-}
-
-void
-print_xml_diff(FILE * where, xmlNode * diff)
-{
-    char *buffer = NULL;
-    xmlNode *child = NULL;
-    int max = 1024, len = 0;
-    gboolean is_first = TRUE;
-    xmlNode *added = find_xml_node(diff, "diff-added", FALSE);
-    xmlNode *removed = find_xml_node(diff, "diff-removed", FALSE);
-
-    is_first = TRUE;
-    for (child = __xml_first_child(removed); child != NULL; child = __xml_next(child)) {
-        len = 0;
-        max = 1024;
-        free(buffer);
-        buffer = calloc(1, max);
-
-        if (is_first) {
-            is_first = FALSE;
-        } else {
-            fprintf(where, " --- \n");
-        }
-
-        CRM_CHECK(dump_data_element(0, &buffer, &max, &len, "-", child, TRUE) >= 0, continue);
-        fprintf(where, "%s", buffer);
-    }
-
-    is_first = TRUE;
-    for (child = __xml_first_child(added); child != NULL; child = __xml_next(child)) {
-        len = 0;
-        max = 1024;
-        free(buffer);
-        buffer = calloc(1, max);
-
-        if (is_first) {
-            is_first = FALSE;
-        } else {
-            fprintf(where, " +++ \n");
-        }
-
-        CRM_CHECK(dump_data_element(0, &buffer, &max, &len, "+", child, TRUE) >= 0, continue);
-        fprintf(where, "%s", buffer);
-    }
+    return crm_exit(rc);
 }

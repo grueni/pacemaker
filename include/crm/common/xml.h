@@ -1,22 +1,28 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef CRM_COMMON_XML__H
 #  define CRM_COMMON_XML__H
+
+/**
+ * \file
+ * \brief Wrappers for and extensions to libxml2
+ * \ingroup core
+ */
 
 #  include <stdio.h>
 #  include <sys/types.h>
@@ -62,7 +68,7 @@ xmlDoc *getDocPtr(xmlNode * node);
  *
  * Copy all the attributes/properties from src into target.
  *
- * Not recursive, does not return anything. 
+ * Not recursive, does not return anything.
  *
  */
 void copy_in_properties(xmlNode * target, xmlNode * src);
@@ -102,7 +108,7 @@ const char *crm_xml_add_int(xmlNode * node, const char *name, int value);
 void unlink_xml_node(xmlNode * node);
 
 /*
- * 
+ *
  */
 void purge_diff_markers(xmlNode * a_node);
 
@@ -130,6 +136,7 @@ xmlNode *stdin2xml(void);
 
 xmlNode *string2xml(const char *input);
 
+int write_xml_fd(xmlNode * xml_node, const char *filename, int fd, gboolean compress);
 int write_xml_file(xmlNode * xml_node, const char *filename, gboolean compress);
 
 char *dump_xml_formatted(xmlNode * msg);
@@ -142,12 +149,11 @@ char *dump_xml_unformatted(xmlNode * msg);
 xmlNode *diff_xml_object(xmlNode * left, xmlNode * right, gboolean suppress);
 
 xmlNode *subtract_xml_object(xmlNode * parent, xmlNode * left, xmlNode * right,
-                                    gboolean full, const char *marker);
+                             gboolean full, gboolean * changed, const char *marker);
 
 gboolean can_prune_leaf(xmlNode * xml_node);
 
 void print_xml_diff(FILE * where, xmlNode * diff);
-void log_xml_diff(unsigned int log_level, xmlNode * diff, const char *function);
 
 gboolean apply_xml_diff(xmlNode * old, xmlNode * diff, xmlNode ** new);
 
@@ -161,13 +167,13 @@ xmlNode *find_entity(xmlNode * parent, const char *node_name, const char *id);
 void xml_remove_prop(xmlNode * obj, const char *name);
 
 gboolean replace_xml_child(xmlNode * parent, xmlNode * child, xmlNode * update,
-                                  gboolean delete_only);
+                           gboolean delete_only);
 
 gboolean update_xml_child(xmlNode * child, xmlNode * to_update);
 
 int find_xml_children(xmlNode ** children, xmlNode * root,
-                             const char *tag, const char *field, const char *value,
-                             gboolean search_matches);
+                      const char *tag, const char *field, const char *value,
+                      gboolean search_matches);
 
 int crm_element_value_int(xmlNode * data, const char *name, int *dest);
 char *crm_element_value_copy(xmlNode * data, const char *name);
@@ -184,19 +190,18 @@ void xml_validate(const xmlNode * root);
 
 gboolean xml_has_children(const xmlNode * root);
 
-/* For ABI compatability with version < 1.1.4 */
-char *calculate_xml_digest(xmlNode * local_cib, gboolean sort, gboolean do_filter);
-
 char *calculate_on_disk_digest(xmlNode * local_cib);
 char *calculate_operation_digest(xmlNode * local_cib, const char *version);
 char *calculate_xml_versioned_digest(xmlNode * input, gboolean sort, gboolean do_filter,
-                                            const char *version);
+                                     const char *version);
 
 gboolean validate_xml(xmlNode * xml_blob, const char *validation, gboolean to_logs);
 gboolean validate_xml_verbose(xmlNode * xml_blob);
-int update_validation(xmlNode ** xml_blob, int *best, gboolean transform, gboolean to_logs);
+int update_validation(xmlNode ** xml_blob, int *best, int max, gboolean transform, gboolean to_logs);
 int get_schema_version(const char *name);
 const char *get_schema_name(int version);
+
+void crm_xml_init(void);
 void crm_xml_cleanup(void);
 
 static inline xmlNode *
@@ -206,7 +211,7 @@ __xml_first_child(xmlNode * parent)
 
     if (parent) {
         child = parent->children;
-        while (child && child->type != XML_ELEMENT_NODE) {
+        while (child && child->type == XML_TEXT_NODE) {
             child = child->next;
         }
     }
@@ -218,7 +223,7 @@ __xml_next(xmlNode * child)
 {
     if (child) {
         child = child->next;
-        while (child && child->type != XML_ELEMENT_NODE) {
+        while (child && child->type == XML_TEXT_NODE) {
             child = child->next;
         }
     }
@@ -234,6 +239,38 @@ xmlXPathObjectPtr xpath_search(xmlNode * xml_top, const char *path);
 gboolean cli_config_update(xmlNode ** xml, int *best_version, gboolean to_logs);
 xmlNode *expand_idref(xmlNode * input, xmlNode * top);
 
+void freeXpathObject(xmlXPathObjectPtr xpathObj);
 xmlNode *getXpathResult(xmlXPathObjectPtr xpathObj, int index);
+
+static inline int numXpathResults(xmlXPathObjectPtr xpathObj)
+{
+    if(xpathObj == NULL || xpathObj->nodesetval == NULL) {
+        return 0;
+    }
+    return xpathObj->nodesetval->nodeNr;
+}
+
+const char *xml_latest_schema(void);
+
+bool xml_acl_enabled(xmlNode *xml);
+void xml_acl_disable(xmlNode *xml);
+bool xml_acl_denied(xmlNode *xml); /* Part or all of a change was rejected */
+bool xml_acl_filtered_copy(const char *user, xmlNode* acl_source, xmlNode *xml, xmlNode ** result);
+
+bool xml_tracking_changes(xmlNode * xml);
+bool xml_document_dirty(xmlNode *xml);
+void xml_track_changes(xmlNode * xml, const char *user, xmlNode *acl_source, bool enforce_acls);
+void xml_calculate_changes(xmlNode * old, xmlNode * new); /* For comparing two documents after the fact */
+void xml_accept_changes(xmlNode * xml);
+void xml_log_changes(uint8_t level, const char *function, xmlNode *xml);
+void xml_log_patchset(uint8_t level, const char *function, xmlNode *xml);
+bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3]);
+
+xmlNode *xml_create_patchset(
+    int format, xmlNode *source, xmlNode *target, bool *config, bool manage_version, bool with_digest);
+int xml_apply_patchset(xmlNode *xml, xmlNode *patchset, bool check_version);
+
+void save_xml_to_file(xmlNode * xml, const char *desc, const char *filename);
+char *xml_get_path(xmlNode *xml);
 
 #endif

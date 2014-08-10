@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -29,24 +29,22 @@
 
 #include <crm/cluster/internal.h>
 #include <crm/cib.h>
+#include <crm/common/ipcs.h>
 
 #include <crmd.h>
 #include <crmd_messages.h>
 #include <crmd_lrm.h>
+#include <throttle.h>
 
 GListPtr fsa_message_queue = NULL;
 extern void crm_shutdown(int nsig);
 
 void handle_response(xmlNode * stored_msg);
-enum crmd_fsa_input handle_request(xmlNode * stored_msg);
+enum crmd_fsa_input handle_request(xmlNode * stored_msg, enum crmd_fsa_cause cause);
 enum crmd_fsa_input handle_shutdown_request(xmlNode * stored_msg);
 
-#ifdef MSG_LOG
-#  define ROUTER_RESULT(x)	crm_trace("Router result: %s", x);	\
-    crm_log_xml_trace(msg, "router.log");
-#else
-#  define ROUTER_RESULT(x)	crm_trace("Router result: %s", x)
-#endif
+#define ROUTER_RESULT(x)	crm_trace("Router result: %s", x)
+
 /* debug only, can wrap all it likes */
 int last_data_id = 0;
 
@@ -62,6 +60,8 @@ register_fsa_error_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
     }
 
     /* reset the action list */
+    crm_info("Resetting the current action list");
+    fsa_dump_actions(fsa_actions, "Drop");
     fsa_actions = A_NOTHING;
 
     /* register the error */
@@ -76,33 +76,39 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
     unsigned old_len = g_list_length(fsa_message_queue);
     fsa_data_t *fsa_data = NULL;
 
-    last_data_id++;
     CRM_CHECK(raised_from != NULL, raised_from = "<unknown>");
-
-    crm_trace("%s %s FSA input %d (%s) (cause=%s) %s data",
-                raised_from, prepend ? "prepended" : "appended", last_data_id,
-                fsa_input2string(input), fsa_cause2string(cause), data ? "with" : "without");
-
-    if (input == I_WAIT_FOR_EVENT) {
-        do_fsa_stall = TRUE;
-        crm_debug("Stalling the FSA pending further input: cause=%s", fsa_cause2string(cause));
-        if (old_len > 0) {
-            crm_warn("%s stalled the FSA with pending inputs", raised_from);
-            fsa_dump_queue(LOG_DEBUG);
-        }
-        if (data == NULL) {
-            set_bit(fsa_actions, with_actions);
-            with_actions = A_NOTHING;
-            return 0;
-        }
-        crm_err("%s stalled the FSA with data - this may be broken", raised_from);
-    }
 
     if (input == I_NULL && with_actions == A_NOTHING /* && data == NULL */ ) {
         /* no point doing anything */
         crm_err("Cannot add entry to queue: no input and no action");
         return 0;
     }
+
+    if (input == I_WAIT_FOR_EVENT) {
+        do_fsa_stall = TRUE;
+        crm_debug("Stalling the FSA pending further input: source=%s cause=%s data=%p queue=%d",
+                  raised_from, fsa_cause2string(cause), data, old_len);
+
+        if (old_len > 0) {
+            fsa_dump_queue(LOG_TRACE);
+            prepend = FALSE;
+        }
+
+        if (data == NULL) {
+            fsa_actions |= with_actions;
+            fsa_dump_actions(with_actions, "Restored");
+            return 0;
+        }
+
+        /* Store everything in the new event and reset fsa_actions */
+        with_actions |= fsa_actions;
+        fsa_actions = A_NOTHING;
+    }
+
+    last_data_id++;
+    crm_trace("%s %s FSA input %d (%s) (cause=%s) %s data",
+              raised_from, prepend ? "prepended" : "appended", last_data_id,
+              fsa_input2string(input), fsa_cause2string(cause), data ? "with" : "without");
 
     fsa_data = calloc(1, sizeof(fsa_data_t));
     fsa_data->id = last_data_id;
@@ -124,7 +130,7 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
             case C_IPC_MESSAGE:
             case C_HA_MESSAGE:
                 crm_trace("Copying %s data from %s as a HA msg",
-                            fsa_cause2string(cause), raised_from);
+                          fsa_cause2string(cause), raised_from);
                 CRM_CHECK(((ha_msg_input_t *) data)->msg != NULL,
                           crm_err("Bogus data from %s", raised_from));
                 fsa_data->data = copy_ha_msg_input(data);
@@ -133,7 +139,7 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
 
             case C_LRM_OP_CALLBACK:
                 crm_trace("Copying %s data from %s as lrmd_event_data_t",
-                            fsa_cause2string(cause), raised_from);
+                          fsa_cause2string(cause), raised_from);
                 fsa_data->data = lrmd_copy_event((lrmd_event_data_t *) data);
                 fsa_data->data_type = fsa_dt_lrm;
                 break;
@@ -150,7 +156,7 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
             case C_STARTUP:
                 crm_err("Copying %s data (from %s)"
                         " not yet implemented", fsa_cause2string(cause), raised_from);
-                exit(1);
+                crmd_exit(pcmk_err_generic);
                 break;
         }
         crm_trace("%s data copied", fsa_cause2string(fsa_data->fsa_cause));
@@ -166,13 +172,13 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
 
     crm_trace("Queue len: %d", g_list_length(fsa_message_queue));
 
-    fsa_dump_queue(LOG_DEBUG_2);
+    /* fsa_dump_queue(LOG_DEBUG_2); */
 
     if (old_len == g_list_length(fsa_message_queue)) {
         crm_err("Couldnt add message to the queue");
     }
 
-    if (fsa_source) {
+    if (fsa_source && input != I_WAIT_FOR_EVENT) {
         crm_trace("Triggering FSA: %s", __FUNCTION__);
         mainloop_set_trigger(fsa_source);
     }
@@ -189,9 +195,10 @@ fsa_dump_queue(int log_level)
         fsa_data_t *data = (fsa_data_t *) lpc->data;
 
         do_crm_log_unlikely(log_level,
-                   "queue[%d(%d)]: input %s raised by %s()\t(cause=%s)",
-                   offset++, data->id, fsa_input2string(data->fsa_input),
-                   data->origin, fsa_cause2string(data->fsa_cause));
+                            "queue[%d.%d]: input %s raised by %s(%p.%d)\t(cause=%s)",
+                            offset++, data->id, fsa_input2string(data->fsa_input),
+                            data->origin, data->data, data->data_type,
+                            fsa_cause2string(data->fsa_cause));
     }
 }
 
@@ -246,7 +253,7 @@ delete_fsa_input(fsa_data_t * fsa_data)
                 if (fsa_data->data != NULL) {
                     crm_err("Dont know how to free %s data from %s",
                             fsa_cause2string(fsa_data->fsa_cause), fsa_data->origin);
-                    exit(1);
+                    crmd_exit(pcmk_err_generic);
                 }
                 break;
         }
@@ -286,9 +293,8 @@ fsa_typed_data_adv(fsa_data_t * fsa_data, enum fsa_data_type a_type, const char 
         crm_err("%s: No message data available. Origin: %s", caller, fsa_data->origin);
 
     } else if (fsa_data->data_type != a_type) {
-        crm_crit(
-                   "%s: Message data was the wrong type! %d vs. requested=%d."
-                   "  Origin: %s", caller, fsa_data->data_type, a_type, fsa_data->origin);
+        crm_crit("%s: Message data was the wrong type! %d vs. requested=%d.  Origin: %s",
+                 caller, fsa_data->data_type, a_type, fsa_data->origin);
         CRM_ASSERT(fsa_data->data_type == a_type);
     } else {
         ret_val = fsa_data->data;
@@ -324,7 +330,7 @@ route_message(enum crmd_fsa_cause cause, xmlNode * input)
     }
 
     /* handle locally */
-    result = handle_message(input);
+    result = handle_message(input, cause);
 
     /* done or process later? */
     switch (result) {
@@ -454,13 +460,28 @@ relay_message(xmlNode * msg, gboolean originated_locally)
         send_msg_via_ipc(msg, sys_to);
 
     } else {
+        crm_node_t *node_to = NULL;
+
 #if SUPPORT_COROSYNC
         if (is_openais_cluster()) {
             dest = text2msg_type(sys_to);
+
+            if (dest == crm_msg_none || dest > crm_msg_stonith_ng) {
+                dest = crm_msg_crmd;
+            }
         }
 #endif
+
+        if (host_to) {
+            node_to = crm_find_peer(0, host_to);
+            if (node_to == NULL) {
+               crm_err("Cannot route message to unknown node %s", host_to);
+               return TRUE;
+            }
+        }
+
         ROUTER_RESULT("Message result: External relay");
-        send_cluster_message(host_to ? crm_get_peer(0, host_to) : NULL, dest, msg, TRUE);
+        send_cluster_message(host_to ? node_to : NULL, dest, msg, TRUE);
     }
 
     return processing_complete;
@@ -468,14 +489,12 @@ relay_message(xmlNode * msg, gboolean originated_locally)
 
 static gboolean
 process_hello_message(xmlNode * hello,
-                      char **uuid, char **client_name, char **major_version, char **minor_version)
+                      char **client_name, char **major_version, char **minor_version)
 {
-    const char *local_uuid;
     const char *local_client_name;
     const char *local_major_version;
     const char *local_minor_version;
 
-    *uuid = NULL;
     *client_name = NULL;
     *major_version = NULL;
     *minor_version = NULL;
@@ -484,16 +503,11 @@ process_hello_message(xmlNode * hello,
         return FALSE;
     }
 
-    local_uuid = crm_element_value(hello, "client_uuid");
     local_client_name = crm_element_value(hello, "client_name");
     local_major_version = crm_element_value(hello, "major_version");
     local_minor_version = crm_element_value(hello, "minor_version");
 
-    if (local_uuid == NULL || strlen(local_uuid) == 0) {
-        crm_err("Hello message was not valid (field %s not found)", "uuid");
-        return FALSE;
-
-    } else if (local_client_name == NULL || strlen(local_client_name) == 0) {
+    if (local_client_name == NULL || strlen(local_client_name) == 0) {
         crm_err("Hello message was not valid (field %s not found)", "client name");
         return FALSE;
 
@@ -506,7 +520,6 @@ process_hello_message(xmlNode * hello,
         return FALSE;
     }
 
-    *uuid = strdup(local_uuid);
     *client_name = strdup(local_client_name);
     *major_version = strdup(local_major_version);
     *minor_version = strdup(local_minor_version);
@@ -516,59 +529,32 @@ process_hello_message(xmlNode * hello,
 }
 
 gboolean
-crmd_authorize_message(xmlNode * client_msg, crmd_client_t * curr_client)
+crmd_authorize_message(xmlNode * client_msg, crm_client_t * curr_client, const char *proxy_session)
 {
-    /* check the best case first */
-    const char *sys_from = crm_element_value(client_msg, F_CRM_SYS_FROM);
-    char *uuid = NULL;
     char *client_name = NULL;
     char *major_version = NULL;
     char *minor_version = NULL;
-    const char *filtered_from;
-    gpointer table_key = NULL;
     gboolean auth_result = FALSE;
-    gboolean can_reply = FALSE; /* no-one has registered with this id */
 
     xmlNode *xml = NULL;
     const char *op = crm_element_value(client_msg, F_CRM_TASK);
+    const char *uuid = curr_client ? curr_client->id : proxy_session;
 
-    if (safe_str_neq(CRM_OP_HELLO, op)) {
+    if (uuid == NULL) {
+        crm_warn("Message [%s] not authorized", crm_element_value(client_msg, XML_ATTR_REFERENCE));
+        return FALSE;
 
-        if (sys_from == NULL) {
-            crm_warn("Message [%s] was had no value for %s... discarding",
-                     crm_element_value(client_msg, XML_ATTR_REFERENCE), F_CRM_SYS_FROM);
-            return FALSE;
-        }
-
-        filtered_from = sys_from;
-
-        /* The CIB can have two names on the DC */
-        if (strcasecmp(sys_from, CRM_SYSTEM_DCIB) == 0)
-            filtered_from = CRM_SYSTEM_CIB;
-
-        if (g_hash_table_lookup(ipc_clients, filtered_from) != NULL) {
-            can_reply = TRUE;   /* reply can be routed */
-        }
-
-        crm_trace("Message reply can%s be routed from %s.", can_reply ? "" : " not", sys_from);
-
-        if (can_reply == FALSE) {
-            crm_warn("Message [%s] not authorized",
-                     crm_element_value(client_msg, XML_ATTR_REFERENCE));
-        }
-
-        return can_reply;
+    } else if (safe_str_neq(CRM_OP_HELLO, op)) {
+        return TRUE;
     }
 
-    crm_trace("received client join msg");
-    crm_log_xml_trace(client_msg, "join");
     xml = get_message_xml(client_msg, F_CRM_DATA);
-    auth_result = process_hello_message(xml, &uuid, &client_name, &major_version, &minor_version);
+    auth_result = process_hello_message(xml, &client_name, &major_version, &minor_version);
 
     if (auth_result == TRUE) {
-        if (client_name == NULL || uuid == NULL) {
+        if (client_name == NULL) {
             crm_err("Bad client details (client_name=%s, uuid=%s)",
-                    crm_str(client_name), crm_str(uuid));
+                    crm_str(client_name), uuid);
             auth_result = FALSE;
         }
     }
@@ -585,28 +571,22 @@ crmd_authorize_message(xmlNode * client_msg, crmd_client_t * curr_client)
         }
     }
 
-    table_key = (gpointer) generate_hash_key(client_name, uuid);
-
     if (auth_result == TRUE) {
-        crm_trace("Accepted client %s", crm_str(table_key));
-
-        curr_client->table_key = table_key;
-        curr_client->sub_sys = strdup(client_name);
-        curr_client->uuid = strdup(uuid);
-
-        g_hash_table_insert(ipc_clients, table_key, curr_client->ipc);
-        crm_trace("Updated client list with %s", crm_str(table_key));
+        crm_trace("Accepted client %s", client_name);
+        if (curr_client) {
+            curr_client->userdata = strdup(client_name);
+        }
 
         crm_trace("Triggering FSA: %s", __FUNCTION__);
         mainloop_set_trigger(fsa_source);
 
     } else {
-        free(table_key);
         crm_warn("Rejected client logon request");
-        qb_ipcs_disconnect(curr_client->ipc);
+        if (curr_client) {
+            qb_ipcs_disconnect(curr_client->ipcs);
+        }
     }
 
-    free(uuid);
     free(minor_version);
     free(major_version);
     free(client_name);
@@ -616,7 +596,7 @@ crmd_authorize_message(xmlNode * client_msg, crmd_client_t * curr_client)
 }
 
 enum crmd_fsa_input
-handle_message(xmlNode * msg)
+handle_message(xmlNode * msg, enum crmd_fsa_cause cause)
 {
     const char *type = NULL;
 
@@ -624,7 +604,7 @@ handle_message(xmlNode * msg)
 
     type = crm_element_value(msg, F_CRM_MSG_TYPE);
     if (crm_str_eq(type, XML_ATTR_REQUEST, TRUE)) {
-        return handle_request(msg);
+        return handle_request(msg, cause);
 
     } else if (crm_str_eq(type, XML_ATTR_RESPONSE, TRUE)) {
         handle_response(msg);
@@ -639,10 +619,17 @@ static enum crmd_fsa_input
 handle_failcount_op(xmlNode * stored_msg)
 {
     const char *rsc = NULL;
+    const char *uname = NULL;
+    gboolean is_remote_node = FALSE;
     xmlNode *xml_rsc = get_xpath_object("//" XML_CIB_TAG_RESOURCE, stored_msg, LOG_ERR);
 
     if (xml_rsc) {
         rsc = ID(xml_rsc);
+    }
+
+    uname = crm_element_value(stored_msg, XML_LRM_ATTR_TARGET);
+    if (crm_element_value(stored_msg, XML_LRM_ATTR_ROUTER_NODE)) {
+        is_remote_node = TRUE;
     }
 
     if (rsc) {
@@ -651,14 +638,14 @@ handle_failcount_op(xmlNode * stored_msg)
         crm_info("Removing failcount for %s", rsc);
 
         attr = crm_concat("fail-count", rsc, '-');
-        update_attrd(NULL, attr, NULL, NULL);
+        update_attrd(uname, attr, NULL, NULL, is_remote_node);
         free(attr);
 
         attr = crm_concat("last-failure", rsc, '-');
-        update_attrd(NULL, attr, NULL, NULL);
+        update_attrd(uname, attr, NULL, NULL, is_remote_node);
         free(attr);
 
-        lrm_clear_last_failure(rsc);
+        lrm_clear_last_failure(rsc, uname);
     } else {
         crm_log_xml_warn(stored_msg, "invalid failcount op");
     }
@@ -667,7 +654,7 @@ handle_failcount_op(xmlNode * stored_msg)
 }
 
 enum crmd_fsa_input
-handle_request(xmlNode * stored_msg)
+handle_request(xmlNode * stored_msg, enum crmd_fsa_cause cause)
 {
     xmlNode *msg = NULL;
     const char *op = crm_element_value(stored_msg, F_CRM_TASK);
@@ -722,6 +709,10 @@ handle_request(xmlNode * stored_msg)
         fsa_input.msg = stored_msg;
         register_fsa_input_adv(C_HA_MESSAGE, I_NULL, &fsa_input,
                                A_ELECTION_COUNT | A_ELECTION_CHECK, FALSE, __FUNCTION__);
+
+    } else if (strcmp(op, CRM_OP_THROTTLE) == 0) {
+        throttle_update(stored_msg);
+        return I_NULL;
 
     } else if (strcmp(op, CRM_OP_CLEAR_FAILCOUNT) == 0) {
         return handle_failcount_op(stored_msg);
@@ -803,20 +794,31 @@ handle_request(xmlNode * stored_msg)
         crm_notice("Current ping state: %s", fsa_state2string(fsa_state));
 
         msg = create_reply(stored_msg, ping);
-        relay_message(msg, TRUE);
+        if(msg) {
+            relay_message(msg, TRUE);
+        }
 
         free_xml(ping);
         free_xml(msg);
 
     } else if (strcmp(op, CRM_OP_RM_NODE_CACHE) == 0) {
-        xmlNode *options = get_xpath_object("//"XML_TAG_OPTIONS, stored_msg, LOG_ERR);
         int id = 0;
+        const char *name = NULL;
 
-        if (options) {
-           crm_element_value_int(options, XML_ATTR_ID, &id);
-        }
-        if (id) {
-            reap_crm_member(id);
+        crm_element_value_int(stored_msg, XML_ATTR_ID, &id);
+        name = crm_element_value(stored_msg, XML_ATTR_UNAME);
+
+        if(cause == C_IPC_MESSAGE) {
+            msg = create_request(CRM_OP_RM_NODE_CACHE, NULL, NULL, CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);
+            if (send_cluster_message(NULL, crm_msg_crmd, msg, TRUE) == FALSE) {
+                crm_err("Could not instruct peers to remove references to node %s/%u", name, id);
+            } else {
+                crm_notice("Instructing peers to remove references to node %s/%u", name, id);
+            }
+            free_xml(msg);
+
+        } else {
+            reap_crm_member(id, name);
         }
 
     } else {
@@ -887,7 +889,7 @@ handle_shutdown_request(xmlNode * stored_msg)
     crm_log_xml_trace(stored_msg, "message");
 
     now_s = crm_itoa(now);
-    update_attrd(host_from, XML_CIB_ATTR_SHUTDOWN, now_s, NULL);
+    update_attrd(host_from, XML_CIB_ATTR_SHUTDOWN, now_s, NULL, FALSE);
     free(now_s);
 
     /* will be picked up by the TE as long as its running */
@@ -901,9 +903,7 @@ gboolean
 send_msg_via_ipc(xmlNode * msg, const char *sys)
 {
     gboolean send_ok = TRUE;
-    qb_ipcs_connection_t *client_channel;
-
-    client_channel = (qb_ipcs_connection_t *) g_hash_table_lookup(ipc_clients, sys);
+    crm_client_t *client_channel = crm_client_get_by_id(sys);
 
     if (crm_element_value(msg, F_CRM_HOST_FROM) == NULL) {
         crm_xml_add(msg, F_CRM_HOST_FROM, fsa_our_uname);
@@ -911,7 +911,7 @@ send_msg_via_ipc(xmlNode * msg, const char *sys)
 
     if (client_channel != NULL) {
         /* Transient clients such as crmadmin */
-        send_ok = crm_ipcs_send(client_channel, 0, msg, TRUE);
+        send_ok = crm_ipcs_send(client_channel, 0, msg, crm_ipc_server_event);
 
     } else if (sys != NULL && strcmp(sys, CRM_SYSTEM_TENGINE) == 0) {
         xmlNode *data = get_message_xml(msg, F_CRM_DATA);
@@ -938,8 +938,11 @@ send_msg_via_ipc(xmlNode * msg, const char *sys)
 #endif
         do_lrm_invoke(A_LRM_INVOKE, C_IPC_MESSAGE, fsa_state, I_MESSAGE, &fsa_data);
 
+    } else if (sys != NULL && crmd_is_proxy_session(sys)) {
+        crmd_proxy_send(sys, msg);
+
     } else {
-        crm_err("Unknown Sub-system (%s)... discarding message.", crm_str(sys));
+        crm_debug("Unknown Sub-system (%s)... discarding message.", crm_str(sys));
         send_ok = FALSE;
     }
 
@@ -966,4 +969,3 @@ delete_ha_msg_input(ha_msg_input_t * orig)
     free_xml(orig->msg);
     free(orig);
 }
-

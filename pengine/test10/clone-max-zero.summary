@@ -4,8 +4,8 @@ Online: [ c001n11 c001n12 ]
 
  fencing	(stonith:external/ssh):	Started c001n11
  Clone Set: dlm-clone [dlm]
-     dlm:0	(ocf::pacemaker:controld):	 ORPHANED Started c001n12
-     dlm:1	(ocf::pacemaker:controld):	 ORPHANED Started c001n11
+     dlm	(ocf::pacemaker:controld):	 ORPHANED Started c001n12 
+     dlm	(ocf::pacemaker:controld):	 ORPHANED Started c001n11 
  Clone Set: o2cb-clone [o2cb]
      Started: [ c001n11 c001n12 ]
  Clone Set: clone-drbd0 [drbd0]
@@ -42,9 +42,9 @@ Online: [ c001n11 c001n12 ]
  fencing	(stonith:external/ssh):	Started c001n11
  Clone Set: dlm-clone [dlm]
  Clone Set: o2cb-clone [o2cb]
-     Stopped: [ o2cb:0 o2cb:1 ]
+     Stopped: [ c001n11 c001n12 ]
  Clone Set: clone-drbd0 [drbd0]
      Started: [ c001n11 c001n12 ]
  Clone Set: c-ocfs2-1 [ocfs2-1]
-     Stopped: [ ocfs2-1:0 ocfs2-1:1 ]
+     Stopped: [ c001n11 c001n12 ]
 

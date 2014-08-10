@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -26,9 +26,13 @@
 #    include <ocf/oc_event.h>
 #  endif
 
+#  if SUPPORT_COROSYNC
+#    include <corosync/cpg.h>
+#  endif
+
 extern gboolean crm_have_quorum;
 extern GHashTable *crm_peer_cache;
-extern GHashTable *crm_peer_id_cache;
+extern GHashTable *crm_remote_peer_cache;
 extern unsigned long long crm_peer_seq;
 
 #  ifndef CRM_SERVICE
@@ -41,50 +45,73 @@ extern unsigned long long crm_peer_seq;
 #define CRM_NODE_ACTIVE    CRM_NODE_MEMBER
 #define CRM_NODE_EVICTED   "evicted"
 
+enum crm_join_phase
+{
+    crm_join_nack       = -1,
+    crm_join_none       = 0,
+    crm_join_welcomed   = 1,
+    crm_join_integrated = 2,
+    crm_join_finalized  = 3,
+    crm_join_confirmed  = 4,
+};
+
+enum crm_node_flags
+{
+    /* node is not a cluster node and should not be considered for cluster membership */
+    crm_remote_node          = 0x0001,
+    /* This node is a remote node living within a container resource */
+    crm_remote_container     = 0x0002,
+    /* This node is a bare metal remote-node */
+    crm_remote_baremetal     = 0x0004,
+};
 /* *INDENT-ON* */
 
 typedef struct crm_peer_node_s {
-    uint32_t id;   /* Only used by corosync derivatives */
-    uint64_t born; /* Only used by heartbeat and the legacy plugin */
+    uint32_t id;                /* Only used by corosync derivatives */
+    uint64_t born;              /* Only used by heartbeat and the legacy plugin */
     uint64_t last_seen;
+    uint64_t flags;             /* Specified by crm_node_flags enum */
 
-    int32_t votes; /* Only used by the legacy plugin */
+    int32_t votes;              /* Only used by the legacy plugin */
     uint32_t processes;
+    enum crm_join_phase join;
 
     char *uname;
     char *uuid;
     char *state;
     char *expected;
 
-    char *addr;   /* Only used by the legacy plugin */
-    char *version;/* Unused */
+    char *addr;                 /* Only used by the legacy plugin */
+    char *version;              /* Unused */
 } crm_node_t;
 
 void crm_peer_init(void);
 void crm_peer_destroy(void);
-char *get_corosync_uuid(uint32_t id, const char *uname);
-const char *get_node_uuid(uint32_t id, const char *uname);
-int get_corosync_id(int id, const char *uuid);
 
-typedef struct crm_cluster_s
-{
-        char *uuid;
-        char *uname;
-        uint32_t nodeid;
+typedef struct crm_cluster_s {
+    char *uuid;
+    char *uname;
+    uint32_t nodeid;
 
-#if SUPPORT_HEARTBEAT
-        ll_cluster_t *hb_conn;
-        void (*hb_dispatch)(HA_Message *msg, void *private);
-#endif
+    void (*destroy) (gpointer);
 
-        gboolean (*cs_dispatch) (int kind, const char *from, const char *data);
-        void (*destroy) (gpointer);
+#  if SUPPORT_HEARTBEAT
+    ll_cluster_t *hb_conn;
+    void (*hb_dispatch) (HA_Message * msg, void *private);
+#  endif
+
+#  if SUPPORT_COROSYNC
+    struct cpg_name group;
+    cpg_callbacks_t cpg;
+    cpg_handle_t cpg_handle;
+#  endif
 
 } crm_cluster_t;
 
-gboolean crm_cluster_connect(crm_cluster_t *cluster);
-void crm_cluster_disconnect(crm_cluster_t *cluster);
+gboolean crm_cluster_connect(crm_cluster_t * cluster);
+void crm_cluster_disconnect(crm_cluster_t * cluster);
 
+/* *INDENT-OFF* */
 enum crm_ais_msg_class {
     crm_class_cluster = 0,
     crm_class_members = 1,
@@ -108,19 +135,35 @@ enum crm_ais_msg_types {
     crm_msg_stonith_ng = 9,
 };
 
-gboolean send_cluster_message(crm_node_t *node, enum crm_ais_msg_types service,
+/* used with crm_get_peer_full */
+enum crm_get_peer_flags {
+    CRM_GET_PEER_CLUSTER   = 0x0001,
+    CRM_GET_PEER_REMOTE    = 0x0002,
+};
+/* *INDENT-ON* */
+
+gboolean send_cluster_message(crm_node_t * node, enum crm_ais_msg_types service,
                               xmlNode * data, gboolean ordered);
 
-void destroy_crm_node(gpointer/* crm_node_t* */ data);
 
+int crm_remote_peer_cache_size(void);
+
+/* Initialize and refresh the remote peer cache from a cib config */
+void crm_remote_peer_cache_refresh(xmlNode *cib);
+void crm_remote_peer_cache_add(const char *node_name);
+void crm_remote_peer_cache_remove(const char *node_name);
+
+/* allows filtering of remote and cluster nodes using crm_get_peer_flags */
+crm_node_t *crm_get_peer_full(unsigned int id, const char *uname, int flags);
+
+/* only searches cluster nodes */
 crm_node_t *crm_get_peer(unsigned int id, const char *uname);
 
 guint crm_active_peers(void);
 gboolean crm_is_peer_active(const crm_node_t * node);
-guint reap_crm_member(uint32_t id);
-int crm_terminate_member(int nodeid, const char *uname, void* unused);
+guint reap_crm_member(uint32_t id, const char *name);
+int crm_terminate_member(int nodeid, const char *uname, void *unused);
 int crm_terminate_member_no_mainloop(int nodeid, const char *uname, int *connection);
-gboolean crm_get_cluster_name(char **cname);
 
 #  if SUPPORT_HEARTBEAT
 gboolean crm_is_heartbeat_peer_active(const crm_node_t * node);
@@ -128,29 +171,37 @@ gboolean crm_is_heartbeat_peer_active(const crm_node_t * node);
 
 #  if SUPPORT_COROSYNC
 extern int ais_fd_sync;
+uint32_t get_local_nodeid(cpg_handle_t handle);
+
+gboolean cluster_connect_cpg(crm_cluster_t *cluster);
+void cluster_disconnect_cpg(crm_cluster_t * cluster);
+
+void pcmk_cpg_membership(cpg_handle_t handle,
+                         const struct cpg_name *groupName,
+                         const struct cpg_address *member_list, size_t member_list_entries,
+                         const struct cpg_address *left_list, size_t left_list_entries,
+                         const struct cpg_address *joined_list, size_t joined_list_entries);
 gboolean crm_is_corosync_peer_active(const crm_node_t * node);
-gboolean send_ais_text(int class, const char *data, gboolean local,
-                              crm_node_t *node, enum crm_ais_msg_types dest);
-gboolean get_ais_nodeid(uint32_t * id, char **uname);
+gboolean send_cluster_text(int class, const char *data, gboolean local,
+                       crm_node_t * node, enum crm_ais_msg_types dest);
 #  endif
 
-void empty_uuid_cache(void);
-const char *get_uuid(const char *uname);
-const char *get_uname(const char *uuid);
-void set_uuid(xmlNode * node, const char *attr, const char *uname);
-void unget_uuid(const char *uname);
+const char *crm_peer_uuid(crm_node_t *node);
+const char *crm_peer_uname(const char *uuid);
+void set_uuid(xmlNode *xml, const char *attr, crm_node_t *node);
 
 enum crm_status_type {
     crm_status_uname,
     crm_status_nstate,
     crm_status_processes,
+    crm_status_rstate, /* remote node state */
 };
 
 enum crm_ais_msg_types text2msg_type(const char *text);
 void crm_set_status_callback(void (*dispatch) (enum crm_status_type, crm_node_t *, const void *));
 
 /* *INDENT-OFF* */
-enum cluster_type_e 
+enum cluster_type_e
 {
     pcmk_cluster_unknown     = 0x0001,
     pcmk_cluster_invalid     = 0x0002,
@@ -170,7 +221,12 @@ gboolean is_openais_cluster(void);
 gboolean is_classic_ais_cluster(void);
 gboolean is_heartbeat_cluster(void);
 
-char *get_local_node_name(void);
+const char *get_local_node_name(void);
 char *get_node_name(uint32_t nodeid);
+
+#  if SUPPORT_COROSYNC
+char *pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void *msg,
+                        uint32_t *kind, const char **from);
+#  endif
 
 #endif

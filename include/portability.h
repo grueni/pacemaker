@@ -10,12 +10,12 @@
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -53,7 +53,7 @@ char *strerror(int errnum);
 
 #  ifndef HAVE_STRCHRNUL
   /* We supply a replacement function, but need a prototype */
-char *strchrnul (const char *s, int c_in);
+char *strchrnul(const char *s, int c_in);
 #  endif                        /* HAVE_STRCHRNUL */
 
 #  ifndef HAVE_ALPHASORT
@@ -74,7 +74,8 @@ char *strndup(const char *str, size_t len);
 #    	define USE_GNU
 #  endif
 
-#  if !HAVE_LIBGLIB_2_0
+#  include <glib.h>
+#  if !GLIB_CHECK_VERSION(2,14,0)
 
 typedef struct fake_ghi {
     GHashTable *hash;
@@ -92,6 +93,7 @@ g_hash_prepend_value(gpointer key, gpointer value, gpointer user_data)
     *values = g_list_prepend(*values, value);
 }
 
+/* Since: 2.14 */
 static inline GList *
 g_hash_table_get_values(GHashTable * hash_table)
 {
@@ -100,6 +102,9 @@ g_hash_table_get_values(GHashTable * hash_table)
     g_hash_table_foreach(hash_table, g_hash_prepend_value, &values);
     return values;
 }
+#  endif
+
+#  if !GLIB_CHECK_VERSION(2,16,0)
 
 static inline gboolean
 g_hash_table_nth_data(gpointer key, gpointer value, gpointer user_data)
@@ -143,41 +148,120 @@ g_hash_table_iter_next(GHashTableIter * iter, gpointer * key, gpointer * value)
     return found;
 }
 
+static inline void
+g_hash_table_iter_remove(GHashTableIter * iter)
+{
+    g_hash_table_remove(iter->hash, iter->key);
+    iter->nth--;                /* Or zero to be safe? */
+}
+
+static inline int
+g_strcmp0(const char *str1, const char *str2)
+{
+    if (!str1)
+        return -(str1 != str2);
+    if (!str2)
+        return str1 != str2;
+    return strcmp(str1, str2);
+}
 #  endif                        /* !HAVE_LIBGLIB_2_0 */
 
-#ifdef NEED_G_LIST_FREE_FULL
-#  include <glib.h>
-static inline void g_list_free_full(GList *list, GDestroyNotify free_func)
+#  if !GLIB_CHECK_VERSION(2,28,0)
+#    include <string.h>
+/* Since: 2.28 */
+static inline void
+g_list_free_full(GList * list, GDestroyNotify free_func)
 {
-   g_list_foreach(list, (GFunc) free_func, NULL);
-   g_list_free(list);
+    g_list_foreach(list, (GFunc) free_func, NULL);
+    g_list_free(list);
 }
-#endif
+#  endif
+
+#  if SUPPORT_DBUS
+#    ifndef HAVE_DBUSBASICVALUE
+#      include <stdint.h>
+#      include <dbus/dbus.h>
+/**
+ * An 8-byte struct you could use to access int64 without having
+ * int64 support
+ */
+typedef struct
+{
+  uint32_t first32;  /**< first 32 bits in the 8 bytes (beware endian issues) */
+  uint32_t second32; /**< second 32 bits in the 8 bytes (beware endian issues) */
+} DBus8ByteStruct;
+
+/**
+ * A simple value union that lets you access bytes as if they
+ * were various types; useful when dealing with basic types via
+ * void pointers and varargs.
+ *
+ * This union also contains a pointer member (which can be used
+ * to retrieve a string from dbus_message_iter_get_basic(), for
+ * instance), so on future platforms it could conceivably be larger
+ * than 8 bytes.
+ */
+typedef union
+{
+  unsigned char bytes[8]; /**< as 8 individual bytes */
+  int16_t  i16;   /**< as int16 */
+  uint16_t u16;   /**< as int16 */
+  int32_t  i32;   /**< as int32 */
+  uint32_t u32;   /**< as int32 */
+  uint32_t bool_val; /**< as boolean */
+#      ifdef DBUS_HAVE_INT64
+  int64_t  i64;   /**< as int64 */
+  uint64_t u64;   /**< as int64 */
+#      endif
+  DBus8ByteStruct eight; /**< as 8-byte struct */
+  double dbl;          /**< as double */
+  unsigned char byt;   /**< as byte */
+  char *str;           /**< as char* (string, object path or signature) */
+  int fd;              /**< as Unix file descriptor */
+} DBusBasicValue;
+#    endif
+#  endif
 
 /* Replacement error codes for non-linux */
-#ifndef ENOTUNIQ
-#  define ENOTUNIQ  900
-#endif
+#  ifndef ENOTUNIQ
+#    define ENOTUNIQ  190
+#  endif
 
-#ifndef ECOMM
-#  define ECOMM     901
-#endif
+#  ifndef ECOMM
+#    define ECOMM     191
+#  endif
 
-#ifndef ELIBACC
-#  define ELIBACC   902
-#endif
+#  ifndef ELIBACC
+#    define ELIBACC   192
+#  endif
 
-#ifndef EREMOTEIO
-#  define EREMOTEIO 903
-#endif
+#  ifndef EREMOTEIO
+#    define EREMOTEIO 193
+#  endif
 
-#ifndef EUNATCH
-#  define EUNATCH   904
-#endif
+#  ifndef EUNATCH
+#    define EUNATCH   194
+#  endif
 
-#ifndef ENOKEY
-#  define ENOKEY    905
-#endif
+#  ifndef ENOKEY
+#    define ENOKEY    195
+#  endif
+
+#  ifndef ENODATA
+#    define ENODATA   196
+#  endif
+
+#  ifndef ETIME
+#    define ETIME     197
+#  endif
+
+#  ifndef ENOSR
+#    define ENOSR     198
+#  endif
+
+#  ifndef ENOSTR
+#    define ENOSTR    199
+#  endif
 
 /*
  * Some compilers (eg. Sun studio) do not define __FUNCTION__

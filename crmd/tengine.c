@@ -43,7 +43,6 @@
 #include <crmd_messages.h>
 #include <crmd_callbacks.h>
 
-
 #include <crmd.h>
 #include <tengine.h>
 #include <te_callbacks.h>
@@ -84,8 +83,8 @@ do_te_control(long long action,
         }
 
         if (fsa_cib_conn) {
-            fsa_cib_conn->cmds->del_notify_callback(
-                fsa_cib_conn, T_CIB_DIFF_NOTIFY, te_update_diff);
+            fsa_cib_conn->cmds->del_notify_callback(fsa_cib_conn, T_CIB_DIFF_NOTIFY,
+                                                    te_update_diff);
         }
 
         clear_bit(fsa_input_register, te_subsystem->flag_connected);
@@ -106,10 +105,6 @@ do_te_control(long long action,
 
     te_uuid = crm_generate_uuid();
     crm_info("Registering TE UUID: %s", te_uuid);
-
-    if (transition_trigger == NULL) {
-        transition_trigger = mainloop_add_trigger(G_PRIORITY_LOW, te_graph_trigger, NULL);
-    }
 
     if (pcmk_ok !=
         fsa_cib_conn->cmds->add_notify_callback(fsa_cib_conn, T_CIB_DIFF_NOTIFY, te_update_diff)) {
@@ -155,14 +150,14 @@ do_te_invoke(long long action,
                   transition_graph->complete ? "inactive" : "active");
         abort_transition(INFINITY, tg_restart, "Peer Cancelled", NULL);
         if (transition_graph->complete == FALSE) {
-            crmd_fsa_stall(NULL);
+            crmd_fsa_stall(FALSE);
         }
 
     } else if (action & A_TE_HALT) {
         crm_debug("Halting the transition: %s", transition_graph->complete ? "inactive" : "active");
         abort_transition(INFINITY, tg_stop, "Peer Halt", NULL);
         if (transition_graph->complete == FALSE) {
-            crmd_fsa_stall(NULL);
+            crmd_fsa_stall(FALSE);
         }
 
     } else if (action & A_TE_INVOKE) {
@@ -212,6 +207,7 @@ do_te_invoke(long long action,
         crm_info("Processing graph %d (ref=%s) derived from %s", transition_graph->id, ref,
                  graph_input);
 
+        te_reset_job_counts();
         value = crm_element_value(graph_data, "failed-stop-offset");
         if (value) {
             free(failed_stop_offset);

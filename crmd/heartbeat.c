@@ -33,7 +33,6 @@
 #include <tengine.h>
 #include <membership.h>
 
-
 #include <ocf/oc_event.h>
 #include <ocf/oc_membership.h>
 
@@ -48,7 +47,6 @@ int ccm_dispatch(gpointer user_data);
 
 int (*ccm_api_callback_done) (void *cookie) = NULL;
 int (*ccm_api_handle_event) (const oc_ev_t * token) = NULL;
-static gboolean fsa_have_quorum = FALSE;
 
 static oc_ev_t *fsa_ev_token;
 static void *ccm_library = NULL;
@@ -67,11 +65,10 @@ do_ccm_control(long long action,
                enum crmd_fsa_state cur_state,
                enum crmd_fsa_input current_input, fsa_data_t * msg_data)
 {
-    static struct mainloop_fd_callbacks ccm_fd_callbacks = 
-        {
-            .dispatch = ccm_dispatch,
-            .destroy = ccm_connection_destroy,
-        };
+    static struct mainloop_fd_callbacks ccm_fd_callbacks = {
+        .dispatch = ccm_dispatch,
+        .destroy = ccm_connection_destroy,
+    };
 
     if (is_heartbeat_cluster()) {
         int (*ccm_api_register) (oc_ev_t ** token) =
@@ -137,7 +134,7 @@ do_ccm_control(long long action,
                              " %d times (%d max)", num_ccm_register_fails, max_ccm_register_fails);
 
                     crm_timer_start(wait_timer);
-                    crmd_fsa_stall(NULL);
+                    crmd_fsa_stall(FALSE);
                     return;
 
                 } else {
@@ -148,7 +145,8 @@ do_ccm_control(long long action,
             }
 
             crm_info("CCM connection established... waiting for first callback");
-            mainloop_add_fd("heartbeat-ccm", G_PRIORITY_HIGH, fsa_ev_fd, fsa_ev_token, &ccm_fd_callbacks);
+            mainloop_add_fd("heartbeat-ccm", G_PRIORITY_HIGH, fsa_ev_fd, fsa_ev_token,
+                            &ccm_fd_callbacks);
 
         }
     }
@@ -173,7 +171,7 @@ ccm_event_detail(const oc_ev_membership_t * oc, oc_ed_t event)
              oc->m_instance,
              oc->m_n_member, oc->m_n_in, oc->m_n_out, oc->m_memb_idx, oc->m_in_idx, oc->m_out_idx);
 
-#  if !CCM_EVENT_DETAIL_PARTIAL
+#if !CCM_EVENT_DETAIL_PARTIAL
     for (lpc = 0; lpc < oc->m_n_member; lpc++) {
         crm_info("\tCURRENT: %s [nodeid=%d, born=%d]",
                  oc->m_array[oc->m_memb_idx + lpc].node_uname,
@@ -187,7 +185,7 @@ ccm_event_detail(const oc_ev_membership_t * oc, oc_ed_t event)
     if (member == FALSE) {
         crm_warn("MY NODE IS NOT IN CCM THE MEMBERSHIP LIST");
     }
-#  endif
+#endif
     for (lpc = 0; lpc < (int)oc->m_n_in; lpc++) {
         crm_info("\tNEW:     %s [nodeid=%d, born=%d]",
                  oc->m_array[oc->m_in_idx + lpc].node_uname,
@@ -205,7 +203,6 @@ ccm_event_detail(const oc_ev_membership_t * oc, oc_ed_t event)
     crm_trace("-----------------------");
 
 }
-
 
 /*	 A_CCM_UPDATE_CACHE	*/
 /*
@@ -255,6 +252,7 @@ do_ccm_update_cache(enum crmd_fsa_cause cause, enum crmd_fsa_state cur_state,
 
     if (event == OC_EV_MS_EVICTED) {
         crm_node_t *peer = crm_get_peer(0, fsa_our_uname);
+
         crm_update_peer_state(__FUNCTION__, peer, CRM_NODE_EVICTED, 0);
 
         /* todo: drop back to S_PENDING instead */
@@ -294,7 +292,7 @@ ccm_dispatch(gpointer user_data)
     }
 
     trigger_fsa(fsa_source);
-    if(was_error) {
+    if (was_error) {
         return -1;
     }
 
@@ -354,14 +352,13 @@ crmd_ccm_msg_callback(oc_ed_t event, void *cookie, size_t size, const void *data
 
     if (update_quorum) {
         crm_have_quorum = ccm_have_quorum(event);
-        crm_update_quorum(crm_have_quorum, FALSE);
-
         if (crm_have_quorum == FALSE) {
             /* did we just loose quorum? */
-            if (fsa_have_quorum) {
+            if (fsa_has_quorum) {
                 crm_info("Quorum lost: %s", ccm_event_name(event));
             }
         }
+        crm_update_quorum(crm_have_quorum, FALSE);
     }
 
     if (update_cache) {
@@ -380,7 +377,6 @@ crmd_ccm_msg_callback(oc_ed_t event, void *cookie, size_t size, const void *data
     (*ccm_api_callback_done) (cookie);
     return;
 }
-
 
 void
 crmd_ha_status_callback(const char *node, const char *status, void *private)
@@ -405,7 +401,7 @@ crmd_ha_status_callback(const char *node, const char *status, void *private)
 
     trigger_fsa(fsa_source);
 
-    if(AM_I_DC) {
+    if (AM_I_DC) {
         update = do_update_node_cib(peer, node_update_cluster, NULL, __FUNCTION__);
         fsa_cib_anon_update(XML_CIB_TAG_STATUS, update,
                             cib_scope_local | cib_quorum_override | cib_can_create);
@@ -428,13 +424,15 @@ crmd_client_status_callback(const char *node, const char *client, const char *st
     crm_notice("Status update: Client %s/%s now has status [%s] (DC=%s)",
                node, client, status, AM_I_DC ? "true" : "false");
 
+    peer = crm_get_peer(0, node);
+
     if (safe_str_eq(status, ONLINESTATUS)) {
         /* remove the cached value in case it changed */
         crm_trace("Uncaching UUID for %s", node);
-        unget_uuid(node);
+        free(peer->uuid);
+        peer->uuid = NULL;
     }
 
-    peer = crm_get_peer(0, node);
     crm_update_peer_proc(__FUNCTION__, peer, crm_proc_crmd, status);
 
     if (AM_I_DC) {

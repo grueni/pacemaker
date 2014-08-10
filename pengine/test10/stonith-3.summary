@@ -5,7 +5,7 @@ Online: [ rh5node2 ]
 
  prmIpPostgreSQLDB	(ocf::heartbeat:IPaddr):	Stopped 
  Clone Set: clnStonith [grpStonith]
-     Stopped: [ grpStonith:0 grpStonith:1 ]
+     Stopped: [ rh5node1 rh5node2 ]
 
 Transition Summary:
  * Start   prmIpPostgreSQLDB	(rh5node2)
@@ -15,17 +15,16 @@ Executing cluster transition:
  * Resource action: prmIpPostgreSQLDB monitor on rh5node2
  * Resource action: prmStonith:0    monitor on rh5node2
  * Pseudo action:   clnStonith_start_0
- * Pseudo action:   probe_complete
- * Pseudo action:   grpStonith:0_start_0
- * Resource action: prmStonith:0    start on rh5node2
- * Pseudo action:   stonith_up
- * Pseudo action:   grpStonith:0_running_0
- * Pseudo action:   clnStonith_running_0
- * Fencing rh5node1
+ * Fencing rh5node1 (reboot)
  * Pseudo action:   stonith_complete
+ * Pseudo action:   probe_complete
  * Pseudo action:   all_stopped
  * Resource action: prmIpPostgreSQLDB start on rh5node2
+ * Pseudo action:   grpStonith:0_start_0
+ * Resource action: prmStonith:0    start on rh5node2
  * Resource action: prmIpPostgreSQLDB monitor=30000 on rh5node2
+ * Pseudo action:   grpStonith:0_running_0
+ * Pseudo action:   clnStonith_running_0
 
 Revised cluster status:
 Online: [ rh5node2 ]
@@ -34,5 +33,5 @@ OFFLINE: [ rh5node1 ]
  prmIpPostgreSQLDB	(ocf::heartbeat:IPaddr):	Started rh5node2
  Clone Set: clnStonith [grpStonith]
      Started: [ rh5node2 ]
-     Stopped: [ grpStonith:1 ]
+     Stopped: [ rh5node1 ]
 

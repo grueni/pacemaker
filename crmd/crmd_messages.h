@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This software is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -19,7 +19,7 @@
 #  define XML_CRM_MESSAGES__H
 
 #  include <crm/crm.h>
-#  include <crm/common/ipc.h>
+#  include <crm/common/ipcs.h>
 #  include <crm/common/xml.h>
 #  include <crm/cluster/internal.h>
 #  include <crmd_fsa.h>
@@ -50,15 +50,17 @@ extern int register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input
 extern void fsa_dump_queue(int log_level);
 extern void route_message(enum crmd_fsa_cause cause, xmlNode * input);
 
-#  define crmd_fsa_stall(cur_input) if(cur_input != NULL) {		\
-		register_fsa_input_adv(					\
-			((fsa_data_t*)cur_input)->fsa_cause, I_WAIT_FOR_EVENT, \
-			((fsa_data_t*)cur_input)->data, action, TRUE, __FUNCTION__);	\
-	} else {							\
-		register_fsa_input_adv(					\
-			C_FSA_INTERNAL, I_WAIT_FOR_EVENT,		\
-			NULL, action, TRUE, __FUNCTION__);		\
-	}								\
+#  define crmd_fsa_stall(suppress) do {                                 \
+    if(suppress == FALSE && msg_data != NULL) {                         \
+        register_fsa_input_adv(                                         \
+            ((fsa_data_t*)msg_data)->fsa_cause, I_WAIT_FOR_EVENT,       \
+            ((fsa_data_t*)msg_data)->data, action, TRUE, __FUNCTION__); \
+    } else {                                                            \
+        register_fsa_input_adv(                                         \
+            C_FSA_INTERNAL, I_WAIT_FOR_EVENT,                           \
+            NULL, action, TRUE, __FUNCTION__);                          \
+    }                                                                   \
+    } while(0)
 
 #  define register_fsa_input(cause, input, data) register_fsa_input_adv(cause, input, data, A_NOTHING, FALSE, __FUNCTION__)
 
@@ -98,13 +100,14 @@ extern gboolean add_pending_outgoing_reply(const char *originating_node_name,
                                            const char *crm_msg_reference,
                                            const char *sys_to, const char *sys_from);
 
-extern gboolean crmd_authorize_message(xmlNode * client_msg, crmd_client_t * curr_client);
+gboolean crmd_is_proxy_session(const char *session);
+void crmd_proxy_send(const char *session, xmlNode *msg);
+
+extern gboolean crmd_authorize_message(xmlNode * client_msg, crm_client_t * curr_client, const char *proxy_session);
 
 extern gboolean send_request(xmlNode * msg, char **msg_reference);
 
-extern enum crmd_fsa_input handle_message(xmlNode * stored_msg);
-
-extern void lrm_op_callback(lrmd_event_data_t * op);
+extern enum crmd_fsa_input handle_message(xmlNode * stored_msg, enum crmd_fsa_cause cause);
 
 extern ha_msg_input_t *copy_ha_msg_input(ha_msg_input_t * orig);
 

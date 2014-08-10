@@ -4,9 +4,9 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: 0\n"
-"POT-Creation-Date: 2010-12-15T23:32:36\n"
+"POT-Creation-Date: 2012-10-17T05:19:03\n"
 "PO-Revision-Date: 2010-12-15 23:35+0800\n"
-"Last-Translator: Charlie Chen <laneovcc@gmail.com>\n"
+"Last-Translator: Hu Fu <askfuhu@gmail.com>\n"
 "Language-Team: None\n"
 "Language: \n"
 "MIME-Version: 1.0\n"
@@ -48,3 +48,17 @@ msgstr "Scarazzini"
 msgid "Italian translation"
 msgstr "意大利语翻译"
 
+#. Tag: firstname
+#, no-c-format
+msgid "Dan"
+msgstr ""
+
+#. Tag: surname
+#, no-c-format
+msgid "Frîncu"
+msgstr ""
+
+#. Tag: contrib
+#, no-c-format
+msgid "Romanian translation"
+msgstr "罗马尼亚语翻译"

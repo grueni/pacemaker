@@ -1,3 +1,4 @@
+
 /* 
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
  * 
@@ -139,12 +140,14 @@ main(int argc, char **argv)
         fprintf(stderr, "-Q,--query is not yet implemented, use -D to delete existing values\n\n");
         crm_help('?', EX_USAGE);
 
-    } else
-        if (FALSE == attrd_update_delegate(
-                NULL, command, NULL, attr_name, attr_value, attr_section, attr_set, attr_dampen, NULL)) {
-        fprintf(stderr, "Could not update %s=%s\n", attr_name, attr_value);
-        return 1;
+    } else {
+        int rc = attrd_update_delegate(NULL, command, NULL, attr_name, attr_value, attr_section,
+                                       attr_set, attr_dampen, NULL, FALSE);
+        if (rc != pcmk_ok) {
+            fprintf(stderr, "Could not update %s=%s: %s (%d)\n", attr_name, attr_value, pcmk_strerror(rc), rc);
+        }
+        crm_exit(rc);
     }
 
-    return 0;
+    return crm_exit(pcmk_ok);
 }

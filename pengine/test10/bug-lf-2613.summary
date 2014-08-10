@@ -8,7 +8,7 @@ Online: [ act1 act2 act3 sby1 sby2 ]
      prmFsPostgreSQLDB1-2	(ocf::pacemaker:Dummy):	Started act1
      prmFsPostgreSQLDB1-3	(ocf::pacemaker:Dummy):	Started act1
      prmIpPostgreSQLDB1	(ocf::pacemaker:Dummy):	Started act1
-     prmApPostgreSQLDB1	(ocf::pacemaker:Dummy):	Started act1 FAILED
+     prmApPostgreSQLDB1	(ocf::pacemaker:Dummy):	FAILED act1 
  Resource Group: grpPostgreSQLDB2
      prmExPostgreSQLDB2	(ocf::pacemaker:Dummy):	Started act2
      prmFsPostgreSQLDB2-1	(ocf::pacemaker:Dummy):	Started act2
@@ -30,7 +30,7 @@ Transition Summary:
  * Move    prmFsPostgreSQLDB1-2	(Started act1 -> sby1)
  * Move    prmFsPostgreSQLDB1-3	(Started act1 -> sby1)
  * Move    prmIpPostgreSQLDB1	(Started act1 -> sby1)
- * Move    prmApPostgreSQLDB1	(Started act1 -> sby1)
+ * Recover prmApPostgreSQLDB1	(Started act1 -> sby1)
 
 Executing cluster transition:
  * Pseudo action:   grpPostgreSQLDB1_stop_0

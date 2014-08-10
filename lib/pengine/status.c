@@ -1,16 +1,16 @@
-/* 
+/*
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
- * 
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -24,20 +24,17 @@
 #include <crm/msg_xml.h>
 #include <crm/common/xml.h>
 
-
 #include <glib.h>
 
 #include <crm/pengine/internal.h>
 #include <unpack.h>
-
-extern xmlNode *get_object_root(const char *object_type, xmlNode * the_root);
 
 #define MEMCHECK_STAGE_0 0
 
 #define check_and_exit(stage) 	cleanup_calculations(data_set);		\
 	crm_mem_stats(NULL);						\
 	crm_err("Exiting: stage %d", stage);				\
-	exit(1);
+	crm_exit(pcmk_err_generic);
 
 /*
  * Unpack everything
@@ -53,11 +50,11 @@ extern xmlNode *get_object_root(const char *object_type, xmlNode * the_root);
 gboolean
 cluster_status(pe_working_set_t * data_set)
 {
-    xmlNode *config = get_object_root(XML_CIB_TAG_CRMCONFIG, data_set->input);
-    xmlNode *cib_nodes = get_object_root(XML_CIB_TAG_NODES, data_set->input);
-    xmlNode *cib_resources = get_object_root(XML_CIB_TAG_RESOURCES, data_set->input);
-    xmlNode *cib_status = get_object_root(XML_CIB_TAG_STATUS, data_set->input);
-    xmlNode *cib_domains = get_object_root(XML_CIB_TAG_DOMAINS, data_set->input);
+    xmlNode *config = get_xpath_object("//"XML_CIB_TAG_CRMCONFIG, data_set->input, LOG_TRACE);
+    xmlNode *cib_nodes = get_xpath_object("//"XML_CIB_TAG_NODES, data_set->input, LOG_TRACE);
+    xmlNode *cib_resources = get_xpath_object("//"XML_CIB_TAG_RESOURCES, data_set->input, LOG_TRACE);
+    xmlNode *cib_status = get_xpath_object("//"XML_CIB_TAG_STATUS, data_set->input, LOG_TRACE);
+    xmlNode *cib_tags = get_xpath_object("//"XML_CIB_TAG_TAGS, data_set->input, LOG_TRACE);
     const char *value = crm_element_value(data_set->input, XML_ATTR_HAVE_QUORUM);
 
     crm_trace("Beginning unpack");
@@ -74,7 +71,9 @@ cluster_status(pe_working_set_t * data_set)
         data_set->now = crm_time_new(NULL);
     }
 
-    if (data_set->input != NULL && crm_element_value(data_set->input, XML_ATTR_DC_UUID) != NULL) {
+    if (data_set->dc_uuid == NULL
+        && data_set->input != NULL
+        && crm_element_value(data_set->input, XML_ATTR_DC_UUID) != NULL) {
         /* this should always be present */
         data_set->dc_uuid = crm_element_value_copy(data_set->input, XML_ATTR_DC_UUID);
     }
@@ -84,20 +83,29 @@ cluster_status(pe_working_set_t * data_set)
         set_bit(data_set->flags, pe_flag_have_quorum);
     }
 
-    data_set->op_defaults = get_object_root(XML_CIB_TAG_OPCONFIG, data_set->input);
-    data_set->rsc_defaults = get_object_root(XML_CIB_TAG_RSCCONFIG, data_set->input);
+    data_set->op_defaults = get_xpath_object("//"XML_CIB_TAG_OPCONFIG, data_set->input, LOG_TRACE);
+    data_set->rsc_defaults = get_xpath_object("//"XML_CIB_TAG_RSCCONFIG, data_set->input, LOG_TRACE);
 
     unpack_config(config, data_set);
 
-    if (is_set(data_set->flags, pe_flag_have_quorum) == FALSE
-        && data_set->no_quorum_policy != no_quorum_ignore) {
-        crm_warn("We do not have quorum" " - fencing and resource management disabled");
+   if (is_not_set(data_set->flags, pe_flag_quick_location)
+       && is_not_set(data_set->flags, pe_flag_have_quorum)
+       && data_set->no_quorum_policy != no_quorum_ignore) {
+        crm_warn("We do not have quorum - fencing and resource management disabled");
     }
 
     unpack_nodes(cib_nodes, data_set);
-    unpack_domains(cib_domains, data_set);
+
+    if(is_not_set(data_set->flags, pe_flag_quick_location)) {
+        unpack_remote_nodes(cib_resources, data_set);
+    }
+
     unpack_resources(cib_resources, data_set);
-    unpack_status(cib_status, data_set);
+    unpack_tags(cib_tags, data_set);
+
+    if(is_not_set(data_set->flags, pe_flag_quick_location)) {
+        unpack_status(cib_status, data_set);
+    }
 
     set_bit(data_set->flags, pe_flag_have_status);
     return TRUE;
@@ -110,7 +118,6 @@ pe_free_resources(GListPtr resources)
     GListPtr iterator = resources;
 
     while (iterator != NULL) {
-        iterator = iterator;
         rsc = (resource_t *) iterator->data;
         iterator = iterator->next;
         rsc->fns->free(rsc);
@@ -156,6 +163,9 @@ pe_free_nodes(GListPtr nodes)
             if (details->utilization != NULL) {
                 g_hash_table_destroy(details->utilization);
             }
+            if (details->digest_cache != NULL) {
+                g_hash_table_destroy(details->digest_cache);
+            }
             g_list_free(details->running_rsc);
             g_list_free(details->allocated_rsc);
             free(details);
@@ -180,12 +190,20 @@ cleanup_calculations(pe_working_set_t * data_set)
         g_hash_table_destroy(data_set->config_hash);
     }
 
+    if (data_set->singletons != NULL) {
+        g_hash_table_destroy(data_set->singletons);
+    }
+
     if (data_set->tickets) {
         g_hash_table_destroy(data_set->tickets);
     }
 
     if (data_set->template_rsc_sets) {
         g_hash_table_destroy(data_set->template_rsc_sets);
+    }
+
+    if (data_set->tags) {
+        g_hash_table_destroy(data_set->tags);
     }
 
     free(data_set->dc_uuid);
@@ -195,10 +213,6 @@ cleanup_calculations(pe_working_set_t * data_set)
 
     crm_trace("deleting actions");
     pe_free_actions(data_set->actions);
-
-    if (data_set->domains) {
-        g_hash_table_destroy(data_set->domains);
-    }
 
     crm_trace("deleting nodes");
     pe_free_nodes(data_set->nodes);
@@ -210,8 +224,10 @@ cleanup_calculations(pe_working_set_t * data_set)
 
     set_working_set_defaults(data_set);
 
-    CRM_CHECK(data_set->ordering_constraints == NULL,;);
-    CRM_CHECK(data_set->placement_constraints == NULL,;);
+    CRM_CHECK(data_set->ordering_constraints == NULL,;
+        );
+    CRM_CHECK(data_set->placement_constraints == NULL,;
+        );
 }
 
 void
@@ -220,6 +236,7 @@ set_working_set_defaults(pe_working_set_t * data_set)
     pe_dataset = data_set;
     memset(data_set, 0, sizeof(pe_working_set_t));
 
+    data_set->dc_uuid = NULL;
     data_set->order_id = 1;
     data_set->action_id = 1;
     data_set->no_quorum_policy = no_quorum_freeze;
@@ -239,7 +256,8 @@ pe_find_resource(GListPtr rsc_list, const char *id)
     for (rIter = rsc_list; id && rIter; rIter = rIter->next) {
         resource_t *parent = rIter->data;
 
-        resource_t *match = parent->fns->find_rsc(parent, id, NULL, pe_find_renamed | pe_find_current);
+        resource_t *match =
+            parent->fns->find_rsc(parent, id, NULL, pe_find_renamed | pe_find_current);
         if (match != NULL) {
             return match;
         }
@@ -252,7 +270,8 @@ node_t *
 pe_find_node_any(GListPtr nodes, const char *id, const char *uname)
 {
     node_t *match = pe_find_node_id(nodes, id);
-    if(match) {
+
+    if (match) {
         return match;
     }
     crm_trace("Looking up %s via it's uname instead", uname);

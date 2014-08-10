@@ -43,7 +43,6 @@
 #include <crmd_messages.h>
 #include <crmd_callbacks.h>
 
-
 #include <crmd.h>
 
 #include <tengine.h>
@@ -56,6 +55,9 @@ static void
 do_cib_updated(const char *event, xmlNode * msg)
 {
     int rc = -1;
+    int format= 1;
+    xmlNode *patchset = get_message_xml(msg, F_CIB_UPDATE_RESULT);
+    xmlNode *change = NULL;
 
     CRM_CHECK(msg != NULL, return);
     crm_element_value_int(msg, F_CIB_RC, &rc);
@@ -64,10 +66,26 @@ do_cib_updated(const char *event, xmlNode * msg)
         return;
     }
 
-    if (get_xpath_object
-        ("//" F_CIB_UPDATE_RESULT "//" XML_TAG_DIFF_ADDED "//" XML_CIB_TAG_CRMCONFIG, msg,
-         LOG_TRACE) != NULL) {
-        mainloop_set_trigger(config_read);
+    crm_element_value_int(patchset, "format", &format);
+    if (format == 1) {
+        if (get_xpath_object
+            ("//" F_CIB_UPDATE_RESULT "//" XML_TAG_DIFF_ADDED "//" XML_CIB_TAG_CRMCONFIG, msg,
+             LOG_TRACE) != NULL) {
+            mainloop_set_trigger(config_read);
+        }
+
+    } else if (format == 2) {
+        for (change = __xml_first_child(patchset); change != NULL; change = __xml_next(change)) {
+            const char *xpath = crm_element_value(change, XML_DIFF_PATH);
+            if (xpath != NULL
+                && strstr(xpath, "/" XML_TAG_CIB "/" XML_CIB_TAG_CONFIGURATION "/" XML_CIB_TAG_CRMCONFIG "/")) {
+                mainloop_set_trigger(config_read);
+                break;
+            }
+        }
+
+    } else {
+        crm_warn("Unknown patch format: %d", format);
     }
 }
 
@@ -75,8 +93,8 @@ static void
 revision_check_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)
 {
     int cmp = -1;
-    const char *revision = NULL;
     xmlNode *generation = NULL;
+    const char *revision = NULL;
 
     if (rc != pcmk_ok) {
         fsa_data_t *msg_data = NULL;
@@ -95,7 +113,7 @@ revision_check_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, vo
     cmp = compare_version(revision, CRM_FEATURE_SET);
 
     if (cmp > 0) {
-        crm_err("This build (%s) does not support the current" " resource configuration", VERSION);
+        crm_err("This build (%s) does not support the current resource configuration", VERSION);
         crm_err("We can only support up to CRM feature set %s (current=%s)",
                 CRM_FEATURE_SET, revision);
         crm_err("Shutting down the CRM");
@@ -118,7 +136,8 @@ do_cib_replaced(const char *event, xmlNode * msg)
     }
 
     /* start the join process again so we get everyone's LRM status */
-    populate_cib_nodes(node_update_quick|node_update_cluster|node_update_peer|node_update_join|node_update_expected, __FUNCTION__);
+    populate_cib_nodes(node_update_quick | node_update_cluster | node_update_peer | node_update_join
+                       | node_update_expected, __FUNCTION__);
     register_fsa_input(C_FSA_INTERNAL, I_ELECTION, NULL);
 }
 
@@ -138,7 +157,7 @@ do_cib_control(long long action,
 
         if (fsa_cib_conn->state != cib_disconnected && last_resource_update != 0) {
             crm_info("Waiting for resource update %d to complete", last_resource_update);
-            crmd_fsa_stall(NULL);
+            crmd_fsa_stall(FALSE);
             return;
         }
 
@@ -202,7 +221,7 @@ do_cib_control(long long action,
 
             if (cib_retries < 30) {
                 crm_timer_start(wait_timer);
-                crmd_fsa_stall(NULL);
+                crmd_fsa_stall(FALSE);
 
             } else {
                 crm_err("Could not complete CIB"
@@ -216,7 +235,7 @@ do_cib_control(long long action,
 
             call_id = fsa_cib_conn->cmds->query(fsa_cib_conn, NULL, NULL, cib_scope_local);
 
-            add_cib_op_callback(fsa_cib_conn, call_id, FALSE, NULL, revision_check_callback);
+            fsa_register_cib_callback(call_id, FALSE, NULL, revision_check_callback);
             cib_retries = 0;
         }
     }
