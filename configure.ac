@@ -448,17 +448,16 @@ case "$host_os" in
 		INIT_EXT=".sh"
 		;;
 *solaris*)
-        LIBS="-L'/usr/lib:/usr/lib/mps'"
-        AC_DEFINE_UNQUOTED(ON_SOLARIS, 1, Compiling for Solaris platform)
+		AC_DEFINE_UNQUOTED(ON_SOLARIS, 1, Compiling for Solaris platform)
 		;;
 *linux*)
 		AC_DEFINE_UNQUOTED(ON_LINUX, 1, Compiling for Linux platform)
-  		CFLAGS="$CFLAGS -I${prefix}/include"
- 		;;
+		CFLAGS="$CFLAGS -I${prefix}/include"
+		;;
 darwin*)
 		AC_DEFINE_UNQUOTED(ON_DARWIN, 1, Compiling for Darwin platform)
-  		LIBS="$LIBS -L${prefix}/lib"
-  		CFLAGS="$CFLAGS -I${prefix}/include"
+		LIBS="$LIBS -L${prefix}/lib"
+		CFLAGS="$CFLAGS -I${prefix}/include"
 		;;
 esac
 
@@ -1684,35 +1683,12 @@ if export | fgrep " CFLAGS=" > /dev/null; then
 fi
 
 if test "$GCC" != yes; then
-        CFLAGS="$CFLAGS -g"
+	CFLAGS="$CFLAGS -g"
 	enable_fatal_warnings=no
 else
-        CFLAGS="$CFLAGS -ggdb"
-      case "$host_os" in
-        *solaris*)
-        EXTRA_FLAGS="-fgnu89-inline
-        -Wall
-        -Waggregate-return
-        -Wbad-function-cast
-        -Wcast-align
-        -Wdeclaration-after-statement
-        -Wendif-labels
-        -Wfloat-equal
-        -Wformat=2
-        -Wformat-security
-        -Wformat-nonliteral
-        -Wmissing-prototypes
-        -Wmissing-declarations
-        -Wnested-externs
-        -Wno-long-long
-        -Wno-strict-aliasing
-        -Wpointer-arith
-        -Wstrict-prototypes
-        -Wwrite-strings"
-        ;;
-      *)
+	CFLAGS="$CFLAGS -ggdb"
 	# We had to eliminate -Wnested-externs because of libtool changes
-        EXTRA_FLAGS="-fgnu89-inline
+	EXTRA_FLAGS="-fgnu89-inline
 		-fstack-protector-all
 		-Wall
 		-Waggregate-return
@@ -1734,8 +1710,6 @@ else
 		-Wstrict-prototypes
 		-Wunsigned-char
 		-Wwrite-strings"
-        ;;
-      esac 
 
 
 # Additional warnings it might be nice to enable one day
@@ -1759,14 +1733,11 @@ dnl In lib/ais/Makefile.am there's a gcc option available as of v4.x
 dnl System specific options
 
 	case "$host_os" in
-  	*linux*|*bsd*)
-		if test "${enable_fatal_warnings}" = "unknown"; then
-        		enable_fatal_warnings=yes
-        	fi
-          	;;
-     *solaris*)
-         CFLAGS="$CFLAGS -D__EXTENSIONS__ -D_XOPEN_SOURCE=600"
-            ;;
+		*linux*|*bsd*)
+			if test "${enable_fatal_warnings}" = "unknown"; then
+			enable_fatal_warnings=yes
+			fi
+			;;
 	esac
 
 	if test "x${enable_fatal_warnings}" != xno && cc_supports_flag -Werror ; then

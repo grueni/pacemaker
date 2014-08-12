@@ -428,9 +428,13 @@ throttle_mode(void)
 {
     float load;
     unsigned int blocked = 0;
-    int cores = throttle_num_cores();
 
     enum throttle_state_e mode = throttle_none;
+#ifdef ON_SOLARIS
+	return mode;
+#else
+
+    int cores = throttle_num_cores();
 
     if(throttle_cib_load(&load)) {
         float cib_max_cpu = 0.95;
@@ -499,6 +503,7 @@ throttle_mode(void)
         return throttle_low;
     }
     return throttle_none;
+#endif
 }
 
 static void
