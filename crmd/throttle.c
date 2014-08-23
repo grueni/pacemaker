@@ -68,16 +68,16 @@ int throttle_num_cores(void)
     static int cores = 0;
     char buffer[256];
 
-    if(cores) {
-        return cores;
-    }
-
 #if ON_SOLARIS
 // number of logical processorts: psrinfo | wc -l
 // number of cores: kstat cpu_info|grep core_id|grep -v pkg_core_id|sort -u|wc -l
 // if hyperthreading is activated for x86 then cores = number of logical processorts/2
 	const char *cpufile = "psrinfo";
 	FILE *fp;
+   if(cores) {
+      return cores;
+   }
+
 	fp = popen(cpufile, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -93,6 +93,10 @@ int throttle_num_cores(void)
 #else
     FILE *stream = NULL;
 	const char *cpufile = "/proc/cpuinfo";
+   if(cores) {
+      return cores;
+   }
+
     stream = fopen(cpufile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -243,7 +247,11 @@ static bool throttle_cib_load(float *load)
     static long ticks_per_s = 0;
     static unsigned long last_utime, last_stime;
 
+#if ON_SOLARIS
+    pstatus_t status;
+#else
     char buffer[64*1024];
+#endif
     FILE *stream = NULL;
     time_t now = time(NULL);
 
@@ -272,7 +280,6 @@ static bool throttle_cib_load(float *load)
     }
 
 #if ON_SOLARIS
-	pstatus_t status;
 	if (fread(&status,sizeof(status),1,stream) != 0) {
 		float fstime = status.pr_stime.tv_sec + status.pr_stime.tv_nsec/1E9;
 		float futime = status.pr_utime.tv_sec + status.pr_utime.tv_nsec/1E9;
@@ -329,16 +336,17 @@ static bool throttle_load_avg(float *load)
 {
     char buffer[256];
 
-    if(load == NULL) {
-        return FALSE;
-    }
-
 #if ON_SOLARIS
+	char *token;
 	char buffer0[256];
 	const char *dlm = "\t";
 	const char *loadfile = "kstat -p 'unix:0:system_misc:avenrun*'";
 	bool rc = FALSE;
 	FILE *fp;
+   if(load == NULL) {
+      return FALSE;
+   }
+
 	fp = popen(loadfile, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -349,7 +357,7 @@ static bool throttle_load_avg(float *load)
 	while (fgets(buffer, sizeof(buffer), fp) != NULL && !rc) {
 		if(strstr(buffer, "avenrun_1min") != NULL) {
 			strcpy(buffer0,buffer);
-			char *token = strtok(buffer0,dlm);
+			token = strtok(buffer0,dlm);
 			*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
 			crm_debug("Current load is %f (full: %s)", *load, buffer);
 			rc = TRUE;
@@ -358,8 +366,12 @@ static bool throttle_load_avg(float *load)
 	pclose(fp);
 	return rc;
 #else
-    FILE *stream = NULL;
-    const char *loadfile = "/proc/loadavg";
+   FILE *stream = NULL;
+   const char *loadfile = "/proc/loadavg";
+   if(load == NULL) {
+      return FALSE;
+   }
+
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -387,37 +399,40 @@ static bool throttle_load_avg(float *load)
 static bool throttle_io_load(float *load, unsigned int *blocked)
 {
     char buffer[64*1024];
-    FILE *stream = NULL;
 
-    if(load == NULL) {
-        return FALSE;
-    }
+#if ON_SOLARIS
+	const char *loadfile = "iostat -c";
+   FILE *fp;
+   int count = 0;
+#else
+   const char *loadfile = "/proc/stat";
+   FILE *stream = NULL;
+   long long dstl = 0;
+#endif
 
    long long divo2 = 0;
    long long duse = 0;
    long long dsys = 0;
    long long didl =0;
    long long diow =0;
-   long long dstl = 0;
    long long Div = 0;
+
+   if(load == NULL) {
+      return FALSE;
+   }
 
 #if ON_SOLARIS
 	blocked = 0;
-	const char *loadfile = "iostat -c";
-	bool rc = FALSE;
-	FILE *fp;
-	const char *blank = " ";
 	fp = popen(loadfile, "r");
 	if (fp==NULL) {
 		int rc = errno;
 		crm_warn("Couldn't read %s: %s (%d)", loadfile, pcmk_strerror(rc), rc);
-		return rc;
+		return FALSE;
 	}
-	int count = 0;
 	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
 		count++;
 		if (count==3) {
-			sscanf(buffer,"%d %d %d %d", &duse, &dsys, &diow, &didl);
+			sscanf(buffer,"%Lu %Lu %Lu %Lu", &duse, &dsys, &diow, &didl);
 			Div = duse + dsys + didl + diow;
 			if (!Div) {
 				Div = 1;
@@ -427,13 +442,11 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
          divo2 = Div / 2UL;
          *load = (diow + divo2) / Div;
 			crm_debug("Current load is %f (full: %s)", *load, buffer);
-			rc = TRUE;
 		}
 	}
 	pclose(fp);
-	return rc;
+	return TRUE;
 #else
-    const char *loadfile = "/proc/stat";
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
