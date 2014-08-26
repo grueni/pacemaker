@@ -91,11 +91,11 @@ int throttle_num_cores(void)
 	}
 	pclose(fp);
 #else
-    FILE *stream = NULL;
+	FILE *stream = NULL;
 	const char *cpufile = "/proc/cpuinfo";
-   if(cores) {
-      return cores;
-   }
+	if(cores) {
+		return cores;
+	}
 
     stream = fopen(cpufile, "r");
     if(stream == NULL) {
