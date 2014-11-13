@@ -20,7 +20,10 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-
+#if ON_SOLARIS
+#include <procfs.h>
+#include <sys/param.h>
+#endif
 #include <unistd.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -63,12 +66,32 @@ int throttle_num_cores(void)
 {
     static int cores = 0;
     char buffer[256];
-    FILE *stream = NULL;
-    const char *cpufile = "/proc/cpuinfo";
 
     if(cores) {
         return cores;
     }
+#if ON_SOLARIS
+// number of logical processorts: psrinfo | wc -l
+// number of cores: kstat cpu_info|grep core_id|grep -v pkg_core_id|sort -u|wc -l
+// if hyperthreading is activated for x86 then cores = number of logical processorts/2
+	const char *cpufile = "psrinfo";
+	FILE *fp;
+	fp = popen(cpufile, "r");
+	if (fp==NULL) {
+		int rc = errno;
+		crm_warn("Couldn't read %s, assuming a single processor: %s (%d)", cpufile, pcmk_strerror(rc), rc);
+		return 1;
+	}
+	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+		if(strstr(buffer, "on-line") != NULL) {
+			cores++;
+		}
+	}
+	pclose(fp);
+#else
+	FILE *stream = NULL;
+	const char *cpufile = "/proc/cpuinfo";
+
     stream = fopen(cpufile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -83,7 +106,7 @@ int throttle_num_cores(void)
     }
 
     fclose(stream);
-
+#endif
     if(cores == 0) {
         crm_warn("No processors found in %s, assuming 1", cpufile);
         return 1;
@@ -94,10 +117,29 @@ int throttle_num_cores(void)
 
 static char *find_cib_loadfile(void) 
 {
+	char *match = NULL;
+#if ON_SOLARIS
+	char buffer[256];
+	int pid;
+	const char *file = "pgrep cib";
+	FILE *fp;
+	fp = popen(file, "r");
+	if (fp==NULL) {
+		int rc = errno;
+		crm_warn("Couldn't read, process cib not found %s: %s (%d)", file, pcmk_strerror(rc), rc);
+		return match;
+	}
+	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+		pid = atoi(buffer);
+	}
+	pclose(fp);
+	if (pid >= 0) {
+		match = g_strdup_printf("/proc/%d/status", pid);
+	}
+#else
     DIR *dp;
     struct dirent *entry;
     struct stat statbuf;
-    char *match = NULL;
 
     dp = opendir("/proc");
     if (!dp) {
@@ -151,6 +193,7 @@ static char *find_cib_loadfile(void)
     }
 
     closedir(dp);
+#endif
     return match;
 }
 
@@ -227,6 +270,14 @@ static bool throttle_cib_load(float *load)
         return FALSE;
     }
 
+#if ON_SOLARIS
+	pstatus_t status;
+	if (fread(&status,sizeof(status),1,stream) != 0) {
+	float fstime = status.pr_stime.tv_sec + status.pr_stime.tv_nsec/1E9;
+	float futime = status.pr_utime.tv_sec + status.pr_utime.tv_nsec/1E9;
+	unsigned long utime = futime*ticks_per_s;
+	unsigned long stime = fstime*ticks_per_s;
+#else
     if(fgets(buffer, sizeof(buffer), stream)) {
         char *comm = calloc(1, 256);
         char state = 0;
@@ -243,8 +294,10 @@ static bool throttle_cib_load(float *load)
             crm_err("Only %d of 15 fields found in %s", rc, loadfile);
             fclose(stream);
             return FALSE;
-
-        } else if(last_call > 0
+		}
+#endif
+		fclose(stream);
+        if(last_call > 0
            && last_call < now
            && last_utime <= utime
            && last_stime <= stime) {
@@ -266,7 +319,6 @@ static bool throttle_cib_load(float *load)
         last_utime = utime;
         last_stime = stime;
 
-        fclose(stream);
         return TRUE;
     }
 
@@ -277,13 +329,38 @@ static bool throttle_cib_load(float *load)
 static bool throttle_load_avg(float *load)
 {
     char buffer[256];
-    FILE *stream = NULL;
-    const char *loadfile = "/proc/loadavg";
 
     if(load == NULL) {
         return FALSE;
     }
 
+#if ON_SOLARIS
+	char buffer0[256];
+	const char *dlm = "\t";
+	const char *loadfile = "kstat -p 'unix:0:system_misc:avenrun*'";
+	bool rc = FALSE;
+	FILE *fp;
+	fp = popen(loadfile, "r");
+	if (fp==NULL) {
+		int rc = errno;
+		crm_warn("Couldn't read %s: %s (%d)", loadfile, pcmk_strerror(rc), rc);
+		return rc;
+	}
+
+	while (fgets(buffer, sizeof(buffer), fp) != NULL && !rc) {
+		if(strstr(buffer, "avenrun_1min") != NULL) {
+			strcpy(buffer0,buffer);
+			char *token = strtok(buffer0,dlm);
+			*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
+			crm_debug("Current load is %f (full: %s)", *load, buffer);
+			rc = TRUE;
+		}
+	}
+	pclose(fp);
+	return rc;
+#else
+	FILE *stream = NULL;
+	const char *loadfile = "/proc/loadavg";
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -304,6 +381,7 @@ static bool throttle_load_avg(float *load)
     }
 
     fclose(stream);
+#endif
     return FALSE;
 }
 
@@ -311,12 +389,38 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
 {
     char buffer[64*1024];
     FILE *stream = NULL;
-    const char *loadfile = "/proc/stat";
 
     if(load == NULL) {
         return FALSE;
     }
 
+#if ON_SOLARIS
+	char buffer0[256];
+	const char *dlm = "\t";
+	const char *loadfile = "kstat -p 'unix:0:system_misc:avenrun*'";
+	bool rc = FALSE;
+	FILE *fp;
+	fp = popen(loadfile, "r");
+	if (fp==NULL) {
+		int rc = errno;
+		crm_warn("Couldn't read %s: %s (%d)", loadfile, pcmk_strerror(rc), rc);
+		return rc;
+	}
+
+	while (fgets(buffer, sizeof(buffer), fp) != NULL && !rc) {
+		if(strstr(buffer, "avenrun_1min") != NULL) {
+			strcpy(buffer0,buffer);
+			char *token = strtok(buffer0,dlm);
+			*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
+			crm_debug("Current load is %f (full: %s)", *load, buffer);
+			rc = TRUE;
+		}
+	}
+	pclose(fp);
+	return rc;
+#else
+	FILE *stream = NULL;
+	const char *loadfile = "/proc/loadavg";
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -336,14 +440,6 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
         unsigned long long cpu_xxx = 0; /* not separated out until the 2.6.0-test4 kernel */
         unsigned long long cpu_yyy = 0; /* not separated out until the 2.6.0-test4 kernel */
         unsigned long long cpu_zzz = 0; /* not separated out until the 2.6.11 kernel */
-
-        long long divo2 = 0;
-        long long duse = 0;
-        long long dsys = 0;
-        long long didl =0;
-        long long diow =0;
-        long long dstl = 0;
-        long long Div = 0;
 
         b = strstr(buffer, "cpu ");
         if(b) sscanf(b,  "cpu  %Lu %Lu %Lu %Lu %Lu %Lu %Lu %Lu",
@@ -386,6 +482,7 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
 
     fclose(stream);
     return FALSE;
+#endif
 }
 
 static enum throttle_state_e
@@ -429,10 +526,6 @@ throttle_mode(void)
     float load;
     unsigned int blocked = 0;
     enum throttle_state_e mode = throttle_none;
-
-#ifdef ON_SOLARIS
-    return throttle_none;
-#endif
 
     cores = throttle_num_cores();
     if(throttle_cib_load(&load)) {
