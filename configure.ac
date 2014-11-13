@@ -1710,7 +1710,7 @@ else
 		-Wstrict-prototypes
 		-Wwrite-strings
 		-Wunused-but-set-variable
-		-Wunsigned-char"
+		"
 
 # Additional warnings it might be nice to enable one day
 #		-Wshadow
