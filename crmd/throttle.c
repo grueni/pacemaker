@@ -66,16 +66,22 @@ int throttle_num_cores(void)
 {
     static int cores = 0;
     char buffer[256];
+#if ON_SOLARIS
+    const char *cpufile = "psrinfo";
+    FILE *fp;
+#else
+    FILE *stream = NULL;
+    const char *cpufile = "/proc/cpuinfo";
+#endif
 
     if(cores) {
         return cores;
     }
+
 #if ON_SOLARIS
 // number of logical processorts: psrinfo | wc -l
 // number of cores: kstat cpu_info|grep core_id|grep -v pkg_core_id|sort -u|wc -l
 // if hyperthreading is activated for x86 then cores = number of logical processorts/2
-	const char *cpufile = "psrinfo";
-	FILE *fp;
 	fp = popen(cpufile, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -89,9 +95,6 @@ int throttle_num_cores(void)
 	}
 	pclose(fp);
 #else
-	FILE *stream = NULL;
-	const char *cpufile = "/proc/cpuinfo";
-
     stream = fopen(cpufile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -123,6 +126,13 @@ static char *find_cib_loadfile(void)
 	int pid;
 	const char *file = "pgrep cib";
 	FILE *fp;
+#else
+    DIR *dp;
+    struct dirent *entry;
+    struct stat statbuf;
+#endif
+
+#if ON_SOLARIS
 	fp = popen(file, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -137,10 +147,6 @@ static char *find_cib_loadfile(void)
 		match = g_strdup_printf("/proc/%d/status", pid);
 	}
 #else
-    DIR *dp;
-    struct dirent *entry;
-    struct stat statbuf;
-
     dp = opendir("/proc");
     if (!dp) {
         /* no proc directory to search through */
@@ -242,9 +248,14 @@ static bool throttle_cib_load(float *load)
     static long ticks_per_s = 0;
     static unsigned long last_utime, last_stime;
 
-    char buffer[64*1024];
     FILE *stream = NULL;
     time_t now = time(NULL);
+
+#if ON_SOLARIS
+    pstatus_t status;
+#else
+    char buffer[64*1024];
+#endif
 
     if(load == NULL) {
         return FALSE;
@@ -271,7 +282,6 @@ static bool throttle_cib_load(float *load)
     }
 
 #if ON_SOLARIS
-	pstatus_t status;
 	if (fread(&status,sizeof(status),1,stream) != 0) {
 	float fstime = status.pr_stime.tv_sec + status.pr_stime.tv_nsec/1E9;
 	float futime = status.pr_utime.tv_sec + status.pr_utime.tv_nsec/1E9;
@@ -330,16 +340,23 @@ static bool throttle_load_avg(float *load)
 {
     char buffer[256];
 
-    if(load == NULL) {
-        return FALSE;
-    }
-
 #if ON_SOLARIS
 	char buffer0[256];
 	const char *dlm = "\t";
 	const char *loadfile = "kstat -p 'unix:0:system_misc:avenrun*'";
 	bool rc = FALSE;
 	FILE *fp;
+	char *token;
+#else
+    FILE *stream = NULL;
+    const char *loadfile = "/proc/loadavg";
+#endif
+
+    if(load == NULL) {
+        return FALSE;
+    }
+
+#if ON_SOLARIS
 	fp = popen(loadfile, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -350,17 +367,17 @@ static bool throttle_load_avg(float *load)
 	while (fgets(buffer, sizeof(buffer), fp) != NULL && !rc) {
 		if(strstr(buffer, "avenrun_1min") != NULL) {
 			strcpy(buffer0,buffer);
-			char *token = strtok(buffer0,dlm);
-			*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
-			crm_debug("Current load is %f (full: %s)", *load, buffer);
-			rc = TRUE;
+			token = strtok(buffer0,dlm);
+			if (token != NULL) {
+				*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
+				crm_debug("Current load is %f (full: %s)", *load, buffer);
+				rc = TRUE;
+			}
 		}
 	}
 	pclose(fp);
 	return rc;
 #else
-	FILE *stream = NULL;
-	const char *loadfile = "/proc/loadavg";
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
@@ -389,16 +406,23 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
 {
     char buffer[64*1024];
 
-    if(load == NULL) {
-        return FALSE;
-    }
-
 #if ON_SOLARIS
 	char buffer0[256];
 	const char *dlm = "\t";
 	const char *loadfile = "kstat -p 'unix:0:system_misc:avenrun*'";
 	bool rc = FALSE;
 	FILE *fp;
+	char *token;
+#else
+    FILE *stream = NULL;
+    const char *loadfile = "/proc/loadavg";
+#endif
+
+    if(load == NULL) {
+        return FALSE;
+    }
+
+#if ON_SOLARIS
 	fp = popen(loadfile, "r");
 	if (fp==NULL) {
 		int rc = errno;
@@ -409,17 +433,17 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
 	while (fgets(buffer, sizeof(buffer), fp) != NULL && !rc) {
 		if(strstr(buffer, "avenrun_1min") != NULL) {
 			strcpy(buffer0,buffer);
-			char *token = strtok(buffer0,dlm);
-			*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
-			crm_debug("Current load is %f (full: %s)", *load, buffer);
-			rc = TRUE;
+			token = strtok(buffer0,dlm);
+			if (token != NULL) {
+				*load = strtof(strtok(NULL,dlm),NULL)/FSCALE;
+				crm_debug("Current load is %f (full: %s)", *load, buffer);
+				rc = TRUE;
+			}
 		}
 	}
 	pclose(fp);
 	return rc;
 #else
-	FILE *stream = NULL;
-	const char *loadfile = "/proc/loadavg";
     stream = fopen(loadfile, "r");
     if(stream == NULL) {
         int rc = errno;
