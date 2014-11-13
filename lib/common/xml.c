@@ -386,6 +386,7 @@ static int __xml_build_schema_list(void)
                     xslt = get_schema_path(NULL, transform);
                     if(stat(xslt, &s) != 0) {
                         crm_err("Transform %s not found", xslt);
+                        free(xslt);
                         __xml_schema_add(2, version, NULL, NULL, NULL, -1);
                         break;
                     } else {
@@ -1950,9 +1951,11 @@ bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3])
             return -EINVAL;
     }
 
-    for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
-        crm_element_value_int(tmp, vfields[lpc], &(del[lpc]));
-        crm_trace("Got %d for del[%s]", del[lpc], vfields[lpc]);
+    if (tmp) {
+        for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
+            crm_element_value_int(tmp, vfields[lpc], &(del[lpc]));
+            crm_trace("Got %d for del[%s]", del[lpc], vfields[lpc]);
+        }
     }
 
     switch(format) {
@@ -1973,9 +1976,11 @@ bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3])
             return -EINVAL;
     }
 
-    for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
-        crm_element_value_int(tmp, vfields[lpc], &(add[lpc]));
-        crm_trace("Got %d for add[%s]", add[lpc], vfields[lpc]);
+    if (tmp) {
+        for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
+            crm_element_value_int(tmp, vfields[lpc], &(add[lpc]));
+            crm_trace("Got %d for add[%s]", add[lpc], vfields[lpc]);
+        }
     }
 
     return pcmk_ok;
@@ -3303,7 +3308,7 @@ crm_xml_escape_shuffle(char *text, int start, int *length, const char *replace)
     return text;
 }
 
-static char *
+char *
 crm_xml_escape(const char *text)
 {
     int index;

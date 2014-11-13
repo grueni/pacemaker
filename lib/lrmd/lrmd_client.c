@@ -89,6 +89,9 @@ typedef struct lrmd_private_s {
     int port;
     gnutls_psk_client_credentials_t psk_cred_c;
 
+    /* while the async connection is occuring, this is the id
+     * of the connection timeout timer. */
+    int async_timer;
     int sock;
     /* since tls requires a round trip across the network for a
      * request/reply, there are times where we just want to be able
@@ -202,6 +205,7 @@ lrmd_copy_event(lrmd_event_data_t * event)
     copy->op_type = event->op_type ? strdup(event->op_type) : NULL;
     copy->user_data = event->user_data ? strdup(event->user_data) : NULL;
     copy->output = event->output ? strdup(event->output) : NULL;
+    copy->exit_reason = event->exit_reason ? strdup(event->exit_reason) : NULL;
     copy->remote_nodename = event->remote_nodename ? strdup(event->remote_nodename) : NULL;
 
     if (event->params) {
@@ -228,6 +232,7 @@ lrmd_free_event(lrmd_event_data_t * event)
     free((char *)event->op_type);
     free((char *)event->user_data);
     free((char *)event->output);
+    free((char *)event->exit_reason);
     free((char *)event->remote_nodename);
     if (event->params) {
         g_hash_table_destroy(event->params);
@@ -278,6 +283,7 @@ lrmd_dispatch_internal(lrmd_t * lrmd, xmlNode * msg)
         event.op_type = crm_element_value(msg, F_LRMD_RSC_ACTION);
         event.user_data = crm_element_value(msg, F_LRMD_RSC_USERDATA_STR);
         event.output = crm_element_value(msg, F_LRMD_RSC_OUTPUT);
+        event.exit_reason = crm_element_value(msg, F_LRMD_RSC_EXIT_REASON);
         event.type = lrmd_event_exec_complete;
 
         event.params = xml2list(msg);
@@ -1098,6 +1104,8 @@ lrmd_tcp_connect_cb(void *userdata, int sock)
     int rc = sock;
     gnutls_datum_t psk_key = { NULL, 0 };
 
+    native->async_timer = 0;
+
     if (rc < 0) {
         lrmd_tls_connection_destroy(lrmd);
         crm_info("remote lrmd connect to %s at port %d failed", native->server, native->port);
@@ -1149,13 +1157,22 @@ lrmd_tcp_connect_cb(void *userdata, int sock)
 static int
 lrmd_tls_connect_async(lrmd_t * lrmd, int timeout /*ms */ )
 {
-    int rc = 0;
+    int rc = -1;
+    int sock = 0;
+    int timer_id = 0;
+
     lrmd_private_t *native = lrmd->private;
 
     lrmd_gnutls_global_init();
 
-    rc = crm_remote_tcp_connect_async(native->server, native->port, timeout, lrmd,
+    sock = crm_remote_tcp_connect_async(native->server, native->port, timeout, &timer_id, lrmd,
                                       lrmd_tcp_connect_cb);
+
+    if (sock != -1) {
+        native->sock = sock;
+        rc = 0;
+        native->async_timer = timer_id;
+    }
 
     return rc;
 }
@@ -1314,6 +1331,11 @@ lrmd_tls_disconnect(lrmd_t * lrmd)
         gnutls_deinit(*native->remote->tls_session);
         gnutls_free(native->remote->tls_session);
         native->remote->tls_session = 0;
+    }
+
+    if (native->async_timer) {
+        g_source_remove(native->async_timer);
+        native->async_timer = 0;
     }
 
     if (native->source != NULL) {

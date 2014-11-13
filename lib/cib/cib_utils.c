@@ -112,8 +112,13 @@ get_cib_copy(cib_t * cib)
 {
     xmlNode *xml_cib;
     int options = cib_scope_local | cib_sync_call;
-    int rc = cib->cmds->query(cib, NULL, &xml_cib, options);
+    int rc = pcmk_ok;
 
+    if (cib->state == cib_disconnected) {
+        return NULL;
+    }
+
+    rc = cib->cmds->query(cib, NULL, &xml_cib, options);
     if (rc == -EACCES) {
         return NULL;
 
@@ -665,7 +670,7 @@ cib_native_callback(cib_t * cib, xmlNode * msg, int call_id, int rc)
         crm_trace("Invoking global callback for call %d", call_id);
         cib->op_callback(msg, call_id, rc, output);
     }
-    crm_trace("OP callback activated.");
+    crm_trace("OP callback activated for %d", call_id);
 }
 
 void

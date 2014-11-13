@@ -125,6 +125,7 @@ gboolean check_time(const char *value);
 gboolean check_timer(const char *value);
 gboolean check_boolean(const char *value);
 gboolean check_number(const char *value);
+gboolean check_quorum(const char *value);
 gboolean check_utilization(const char *value);
 
 /* Shared PE/crmd functionality */
@@ -219,7 +220,7 @@ gboolean crm_remote_recv(crm_remote_t * remote, int total_timeout /*ms */ , int 
 xmlNode *crm_remote_parse_buffer(crm_remote_t * remote);
 int crm_remote_tcp_connect(const char *host, int port);
 int crm_remote_tcp_connect_async(const char *host, int port, int timeout,       /*ms */
-                                 void *userdata, void (*callback) (void *userdata, int sock));
+                                 int *timer_id, void *userdata, void (*callback) (void *userdata, int sock));
 
 #  ifdef HAVE_GNUTLS_GNUTLS_H
 /*!
@@ -263,6 +264,11 @@ const char *daemon_option(const char *option);
 void set_daemon_option(const char *option, const char *value);
 gboolean daemon_option_enabled(const char *daemon, const char *option);
 void strip_text_nodes(xmlNode * xml);
+void pcmk_panic(const char *origin);
+void sysrq_init(void);
+pid_t pcmk_locate_sbd(void);
+int crm_pidfile_inuse(const char *filename, long mypid);
+int crm_read_pidfile(const char *filename);
 
 #  define crm_config_err(fmt...) { crm_config_error = TRUE; crm_err(fmt); }
 #  define crm_config_warn(fmt...) { crm_config_warning = TRUE; crm_warn(fmt); }
@@ -270,6 +276,7 @@ void strip_text_nodes(xmlNode * xml);
 #  define attrd_channel		T_ATTRD
 #  define F_ATTRD_KEY		"attr_key"
 #  define F_ATTRD_ATTRIBUTE	"attr_name"
+#  define F_ATTRD_REGEX 	"attr_regex"
 #  define F_ATTRD_TASK		"task"
 #  define F_ATTRD_VALUE		"attr_value"
 #  define F_ATTRD_SET		"attr_set"

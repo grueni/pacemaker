@@ -140,6 +140,12 @@ unpack_config(xmlNode * config, pe_working_set_t * data_set)
         crm_info("Startup probes: disabled (dangerous)");
     }
 
+    value = pe_pref(data_set->config_hash, XML_ATTR_HAVE_WATCHDOG);
+    if (value && crm_is_true(value)) {
+        crm_notice("Relying on watchdog integration for fencing");
+        set_bit(data_set->flags, pe_flag_have_stonith_resource);
+    }
+
     value = pe_pref(data_set->config_hash, "stonith-timeout");
     data_set->stonith_timeout = crm_get_msec(value);
     crm_debug("STONITH timeout: %d", data_set->stonith_timeout);
@@ -294,6 +300,7 @@ create_node(const char *id, const char *uname, const char *type, const char *sco
     new_node->details->uname = uname;
     new_node->details->online = FALSE;
     new_node->details->shutdown = FALSE;
+    new_node->details->rsc_discovery_enabled = TRUE;
     new_node->details->running_rsc = NULL;
     new_node->details->type = node_ping;
 
@@ -308,6 +315,13 @@ create_node(const char *id, const char *uname, const char *type, const char *sco
     new_node->details->attrs = g_hash_table_new_full(crm_str_hash, g_str_equal,
                                                      g_hash_destroy_str,
                                                      g_hash_destroy_str);
+
+    if (is_remote_node(new_node)) {
+        g_hash_table_insert(new_node->details->attrs, strdup("#kind"), strdup("remote"));
+    } else {
+        g_hash_table_insert(new_node->details->attrs, strdup("#kind"), strdup("cluster"));
+    }
+
     new_node->details->utilization =
         g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str,
                               g_hash_destroy_str);
@@ -657,7 +671,10 @@ link_rsc2remotenode(pe_working_set_t *data_set, resource_t *new_rsc)
      * as cluster nodes. */
     if (new_rsc->container == NULL) {
         handle_startup_fencing(data_set, remote_node);
-        return;
+    } else {
+        /* At this point we know if the remote node is a container or baremetal
+         * remote node, update the #kind attribute if a container is involved */
+        g_hash_table_replace(remote_node->details->attrs, strdup("#kind"), strdup("container"));
     }
 }
 
@@ -723,10 +740,12 @@ unpack_resources(xmlNode * xml_resources, pe_working_set_t * data_set)
     }
 
     data_set->resources = g_list_sort(data_set->resources, sort_rsc_priority);
+    if (is_set(data_set->flags, pe_flag_quick_location)) {
+        /* Ignore */
 
-    if (is_not_set(data_set->flags, pe_flag_quick_location)
-        && is_set(data_set->flags, pe_flag_stonith_enabled)
-        && is_set(data_set->flags, pe_flag_have_stonith_resource) == FALSE) {
+    } else if (is_set(data_set->flags, pe_flag_stonith_enabled)
+               && is_set(data_set->flags, pe_flag_have_stonith_resource) == FALSE) {
+
         crm_config_err("Resource start-up disabled since no STONITH resources have been defined");
         crm_config_err("Either configure some or disable STONITH with the stonith-enabled option");
         crm_config_err("NOTE: Clusters with shared data need STONITH to ensure data integrity");
@@ -988,6 +1007,7 @@ unpack_status(xmlNode * status, pe_working_set_t * data_set)
 
         if (crm_str_eq((const char *)state->name, XML_CIB_TAG_STATE, TRUE)) {
             xmlNode *attrs = NULL;
+            const char *resource_discovery_enabled = NULL;
 
             id = crm_element_value(state, XML_ATTR_ID);
             uname = crm_element_value(state, XML_ATTR_UNAME);
@@ -1025,6 +1045,12 @@ unpack_status(xmlNode * status, pe_working_set_t * data_set)
             if (crm_is_true(g_hash_table_lookup(this_node->details->attrs, "maintenance"))) {
                 crm_info("Node %s is in maintenance-mode", this_node->details->uname);
                 this_node->details->maintenance = TRUE;
+            }
+
+            resource_discovery_enabled = g_hash_table_lookup(this_node->details->attrs, XML_NODE_ATTR_RSC_DISCOVERY);
+            if (resource_discovery_enabled && !crm_is_true(resource_discovery_enabled)) {
+                crm_warn("ignoring %s attribute on node %s, disabling resource discovery is not allowed on cluster nodes",
+                    XML_NODE_ATTR_RSC_DISCOVERY, this_node->details->uname);
             }
 
             crm_trace("determining node state");
@@ -1102,6 +1128,7 @@ unpack_remote_status(xmlNode * status, pe_working_set_t * data_set)
 
     /* process attributes */
     for (state = __xml_first_child(status); state != NULL; state = __xml_next(state)) {
+        const char *resource_discovery_enabled = NULL;
         xmlNode *attrs = NULL;
         if (crm_str_eq((const char *)state->name, XML_CIB_TAG_STATE, TRUE) == FALSE) {
             continue;
@@ -1124,6 +1151,26 @@ unpack_remote_status(xmlNode * status, pe_working_set_t * data_set)
         if (crm_is_true(g_hash_table_lookup(this_node->details->attrs, "standby"))) {
             crm_info("Node %s is in standby-mode", this_node->details->uname);
             this_node->details->standby = TRUE;
+        }
+
+        if (crm_is_true(g_hash_table_lookup(this_node->details->attrs, "maintenance"))) {
+            crm_info("Node %s is in maintenance-mode", this_node->details->uname);
+            this_node->details->maintenance = TRUE;
+        }
+
+        resource_discovery_enabled = g_hash_table_lookup(this_node->details->attrs, XML_NODE_ATTR_RSC_DISCOVERY);
+        if (resource_discovery_enabled && !crm_is_true(resource_discovery_enabled)) {
+            if (is_baremetal_remote_node(this_node) && is_not_set(data_set->flags, pe_flag_stonith_enabled)) {
+                crm_warn("ignoring %s attribute on baremetal remote node %s, disabling resource discovery requires stonith to be enabled.",
+                    XML_NODE_ATTR_RSC_DISCOVERY, this_node->details->uname);
+            } else {
+                /* if we're here, this is either a baremetal node and fencing is enabled,
+                 * or this is a container node which we don't care if fencing is enabled 
+                 * or not on. container nodes are 'fenced' by recovering the container resource
+                 * regardless of whether fencing is enabled. */
+                crm_info("Node %s has resource discovery disabled", this_node->details->uname);
+                this_node->details->rsc_discovery_enabled = FALSE;
+            }
         }
     }
 
@@ -1756,6 +1803,7 @@ process_rsc_state(resource_t * rsc, node_t * node,
     if (rsc->role > RSC_ROLE_STOPPED
         && node->details->online == FALSE && is_set(rsc->flags, pe_rsc_managed)) {
 
+        char *reason = NULL;
         gboolean should_fence = FALSE;
 
         /* if this is a remote_node living in a container, fence the container
@@ -1768,14 +1816,25 @@ process_rsc_state(resource_t * rsc, node_t * node,
 
             should_fence = TRUE;
         } else if (is_set(data_set->flags, pe_flag_stonith_enabled)) {
+            if (is_baremetal_remote_node(node) && is_not_set(node->details->remote_rsc->flags, pe_rsc_failed)) {
+                /* setting unceen = true means that fencing of the remote node will
+                 * only occur if the connection resource is not going to start somewhere.
+                 * This allows connection resources on a failed cluster-node to move to
+                 * another node without requiring the baremetal remote nodes to be fenced
+                 * as well. */
+                node->details->unseen = TRUE;
+                reason = g_strdup_printf("because %s is active there. Fencing will be revoked if remote-node connection can be re-established on another cluster-node.", rsc->id);
+            }
             should_fence = TRUE;
         }
 
         if (should_fence) {
-            char *reason = g_strdup_printf("because %s is thought to be active there", rsc->id);
+            if (reason == NULL) {
+               reason = g_strdup_printf("because %s is thought to be active there", rsc->id);
+            }
             pe_fence_node(data_set, node, reason);
-            g_free(reason);
         }
+        g_free(reason);
     }
 
     if (node->details->unclean) {
@@ -1838,6 +1897,17 @@ process_rsc_state(resource_t * rsc, node_t * node,
                 stop_action(rsc, node, FALSE);
             }
             break;
+    }
+
+    /* ensure a remote-node connection failure forces an unclean remote-node
+     * to be fenced. By setting unseen = FALSE, the remote-node failure will
+     * result in a fencing operation regardless if we're going to attempt to 
+     * reconnect to the remote-node in this transition or not. */
+    if (is_set(rsc->flags, pe_rsc_failed) && rsc->is_remote_node) {
+        node_t *tmpnode = pe_find_node(data_set->nodes, rsc->id);
+        if (tmpnode && tmpnode->details->unclean) {
+            tmpnode->details->unseen = FALSE;
+        }
     }
 
     if (rsc->role != RSC_ROLE_STOPPED && rsc->role != RSC_ROLE_UNKNOWN) {
@@ -2160,7 +2230,7 @@ unpack_lrm_resources(node_t * node, xmlNode * lrm_rsc_list, pe_working_set_t * d
     for (gIter = unexpected_containers; gIter != NULL; gIter = gIter->next) {
         remote = (resource_t *) gIter->data;
         if (remote->role != RSC_ROLE_STARTED) {
-            crm_warn("Recovering container resource %s. Resource is unexpectedly running and involves a remote-node.");
+            crm_warn("Recovering container resource %s. Resource is unexpectedly running and involves a remote-node.", remote->container->id);
             set_bit(remote->container->flags, pe_rsc_failed);
         }
     }
@@ -3027,8 +3097,7 @@ add_node_attrs(xmlNode * xml_obj, node_t * node, gboolean overwrite, pe_working_
 
     g_hash_table_insert(node->details->attrs,
                         strdup("#uname"), strdup(node->details->uname));
-    g_hash_table_insert(node->details->attrs,
-                        strdup("#kind"), strdup(node->details->remote_rsc?"container":"cluster"));
+
     g_hash_table_insert(node->details->attrs, strdup("#" XML_ATTR_ID), strdup(node->details->id));
     if (safe_str_eq(node->details->id, data_set->dc_uuid)) {
         data_set->dc_node = node;

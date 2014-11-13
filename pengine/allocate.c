@@ -755,7 +755,7 @@ apply_system_health(pe_working_set_t * data_set)
             for (; gIter2 != NULL; gIter2 = gIter2->next) {
                 resource_t *rsc = (resource_t *) gIter2->data;
 
-                rsc2node_new(health_strategy, rsc, system_health, node, data_set);
+                rsc2node_new(health_strategy, rsc, system_health, NULL, node, data_set);
             }
         }
 
@@ -861,6 +861,10 @@ probe_resources(pe_working_set_t * data_set)
             /* TODO enable container node probes once ordered probing is implemented. */
             continue;
 
+        } else if (node->details->rsc_discovery_enabled == FALSE) {
+            /* resource discovery is disabled for this node */
+            continue;
+
         } else if (probe_complete == NULL) {
             probe_complete = get_pseudo_op(CRM_OP_PROBED, data_set);
             if (is_set(data_set->flags, pe_flag_have_remote_nodes)) {
@@ -944,6 +948,28 @@ probe_resources(pe_working_set_t * data_set)
     return TRUE;
 }
 
+static void
+rsc_discover_filter(resource_t *rsc, node_t *node)
+{
+    GListPtr gIter = rsc->children;
+    resource_t *top = uber_parent(rsc);
+    node_t *match;
+
+    if (rsc->exclusive_discover == FALSE && top->exclusive_discover == FALSE) {
+        return;
+    }
+
+    for (; gIter != NULL; gIter = gIter->next) {
+        resource_t *child_rsc = (resource_t *) gIter->data;
+        rsc_discover_filter(child_rsc, node);
+    }
+
+    match = g_hash_table_lookup(rsc->allowed_nodes, node->details->id);
+    if (match && match->rsc_discover_mode != discover_exclusive) {
+        match->weight = -INFINITY;
+    }
+}
+
 /*
  * Count how many valid nodes we have (so we know the maximum number of
  *  colors we can resolve).
@@ -982,6 +1008,7 @@ stage2(pe_working_set_t * data_set)
             resource_t *rsc = (resource_t *) gIter2->data;
 
             common_apply_stickiness(rsc, node, data_set);
+            rsc_discover_filter(rsc, node);
         }
     }
 
@@ -1680,16 +1707,41 @@ apply_remote_node_ordering(pe_working_set_t *data_set)
                 action,
                 pe_order_preserve | pe_order_implies_then | pe_order_runnable_left,
                 data_set);
-
         } else if (safe_str_eq(action->task, "stop")) {
-            custom_action_order(action->rsc,
-                NULL,
-                action,
-                remote_rsc,
-                generate_op_key(remote_rsc->id, RSC_STOP, 0),
-                NULL,
-                pe_order_preserve | pe_order_implies_first,
-                data_set);
+            gboolean after_start = FALSE;
+
+            /* handle special case with baremetal remote where stop actions need to be
+             * ordered after the connection resource starts somewhere else. */
+            if (is_baremetal_remote_node(action->node)) {
+                node_t *cluster_node = remote_rsc->running_on ? remote_rsc->running_on->data : NULL;
+
+                /* if the current cluster node a baremetal connection resource
+                 * is residing on is unclean, we can't process any operations on that
+                 * remote node until after it starts somewhere else. */
+                if (cluster_node && cluster_node->details->unclean == TRUE) {
+                    after_start = TRUE;
+                }
+            }
+
+            if (after_start) {
+                custom_action_order(remote_rsc,
+                    generate_op_key(remote_rsc->id, RSC_START, 0),
+                    NULL,
+                    action->rsc,
+                    NULL,
+                    action,
+                    pe_order_preserve | pe_order_implies_then | pe_order_runnable_left,
+                    data_set);
+            } else {
+                custom_action_order(action->rsc,
+                    NULL,
+                    action,
+                    remote_rsc,
+                    generate_op_key(remote_rsc->id, RSC_STOP, 0),
+                    NULL,
+                    pe_order_preserve | pe_order_implies_first,
+                    data_set);
+            }
         }
     }
 }

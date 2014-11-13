@@ -303,17 +303,24 @@ services_action_create_generic(const char *exec, const char *args[])
 }
 
 void
-services_action_free(svc_action_t * op)
+services_action_cleanup(svc_action_t * op)
 {
-    unsigned int i;
-
-    if (op == NULL) {
-        return;
+    if(op->opaque->timerid != 0) {
+        crm_trace("Removing timer for call %s to %s", op->action, op->rsc);
+        g_source_remove(op->opaque->timerid);
+        op->opaque->timerid = 0;
     }
 
-    if (op->opaque->repeat_timer) {
-        g_source_remove(op->opaque->repeat_timer);
+    if(op->opaque->pending) {
+        crm_trace("Cleaning up pending dbus call %p %s for %s", op->opaque->pending, op->action, op->rsc);
+        if(dbus_pending_call_get_completed(op->opaque->pending)) {
+            crm_warn("Pending dbus call %s for %s did not complete", op->action, op->rsc);
+        }
+        dbus_pending_call_cancel(op->opaque->pending);
+        dbus_pending_call_unref(op->opaque->pending);
+        op->opaque->pending = NULL;
     }
+
     if (op->opaque->stderr_gsource) {
         mainloop_del_fd(op->opaque->stderr_gsource);
         op->opaque->stderr_gsource = NULL;
@@ -322,6 +329,23 @@ services_action_free(svc_action_t * op)
     if (op->opaque->stdout_gsource) {
         mainloop_del_fd(op->opaque->stdout_gsource);
         op->opaque->stdout_gsource = NULL;
+    }
+}
+
+void
+services_action_free(svc_action_t * op)
+{
+    unsigned int i;
+
+    if (op == NULL) {
+        return;
+    }
+
+    services_action_cleanup(op);
+
+    if (op->opaque->repeat_timer) {
+        g_source_remove(op->opaque->repeat_timer);
+        op->opaque->repeat_timer = 0;
     }
 
     free(op->id);
@@ -425,6 +449,7 @@ services_action_kick(const char *name, const char *action, int interval /* ms */
     } else {
         if (op->opaque->repeat_timer) {
             g_source_remove(op->opaque->repeat_timer);
+            op->opaque->repeat_timer = 0;
         }
         recurring_action_timer(op);
         return TRUE;
@@ -459,6 +484,7 @@ handle_duplicate_recurring(svc_action_t * op, void (*action_callback) (svc_actio
         if (dup->pid != 0) {
             if (op->opaque->repeat_timer) {
                 g_source_remove(op->opaque->repeat_timer);
+                op->opaque->repeat_timer = 0;
             }
             recurring_action_timer(dup);
         }
@@ -473,6 +499,7 @@ handle_duplicate_recurring(svc_action_t * op, void (*action_callback) (svc_actio
 gboolean
 services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *))
 {
+    op->synchronous = false;
     if (action_callback) {
         op->opaque->callback = action_callback;
     }
@@ -491,7 +518,7 @@ services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *
     }
     if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
 #if SUPPORT_SYSTEMD
-        return systemd_unit_exec(op, FALSE);
+        return systemd_unit_exec(op);
 #endif
     }
     return services_os_action_execute(op, FALSE);
@@ -505,14 +532,16 @@ services_action_sync(svc_action_t * op)
     if (op == NULL) {
         crm_trace("No operation to execute");
         return FALSE;
+    }
 
-    } else if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
+    op->synchronous = true;
+    if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
 #if SUPPORT_UPSTART
         rc = upstart_job_exec(op, TRUE);
 #endif
     } else if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
 #if SUPPORT_SYSTEMD
-        rc = systemd_unit_exec(op, TRUE);
+        rc = systemd_unit_exec(op);
 #endif
     } else {
         rc = services_os_action_execute(op, TRUE);

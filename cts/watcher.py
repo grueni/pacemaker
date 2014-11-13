@@ -24,13 +24,15 @@ Licensed under the GNU GPL.
 
 import types, string, select, sys, time, re, os, struct, signal
 import time, syslog, random, traceback, base64, pickle, binascii, fcntl
+import threading
 
 
 from cts.remote import *
 from cts.logging import *
 
 has_log_watcher = {}
-log_watcher_bin = CTSvars.CRM_DAEMON_DIR + "/cts_log_watcher.py"
+log_watcher_file = "cts_log_watcher.py"
+log_watcher_bin = CTSvars.CRM_DAEMON_DIR + "/" + log_watcher_file
 log_watcher = """
 import sys, os, fcntl
 
@@ -115,6 +117,7 @@ class SearchObj:
     def __init__(self, filename, host=None, name=None):
 
         self.limit = None
+        self.cache = []
         self.logger = LogFactory()
         self.host = host
         self.name = name
@@ -139,8 +142,18 @@ class SearchObj:
         message = "lw: %s: %s" % (self, args)
         self.logger.debug(message)
 
-    def next(self):
+    def harvest(self, delegate=None):
+        async = self.harvest_async(delegate)
+        async.join()
+
+    def harvest_async(self, delegate=None):
         self.log("Not implemented")
+        raise
+
+    def end(self):
+        self.debug("Unsetting the limit")
+        # Unset the limit
+        self.limit = None
 
 class FileObj(SearchObj):
     def __init__(self, filename, host=None, name=None):
@@ -152,11 +165,17 @@ class FileObj(SearchObj):
             global log_watcher
             global log_watcher_bin
 
-            self.debug("Installing %s on %s" % (log_watcher_bin, host))
-            self.rsh(host, '''echo "%s" > %s''' % (log_watcher, log_watcher_bin), silent=True)
+            self.debug("Installing %s on %s" % (log_watcher_file, host))
+
+            os.system("cat << END >> %s\n%s\nEND" %(log_watcher_file, log_watcher))
+            os.system("chmod 755 %s" %(log_watcher_file))
+
+            self.rsh.cp(log_watcher_file, "root@%s:%s" % (host, log_watcher_bin))
             has_log_watcher[host] = 1
 
-        self.next()
+            os.system("rm -f %s" %(log_watcher_file))
+
+        self.harvest()
 
     def async_complete(self, pid, returncode, outLines, errLines):
         for line in outLines:
@@ -164,7 +183,8 @@ class FileObj(SearchObj):
             if match:
                 last_offset = self.offset
                 self.offset = match.group(1)
-                #if last_offset == "EOF": self.debug("Got %d lines, new offset: %s" % (len(lines), self.offset))
+                #if last_offset == "EOF": self.debug("Got %d lines, new offset: %s" % (len(outLines), self.offset))
+                self.debug("Got %d lines, new offset: %s  %s" % (len(outLines), self.offset, repr(self.delegate)))
 
             elif re.search("^CTSwatcher:.*truncated", line):
                 self.log(line)
@@ -173,39 +193,22 @@ class FileObj(SearchObj):
             else:
                 self.cache.append(line)
 
-        self.in_progress = False
         if self.delegate:
             self.delegate.async_complete(pid, returncode, self.cache, errLines)
 
-    def next(self, delegate=None):
+    def harvest_async(self, delegate=None):
+        self.delegate = delegate
         self.cache = []
-        self.in_progress = True
-
-        dosync = True
-        if delegate:
-            dosync = False
-            self.delegate = delegate
-        else:
-            delegate = self
-            self.delegate = None
 
         if self.limit != None and self.offset > self.limit:
             if self.delegate:
                 self.delegate.async_complete(-1, -1, [], [])
-            return []
+            return None
 
         global log_watcher_bin
-        self.rsh(self.host,
-                "python %s -t %s -p CTSwatcher: -l 200 -f %s -o %s" % (log_watcher_bin, self.name, self.filename, self.offset),
-                stdout=None, silent=True, synchronous=dosync, completionDelegate=self)
-
-        if delegate:
-            return []
-
-        while self.in_progress:
-            time.sleep(1)
-
-        return self.cache
+        return self.rsh.call_async(self.host,
+                                   "python %s -t %s -p CTSwatcher: -l 200 -f %s -o %s -t %s" % (log_watcher_bin, self.name, self.filename, self.offset, self.name),
+                completionDelegate=self)
 
     def setend(self):
         if self.limit: 
@@ -213,7 +216,7 @@ class FileObj(SearchObj):
 
         global log_watcher_bin
         (rc, lines) = self.rsh(self.host,
-                 "python %s -t %s -p CTSwatcher: -l 2 -f %s -o %s" % (log_watcher_bin, self.name, self.filename, "EOF"),
+                               "python %s -t %s -p CTSwatcher: -l 2 -f %s -o %s -t %s" % (log_watcher_bin, self.name, self.filename, "EOF", self.name),
                  None, silent=True)
 
         for line in lines:
@@ -230,37 +233,49 @@ class JournalObj(SearchObj):
 
     def __init__(self, host=None, name=None):
         SearchObj.__init__(self, name, host, name)
-        self.next()
+        self.harvest()
 
     def async_complete(self, pid, returncode, outLines, errLines):
-        #print "%d returned on %s" % (pid, self.host)
+        #self.log( "%d returned on %s" % (pid, self.host))
+        foundCursor = False
         for line in outLines:
             match = re.search("^-- cursor: ([^.]+)", line)
             if match:
+                foundCursor = True
                 last_offset = self.offset
                 self.offset = match.group(1).strip()
                 self.debug("Got %d lines, new cursor: %s" % (len(outLines), self.offset))
             else:
                 self.cache.append(line)
 
-        self.in_progress = False
+        if self.limit and not foundCursor:
+            self.hitLimit = True
+            self.debug("Got %d lines but no cursor: %s" % (len(outLines), self.offset))
+            
+            # Get the current cursor
+            (rc, outLines) = self.rsh(self.host, "journalctl -q -n 0 --show-cursor", stdout=None, silent=True, synchronous=True)
+            for line in outLines:
+                match = re.search("^-- cursor: ([^.]+)", line)
+                if match:
+                    last_offset = self.offset
+                    self.offset = match.group(1).strip()
+                    self.debug("Got %d lines, new cursor: %s" % (len(outLines), self.offset))
+                else:
+                    self.log("Not a new cursor: %s" % line)
+                    self.cache.append(line)
+
         if self.delegate:
             self.delegate.async_complete(pid, returncode, self.cache, errLines)
 
-    def next(self, delegate=None):
+    def harvest_async(self, delegate=None):
+        self.delegate = delegate
         self.cache = []
-        self.in_progress = True
-
-        dosync = True
-        if delegate:
-            dosync = False
-            self.delegate = delegate
-        else:
-            delegate = self
-            self.delegate = None
 
         # Use --lines to prevent journalctl from overflowing the Popen input buffer
-        if self.limit:
+        if self.limit and self.hitLimit:
+            return None
+
+        elif self.limit:
             command = "journalctl -q --after-cursor='%s' --until '%s' --lines=200 --show-cursor" % (self.offset, self.limit)
         else:
             command = "journalctl -q --after-cursor='%s' --lines=200 --show-cursor" % (self.offset)
@@ -268,19 +283,13 @@ class JournalObj(SearchObj):
         if self.offset == "EOF":
             command = "journalctl -q -n 0 --show-cursor"
 
-        self.rsh(self.host, command, stdout=None, silent=True, synchronous=dosync, completionDelegate=self)
-        if delegate:
-            return []
-
-        while self.in_progress:
-            time.sleep(1)
-
-        return self.cache
+        return self.rsh.call_async(self.host, command, completionDelegate=self)
 
     def setend(self):
         if self.limit: 
             return
 
+        self.hitLimit = False
         (rc, lines) = self.rsh(self.host, "date +'%Y-%m-%d %H:%M:%S'", stdout=None, silent=True)
 
         for line in lines:
@@ -315,6 +324,7 @@ class LogWatcher(RemoteExec):
         self.debug_level = debug_level
         self.whichmatch  = -1
         self.unmatched   = None
+        self.cache_lock = threading.Lock()
 
         self.file_list = []
         self.line_cache = []
@@ -338,6 +348,7 @@ class LogWatcher(RemoteExec):
         if hosts:
             self.hosts = hosts
         else:
+            raise
             self.hosts = self.Env["nodes"]
 
         if trace_lw:
@@ -370,6 +381,8 @@ class LogWatcher(RemoteExec):
         else:
             self.file_list.append(FileObj(self.filename))
 
+        # print "%s now has %d files" % (self.name, len(self.file_list))
+
     def __del__(self):
         if self.debug_level > 1: self.debug("Destroy")
 
@@ -380,31 +393,36 @@ class LogWatcher(RemoteExec):
         self.returnonlymatch = onlymatch
 
     def async_complete(self, pid, returncode, outLines, errLines):
-        self.pending = self.pending - 1
+        # TODO: Probably need a lock for updating self.line_cache
+        self.logger.debug("%s: Got %d lines from %d (total %d)" % (self.name, len(outLines), pid, len(self.line_cache)))
         if len(outLines):
+            self.cache_lock.acquire()
             self.line_cache.extend(outLines)
-        #print "Got %d lines from %d" % (len(outLines), pid)
+            self.cache_lock.release()
 
     def __get_lines(self, timeout):
         count=0
         if not len(self.file_list):
             raise ValueError("No sources to read from")
 
-        self.pending = len(self.file_list)
+        pending = []
         #print "%s waiting for %d operations" % (self.name, self.pending)
         for f in self.file_list:
-            lines = f.next(delegate=self)
+            t = f.harvest_async(self)
+            if t:
+                pending.append(t)
 
-        while self.pending > 0:
-            #print "waiting for %d more" % self.pending
-            time.sleep(1)
-            count = count + 1
-            if count > 20 and count > timeout and self.pending:
-                # Probably the output buffer got too full
-                print "Aborting after %ds waiting for %d logging commands" % (count, self.pending)
+        for t in pending:
+            t.join(60.0)
+            if t.isAlive():
+                self.logger.log("%s: Aborting after 20s waiting for %s logging commands" % (self.name, repr(t)))
                 return
 
         #print "Got %d lines" % len(self.line_cache)
+
+    def end(self):
+        for f in self.file_list:
+            f.end()
 
     def look(self, timeout=None, silent=False):
         '''Examine the log looking for the given patterns.
@@ -438,8 +456,11 @@ class LogWatcher(RemoteExec):
         while True:
             if len(self.line_cache):
                 lines += 1
+
+                self.cache_lock.acquire()
                 line = self.line_cache[0]
                 self.line_cache.remove(line)
+                self.cache_lock.release()
 
                 which=-1
                 if re.search("CTS:", line):
@@ -472,6 +493,7 @@ class LogWatcher(RemoteExec):
                     self.debug("Single search terminated: start=%d, end=%d, now=%d, lines=%d" % (begin, end, time.time(), lines))
                     return None
                 else:
+                    self.debug("Waiting: start=%d, end=%d, now=%d, lines=%d" % (begin, end, time.time(), len(self.line_cache)))
                     time.sleep(1)
 
         self.debug("How did we get here")
@@ -503,6 +525,7 @@ class LogWatcher(RemoteExec):
                 self.unmatched = self.regexes
                 self.matched = returnresult
                 self.regexes = save_regexes
+                self.end()
                 return None
 
             returnresult.append(oneresult)

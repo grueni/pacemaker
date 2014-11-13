@@ -396,6 +396,7 @@ do_test master-stop "Stop instances due to location constraint with role=Started
 do_test master-partially-demoted-group "Allow partially demoted group to finish demoting"
 do_test bug-cl-5213 "Ensure role colocation with -INFINITY is enforced"
 do_test bug-cl-5219 "Allow unrelated resources with a common colocation target to remain promoted"
+do_test master-asymmetrical-order "Fix the behaviors of multi-state resources with asymmetrical ordering"
 
 echo ""
 do_test history-1 "Correctly parse stateful-1 resource state"
@@ -762,9 +763,16 @@ echo ""
 do_test remote-startup-probes  "Baremetal remote-node startup probes"
 do_test remote-startup         "Startup a newly discovered remote-nodes with no status."
 do_test remote-fence-unclean   "Fence unclean baremetal remote-node"
+do_test remote-fence-unclean2  "Fence baremetal remote-node after cluster node fails and connection can not be recovered"
 do_test remote-move            "Move remote-node connection resource"
 do_test remote-disable         "Disable a baremetal remote-node"
 do_test remote-orphaned        "Properly shutdown orphaned connection resource"
+do_test remote-recover         "Recover connection resource after cluster-node fails."
 do_test remote-stale-node-entry "Make sure we properly handle leftover remote-node entries in the node section"
+
+echo ""
+do_test resource-discovery      "Exercises resource-discovery location constraint option."
+do_test rsc-discovery-per-node  "Disable resource discovery per node"
+
 echo ""
 test_results

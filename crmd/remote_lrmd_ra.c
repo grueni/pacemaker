@@ -140,8 +140,6 @@ recurring_helper(gpointer data)
 
         ra_data->recurring_cmds = g_list_remove(ra_data->recurring_cmds, cmd);
 
-        cmd->call_id = generate_callid();
-
         ra_data->cmds = g_list_append(ra_data->cmds, cmd);
         mainloop_set_trigger(ra_data->work);
     }
@@ -177,6 +175,24 @@ report_remote_ra_result(remote_ra_cmd_t * cmd)
     op.interval = cmd->interval;
     op.rc = cmd->rc;
     op.op_status = cmd->op_status;
+    op.t_run = cmd->start_time;
+    op.t_rcchange = cmd->start_time;
+    if (cmd->reported_success && cmd->rc != PCMK_OCF_OK) {
+        op.t_rcchange = time(NULL);
+        /* This edge case will likely never ever occur, but if it does the
+         * result is that a failure will not be processed correctly. This is only
+         * remotely possible because we are able to detect a connection resource's tcp
+         * connection has failed at any moment after start has completed. The actual
+         * recurring operation is just a connectivity ping.
+         *
+         * basically, we are not guaranteed that the first successful monitor op and
+         * a subsequent failed monitor op will not occur in the same timestamp. We have to
+         * make it look like the operations occurred at separate times though. */
+        if (op.t_rcchange == op.t_run) {
+            op.t_rcchange++;
+        }
+    }
+
     if (cmd->params) {
         lrmd_key_value_t *tmp;
 
@@ -250,6 +266,8 @@ connection_takeover_timeout_cb(gpointer data)
 
     crm_debug("takeover event timed out for node %s", cmd->rsc_id);
     cmd->takeover_timeout_id = 0;
+
+    lrm_state = lrm_state_find(cmd->rsc_id);
 
     handle_remote_ra_stop(lrm_state, cmd);
     free_cmd(cmd);
@@ -379,6 +397,11 @@ remote_lrm_op_callback(lrmd_event_data_t * op)
             cmd->rc = PCMK_OCF_UNKNOWN_ERROR;
 
         } else {
+
+            if (safe_str_eq(cmd->action, "start")) {
+                /* clear PROBED value if it happens to be set after start completes. */
+                update_attrd(lrm_state->node_name, CRM_OP_PROBED, NULL, NULL, TRUE);
+            }
             lrm_state_reset_tables(lrm_state);
             cmd->rc = PCMK_OCF_OK;
             cmd->op_status = PCMK_LRM_OP_DONE;

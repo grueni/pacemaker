@@ -67,25 +67,25 @@ const int anon_tls_kx_order[] = {
  * casts are necessary for constants, because we never know how for sure
  * how U/UL/ULL map to __u16, __u32, __u64. At least not in a portable way.
  */
-#define ___swab16(x) ((__u16)(                                  \
-        (((__u16)(x) & (__u16)0x00ffU) << 8) |                  \
-        (((__u16)(x) & (__u16)0xff00U) >> 8)))
+#define __swab16(x) ((uint16_t)(                                      \
+        (((uint16_t)(x) & (uint16_t)0x00ffU) << 8) |                  \
+        (((uint16_t)(x) & (uint16_t)0xff00U) >> 8)))
 
-#define ___swab32(x) ((__u32)(                                  \
-        (((__u32)(x) & (__u32)0x000000ffUL) << 24) |            \
-        (((__u32)(x) & (__u32)0x0000ff00UL) <<  8) |            \
-        (((__u32)(x) & (__u32)0x00ff0000UL) >>  8) |            \
-        (((__u32)(x) & (__u32)0xff000000UL) >> 24)))
+#define __swab32(x) ((uint32_t)(                                      \
+        (((uint32_t)(x) & (uint32_t)0x000000ffUL) << 24) |            \
+        (((uint32_t)(x) & (uint32_t)0x0000ff00UL) <<  8) |            \
+        (((uint32_t)(x) & (uint32_t)0x00ff0000UL) >>  8) |            \
+        (((uint32_t)(x) & (uint32_t)0xff000000UL) >> 24)))
 
-#define ___swab64(x) ((__u64)(                                  \
-        (((__u64)(x) & (__u64)0x00000000000000ffULL) << 56) |   \
-        (((__u64)(x) & (__u64)0x000000000000ff00ULL) << 40) |   \
-        (((__u64)(x) & (__u64)0x0000000000ff0000ULL) << 24) |   \
-        (((__u64)(x) & (__u64)0x00000000ff000000ULL) <<  8) |   \
-        (((__u64)(x) & (__u64)0x000000ff00000000ULL) >>  8) |   \
-        (((__u64)(x) & (__u64)0x0000ff0000000000ULL) >> 24) |   \
-        (((__u64)(x) & (__u64)0x00ff000000000000ULL) >> 40) |   \
-        (((__u64)(x) & (__u64)0xff00000000000000ULL) >> 56)))
+#define __swab64(x) ((uint64_t)(                                      \
+        (((uint64_t)(x) & (uint64_t)0x00000000000000ffULL) << 56) |   \
+        (((uint64_t)(x) & (uint64_t)0x000000000000ff00ULL) << 40) |   \
+        (((uint64_t)(x) & (uint64_t)0x0000000000ff0000ULL) << 24) |   \
+        (((uint64_t)(x) & (uint64_t)0x00000000ff000000ULL) <<  8) |   \
+        (((uint64_t)(x) & (uint64_t)0x000000ff00000000ULL) >>  8) |   \
+        (((uint64_t)(x) & (uint64_t)0x0000ff0000000000ULL) >> 24) |   \
+        (((uint64_t)(x) & (uint64_t)0x00ff000000000000ULL) >> 40) |   \
+        (((uint64_t)(x) & (uint64_t)0xff00000000000000ULL) >> 56)))
 #endif
 
 #define REMOTE_MSG_VERSION 1
@@ -737,11 +737,12 @@ check_connect_finished(gpointer userdata)
 static int
 internal_tcp_connect_async(int sock,
                            const struct sockaddr *addr, socklen_t addrlen, int timeout /* ms */ ,
-                           void *userdata, void (*callback) (void *userdata, int sock))
+                           int *timer_id, void *userdata, void (*callback) (void *userdata, int sock))
 {
     int rc = 0;
     int flag = 0;
     int interval = 500;
+    int timer;
     struct tcp_async_cb_data *cb_data = NULL;
 
     if ((flag = fcntl(sock, F_GETFL)) >= 0) {
@@ -782,7 +783,10 @@ internal_tcp_connect_async(int sock,
      * Something about the way mainloop is currently polling prevents this from working at the
      * moment though. */
     crm_trace("fd %d: scheduling to check if connect finished in %dms second", sock, interval);
-    g_timeout_add(interval, check_connect_finished, cb_data);
+    timer = g_timeout_add(interval, check_connect_finished, cb_data);
+    if (timer_id) {
+        *timer_id = timer;
+    }
 
     return 0;
 }
@@ -809,10 +813,11 @@ internal_tcp_connect(int sock, const struct sockaddr *addr, socklen_t addrlen)
  * \internal
  * \brief tcp connection to server at specified port
  * \retval negative, failed to connect.
+ * \retval positive, sock fd
  */
 int
-crm_remote_tcp_connect_async(const char *host, int port, int timeout,   /*ms */
-                             void *userdata, void (*callback) (void *userdata, int sock))
+crm_remote_tcp_connect_async(const char *host, int port, int timeout, /*ms */
+                             int *timer_id, void *userdata, void (*callback) (void *userdata, int sock))
 {
     char buffer[256];
     struct addrinfo *res = NULL;
@@ -877,8 +882,7 @@ crm_remote_tcp_connect_async(const char *host, int port, int timeout,   /*ms */
 
         if (callback) {
             if (internal_tcp_connect_async
-                (sock, rp->ai_addr, rp->ai_addrlen, timeout, userdata, callback) == 0) {
-                sock = 0;
+                (sock, rp->ai_addr, rp->ai_addrlen, timeout, timer_id, userdata, callback) == 0) {
                 goto async_cleanup; /* Success for now, we'll hear back later in the callback */
             }
 
@@ -903,5 +907,5 @@ async_cleanup:
 int
 crm_remote_tcp_connect(const char *host, int port)
 {
-    return crm_remote_tcp_connect_async(host, port, -1, NULL, NULL);
+    return crm_remote_tcp_connect_async(host, port, -1, NULL, NULL, NULL);
 }

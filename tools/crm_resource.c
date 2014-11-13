@@ -43,6 +43,9 @@
 #include <crm/pengine/status.h>
 #include <crm/pengine/internal.h>
 
+#include "fake_transition.h"
+extern xmlNode *do_calculations(pe_working_set_t * data_set, xmlNode * xml_input, crm_time_t * now);
+
 bool scope_master = FALSE;
 gboolean do_force = FALSE;
 gboolean BE_QUIET = FALSE;
@@ -94,6 +97,10 @@ resource_ipc_connection_destroy(gpointer user_data)
 static void
 start_mainloop(void)
 {
+    if (crmd_replies_needed == 0) {
+        return;
+    }
+
     mainloop = g_main_new(FALSE);
     fprintf(stderr, "Waiting for %d replies from the CRMd", crmd_replies_needed);
     crm_debug("Waiting for %d replies from the CRMd", crmd_replies_needed);
@@ -395,6 +402,9 @@ dump_resource_attr(const char *rsc, const char *attr, pe_working_set_t * data_se
     if (value != NULL) {
         fprintf(stdout, "%s\n", value);
         rc = 0;
+
+    } else {
+        CMD_ERR("Attribute '%s' not found for '%s'\n", attr, the_rsc->id);
     }
 
     g_hash_table_destroy(params);
@@ -786,6 +796,7 @@ delete_lrm_rsc(cib_t *cib_conn, crm_ipc_t * crmd_channel, const char *host_uname
                resource_t * rsc, pe_working_set_t * data_set)
 {
     int rc = pcmk_ok;
+    node_t *node = NULL;
 
     if (rsc == NULL) {
         return -ENXIO;
@@ -804,7 +815,7 @@ delete_lrm_rsc(cib_t *cib_conn, crm_ipc_t * crmd_channel, const char *host_uname
         GListPtr lpc = NULL;
 
         for (lpc = data_set->nodes; lpc != NULL; lpc = lpc->next) {
-            node_t *node = (node_t *) lpc->data;
+            node = (node_t *) lpc->data;
 
             if (node->details->online) {
                 delete_lrm_rsc(cib_conn, crmd_channel, node->details->uname, rsc, data_set);
@@ -814,15 +825,20 @@ delete_lrm_rsc(cib_t *cib_conn, crm_ipc_t * crmd_channel, const char *host_uname
         return pcmk_ok;
     }
 
-    printf("Cleaning up %s on %s\n", rsc->id, host_uname);
-    rc = send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_DELETE, host_uname, rsc->id, TRUE, data_set);
+    node = pe_find_node(data_set->nodes, host_uname);
+
+    if (node && node->details->rsc_discovery_enabled) {
+        printf("Cleaning up %s on %s\n", rsc->id, host_uname);
+        rc = send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_DELETE, host_uname, rsc->id, TRUE, data_set);
+    } else {
+        printf("Resource discovery disabled on %s. Unable to delete lrm state.\n", host_uname);
+    }
 
     if (rc == pcmk_ok) {
         char *attr_name = NULL;
         const char *id = rsc->id;
-        node_t *node = pe_find_node(data_set->nodes, host_uname);
 
-        if(node && node->details->remote_rsc == NULL) {
+        if(node && node->details->remote_rsc == NULL && node->details->rsc_discovery_enabled) {
             crmd_replies_needed++;
         }
         if (rsc->clone_name) {
@@ -1287,6 +1303,373 @@ generate_resource_params(resource_t * rsc, pe_working_set_t * data_set)
     return combined;
 }
 
+static bool resource_is_running_on(resource_t *rsc, const char *host) 
+{
+    bool found = TRUE;
+    GListPtr hIter = NULL;
+    GListPtr hosts = NULL;
+
+    if(rsc == NULL) {
+        return FALSE;
+    }
+
+    rsc->fns->location(rsc, &hosts, TRUE);
+    for (hIter = hosts; host != NULL && hIter != NULL; hIter = hIter->next) {
+        pe_node_t *node = (pe_node_t *) hIter->data;
+
+        if(strcmp(host, node->details->uname) == 0) {
+            crm_trace("Resource %s is running on %s\n", rsc->id, host);
+            goto done;
+        } else if(strcmp(host, node->details->id) == 0) {
+            crm_trace("Resource %s is running on %s\n", rsc->id, host);
+            goto done;
+        }
+    }
+
+    if(host != NULL) {
+        crm_trace("Resource %s is not running on: %s\n", rsc->id, host);
+        found = FALSE;
+
+    } else if(host == NULL && hosts == NULL) {
+        crm_trace("Resource %s is not running\n", rsc->id);
+        found = FALSE;
+    }
+
+  done:
+
+    g_list_free(hosts);
+    return found;
+}
+
+static GList *get_active_resources(const char *host, pe_working_set_t *data_set) 
+{
+    GList *rIter = NULL;
+    GList *active = NULL;
+
+    for (rIter = data_set->resources; rIter != NULL; rIter = rIter->next) {
+        resource_t *rsc = (resource_t *) rIter->data;
+
+        if(resource_is_running_on(rsc, host)) {
+            active = g_list_append(active, strdup(rsc->id));
+        }
+    }
+
+    return active;
+}
+
+static GList *subtract_lists(GList *from, GList *items) 
+{
+    GList *item = NULL;
+    GList *result = g_list_copy(from);
+
+    for (item = items; item != NULL; item = item->next) {
+        GList *candidate = NULL;
+        for (candidate = from; candidate != NULL; candidate = candidate->next) {
+            crm_info("Comparing %s with %s", candidate->data, item->data);
+            if(strcmp(candidate->data, item->data) == 0) {
+                result = g_list_remove(result, candidate->data);
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+static void dump_list(GList *items, const char *tag) 
+{
+    int lpc = 0;
+    GList *item = NULL;
+
+    for (item = items; item != NULL; item = item->next) {
+        crm_trace("%s[%d]: %s", tag, lpc, item->data);
+        lpc++;
+    }
+}
+
+static void display_list(GList *items, const char *tag) 
+{
+    GList *item = NULL;
+
+    for (item = items; item != NULL; item = item->next) {
+        fprintf(stdout, "%s%s\n", tag, (const char *)item->data);
+    }
+}
+
+static int
+update_dataset(cib_t *cib, pe_working_set_t * data_set, bool simulate)
+{
+    xmlNode *cib_xml_copy = NULL;
+    int rc = cib->cmds->query(cib, NULL, &cib_xml_copy, cib_scope_local | cib_sync_call);
+
+    if(rc != pcmk_ok) {
+        fprintf(stdout, "Could not obtain the current CIB: %s (%d)\n", pcmk_strerror(rc), rc);
+        return crm_exit(rc);
+
+    } else if (cli_config_update(&cib_xml_copy, NULL, FALSE) == FALSE) {
+        fprintf(stderr, "Could not upgrade the current CIB\n");
+        return -ENOKEY;
+    }
+
+    set_working_set_defaults(data_set);
+    data_set->input = cib_xml_copy;
+    data_set->now = crm_time_new(NULL);
+
+    if(simulate) {
+        char *pid = crm_itoa(getpid());
+        cib_t *shadow_cib = cib_shadow_new(pid);
+        char *shadow_file = get_shadow_file(pid);
+
+        if (shadow_cib == NULL) {
+            fprintf(stderr, "Could not create shadow cib: '%s'\n", pid);
+            crm_exit(-ENXIO);
+        }
+
+        rc = write_xml_file(cib_xml_copy, shadow_file, FALSE);
+
+        if (rc < 0) {
+            fprintf(stderr, "Could not populate shadow cib: %s (%d)\n", pcmk_strerror(rc), rc);
+            free_xml(cib_xml_copy);
+            return rc;
+        }
+
+        rc = shadow_cib->cmds->signon(shadow_cib, crm_system_name, cib_command);
+        if(rc != pcmk_ok) {
+            fprintf(stderr, "Could not connect to shadow cib: %s (%d)\n", pcmk_strerror(rc), rc);
+            free_xml(cib_xml_copy);
+            return rc;
+        }
+
+        do_calculations(data_set, cib_xml_copy, NULL);
+        run_simulation(data_set, shadow_cib, NULL, TRUE);
+        rc = update_dataset(shadow_cib, data_set, FALSE);
+
+        cib_delete(shadow_cib);
+        /* unlink(shadow_file); */
+        free(shadow_file);
+
+    } else {
+        cluster_status(data_set);
+    }
+
+    return rc;
+}
+
+static int
+max_delay_in(pe_working_set_t * data_set, GList *resources) 
+{
+    int max_delay = 0;
+    GList *item = NULL;
+
+    for (item = resources; item != NULL; item = item->next) {
+        resource_t *rsc = pe_find_resource(data_set->resources, (const char *)item->data);
+
+        if(rsc) {
+            char *key = g_strdup_printf("%s_%s_0", rsc->id, RSC_STOP);
+            action_t *stop = custom_action(rsc, key, RSC_STOP, NULL, TRUE, FALSE, data_set);
+            const char *value = g_hash_table_lookup(stop->meta, XML_ATTR_TIMEOUT);
+            int delay = crm_int_helper(value, NULL);
+
+            if(delay > max_delay) {
+                crm_trace("Calculated new delay of %s ms due to %s", value, rsc->id);
+                max_delay = delay;
+            }
+
+            pe_free_action(stop);
+        }
+    }
+
+
+    return 5 + (max_delay / 1000);
+}
+
+static int
+resource_restart(resource_t * rsc, const char *host, int timeout_ms, cib_t * cib)
+{
+    int rc = 0;
+    int lpc = 0;
+    int before = 0;
+    int step_timeout_s = 0;
+    int sleep_interval = 2;
+    int timeout = timeout_ms / 1000;
+
+    bool is_clone = FALSE;
+    char *rsc_id = NULL;
+
+    GList *list_delta = NULL;
+    GList *target_active = NULL;
+    GList *current_active = NULL;
+    GList *restart_target_active = NULL;
+
+    pe_working_set_t data_set;
+
+    if(resource_is_running_on(rsc, host) == FALSE) {
+        return -ENXIO;
+    }
+
+
+    rsc_id = strdup(rsc->id);
+    if(rsc->variant > pe_group) {
+        is_clone = TRUE;
+    }
+
+    /*
+      grab full cib
+      determine resource state of list
+      disable or ban
+      poll and and watch for resources to get stopped
+      without --wait, calculate the stop timeout for each step and wait for that
+      if we hit --wait or the service timeout, re-enable or un-ban, report failure and indicate which resources we couldn't take down
+      if everything stopped, re-enable or un-ban
+      poll and and watch for resources to get stopped
+      without --wait, calculate the start timeout for each step and wait for that
+      if we hit --wait or the service timeout, report (different) failure and indicate which resources we couldn't bring back up
+      report success
+
+      Optimizations:
+      - use constraints to determine ordered list of affected resources
+      - Allow a --no-deps option (aka. --force-restart)
+    */
+
+
+    set_working_set_defaults(&data_set);
+    rc = update_dataset(cib, &data_set, FALSE);
+    if(rc != pcmk_ok) {
+        fprintf(stdout, "Could not get new resource list: %s (%d)\n", pcmk_strerror(rc), rc);
+        return rc;
+    }
+
+    restart_target_active = get_active_resources(host, &data_set);
+    current_active = get_active_resources(host, &data_set);
+
+    dump_list(current_active, "Origin");
+
+    if(is_clone && host) {
+        BE_QUIET = TRUE;
+        rc = ban_resource(rsc_id, host, NULL, cib);
+
+    } else {
+        rc = set_resource_attr(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, RSC_STOPPED, FALSE, cib, &data_set);
+    }
+    if(rc != pcmk_ok) {
+        fprintf(stderr, "Could not set target-role for %s: %s (%d)\n", rsc_id, pcmk_strerror(rc), rc);
+        return crm_exit(rc);
+    }
+
+    rc = update_dataset(cib, &data_set, TRUE);
+    if(rc != pcmk_ok) {
+        fprintf(stderr, "Could not determine which resources would be stopped\n");
+        goto failure;
+    }
+
+    target_active = get_active_resources(host, &data_set);
+    dump_list(target_active, "Target");
+
+    list_delta = subtract_lists(current_active, target_active);
+    fprintf(stdout, "Waiting for %d resources to stop:\n", g_list_length(list_delta));
+    display_list(list_delta, " * ");
+
+    step_timeout_s = timeout / sleep_interval;
+    while(g_list_length(list_delta) > 0) {
+        before = g_list_length(list_delta);
+        if(timeout_ms == 0) {
+            step_timeout_s = max_delay_in(&data_set, list_delta) / sleep_interval;
+        }
+
+        /* We probably don't need the entire step timeout */
+        for(lpc = 0; lpc < step_timeout_s && g_list_length(list_delta) > 0; lpc++) {
+            sleep(sleep_interval);
+            if(timeout) {
+                timeout -= sleep_interval;
+                crm_trace("%ds remaining", timeout);
+            }
+            rc = update_dataset(cib, &data_set, FALSE);
+            if(rc != pcmk_ok) {
+                fprintf(stderr, "Could not determine which resources were stopped\n");
+                goto failure;
+            }
+
+            current_active = get_active_resources(host, &data_set);
+            list_delta = subtract_lists(current_active, target_active);
+            dump_list(current_active, "Current");
+            dump_list(list_delta, "Delta");
+        }
+
+        crm_trace("%d (was %d) resources remaining", before, g_list_length(list_delta));
+        if(before == g_list_length(list_delta)) {
+            /* aborted during stop phase, print the contents of list_delta */
+            fprintf(stderr, "Could not complete shutdown of %s, %d resources remaining\n", rsc_id, g_list_length(list_delta));
+            display_list(list_delta, " * ");
+            rc = -ETIME;
+            goto failure;
+        }
+
+    }
+
+    if(is_clone && host) {
+        rc = clear_resource(rsc_id, host, NULL, cib);
+
+    } else {
+        rc = delete_resource_attr(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, cib, &data_set);
+    }
+
+    if(rc != pcmk_ok) {
+        fprintf(stderr, "Could not unset target-role for %s: %s (%d)\n", rsc_id, pcmk_strerror(rc), rc);
+        return crm_exit(rc);
+    }
+
+    target_active = restart_target_active;
+    list_delta = subtract_lists(target_active, current_active);
+    fprintf(stdout, "Waiting for %d resources to start again:\n", g_list_length(list_delta));
+    display_list(list_delta, " * ");
+
+    step_timeout_s = timeout / sleep_interval;
+    while(g_list_length(list_delta) > 0) {
+        if(timeout_ms == 0) {
+            step_timeout_s = max_delay_in(&data_set, list_delta) / sleep_interval;
+        }
+
+        /* We probably don't need the entire step timeout */
+        for(lpc = 0; lpc < step_timeout_s && g_list_length(list_delta) > 0; lpc++) {
+            sleep(sleep_interval);
+            if(timeout) {
+                timeout -= sleep_interval;
+                crm_trace("%ds remaining", timeout);
+            }
+
+            rc = update_dataset(cib, &data_set, FALSE);
+            if(rc != pcmk_ok) {
+                fprintf(stderr, "Could not determine which resources were started\n");
+                goto failure;
+            }
+
+            current_active = get_active_resources(host, &data_set);
+            list_delta = subtract_lists(target_active, current_active);
+            dump_list(current_active, "Current");
+            dump_list(list_delta, "Delta");
+        }
+
+        if(before == g_list_length(list_delta)) {
+            /* aborted during start phase, print the contents of list_delta */
+            fprintf(stdout, "Could not complete restart of %s, %d resources remaining\n", rsc_id, g_list_length(list_delta));
+            display_list(list_delta, " * ");
+            rc = -ETIME;
+            goto failure;
+        }
+
+    } while(g_list_length(list_delta) > 0);
+
+    return pcmk_ok;
+
+  failure:
+    if(is_clone && host) {
+        clear_resource(rsc_id, host, NULL, cib);
+
+    } else {
+        delete_resource_attr(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, cib, &data_set);
+    }
+    return rc;
+}
 
 /* *INDENT-OFF* */
 static struct crm_option long_options[] = {
@@ -1358,6 +1741,7 @@ static struct crm_option long_options[] = {
     {"-spacer-",   1, 0, '-', "\nAdvanced Commands:"},
     {"delete",     0, 0, 'D', "\t\t(Advanced) Delete a resource from the CIB"},
     {"fail",       0, 0, 'F', "\t\t(Advanced) Tell the cluster this resource has failed"},
+    {"restart",    0, 0,  0,  NULL, 1},
     {"force-stop", 0, 0,  0,  "\t(Advanced) Bypass the cluster and stop a resource on the local node. Additional detail with -V"},
     {"force-start",0, 0,  0,  "\t(Advanced) Bypass the cluster and start a resource on the local node. Additional detail with -V"},
     {"force-check",0, 0,  0,  "\t(Advanced) Bypass the cluster and check the state of a resource on the local node. Additional detail with -V\n"},
@@ -1371,6 +1755,7 @@ static struct crm_option long_options[] = {
     {"utilization",	0, 0, 'z', "\tModify a resource's utilization attribute. For use with -p, -g, -d"},
     {"set-name",        1, 0, 's', "\t(Advanced) ID of the instance_attributes object to change"},
     {"nvpair",          1, 0, 'i', "\t(Advanced) ID of the nvpair object to change/delete"},
+    {"timeout",         1, 0, 'T',  "\t(Advanced) How long to wait for --restart to take effect", 1},
     {"force",		0, 0, 'f', "\n" /* Is this actually true anymore?
 					   "\t\tForce the resource to move by creating a rule for the current location and a score of -INFINITY"
 					   "\n\t\tThis should be used if the resource's stickiness and constraint scores total more than INFINITY (Currently 100,000)"
@@ -1431,6 +1816,7 @@ main(int argc, char **argv)
 
     int rc = pcmk_ok;
     int option_index = 0;
+    int timeout_ms = 0;
     int argerr = 0;
     int flag;
 
@@ -1456,6 +1842,7 @@ main(int argc, char **argv)
                     recursive = TRUE;
 
                 } else if (safe_str_eq("force-stop", longname)
+                    || safe_str_eq("restart", longname)
                     || safe_str_eq("force-start", longname)
                     || safe_str_eq("force-check", longname)) {
                     rsc_cmd = flag;
@@ -1604,6 +1991,9 @@ main(int argc, char **argv)
                 break;
             case 't':
                 rsc_type = optarg;
+                break;
+            case 'T':
+                timeout_ms = crm_get_msec(optarg);
                 break;
             case 'C':
             case 'R':
@@ -1756,6 +2146,11 @@ main(int argc, char **argv)
             goto bail;
         }
 
+    } else if (rsc_cmd == 0 && rsc_long_cmd && safe_str_eq(rsc_long_cmd, "restart")) {
+        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
+
+        rc = resource_restart(rsc, host_uname, timeout_ms, cib_conn);
+
     } else if (rsc_cmd == 0 && rsc_long_cmd) {
         svc_action_t *op = NULL;
         const char *rtype = NULL;
@@ -1786,6 +2181,16 @@ main(int argc, char **argv)
 
         } else if (safe_str_eq(rsc_long_cmd, "force-check")) {
             action = "monitor";
+        }
+
+        if(rsc->variant == pe_clone || rsc->variant == pe_master) {
+            /* Grab the first child resource in the hope its not a group */
+            rsc = rsc->children->data;
+        }
+
+        if(rsc->variant == pe_group) {
+            CMD_ERR("Sorry, --%s doesn't support group resources\n", rsc_long_cmd);
+            crm_exit(EOPNOTSUPP);
         }
 
         rclass = crm_element_value(rsc->xml, XML_AGENT_ATTR_CLASS);
@@ -1967,6 +2372,7 @@ main(int argc, char **argv)
         node_t *current = NULL;
         node_t *dest = pe_find_node(data_set.nodes, host_uname);
         resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
+        gboolean cur_is_dest = FALSE;
 
         rc = -EINVAL;
 
@@ -2029,11 +2435,16 @@ main(int argc, char **argv)
 
         } else if(scope_master && rsc->fns->state(rsc, TRUE) != RSC_ROLE_MASTER) {
             crm_trace("%s is already active on %s but not in correct state", rsc_id, dest->details->uname);
-
         } else if (safe_str_eq(current->details->uname, dest->details->uname)) {
-            CMD_ERR("Error performing operation: %s is already %s on %s\n",
-                    rsc_id, scope_master?"promoted":"active", dest->details->uname);
-            goto bail;
+            cur_is_dest = TRUE;
+            if (do_force) {
+                crm_info("%s is already %s on %s, reinforcing placement with location constraint.\n",
+                         rsc_id, scope_master?"promoted":"active", dest->details->uname);
+            } else {
+                CMD_ERR("Error performing operation: %s is already %s on %s\n",
+                        rsc_id, scope_master?"promoted":"active", dest->details->uname);
+                goto bail;
+            }
         }
 
         /* Clear any previous constraints for 'dest' */
@@ -2045,7 +2456,10 @@ main(int argc, char **argv)
         crm_trace("%s%s now prefers node %s%s",
                   rsc->id, scope_master?" (master)":"", dest->details->uname, do_force?"(forced)":"");
 
-        if(do_force) {
+        /* only ban the previous location if current location != destination location.
+         * it is possible to use -M to enforce a location without regard of where the
+         * resource is currently located */
+        if(do_force && (cur_is_dest == FALSE)) {
             /* Ban the original location if possible */
             if(current) {
                 ban_resource(rsc_id, current->details->uname, NULL, cib_conn);
@@ -2211,15 +2625,31 @@ main(int argc, char **argv)
         }
 
     } else if (rsc_cmd == 'C') {
+#if HAVE_ATOMIC_ATTRD
         xmlNode *cmd = create_request(CRM_OP_REPROBE, NULL, host_uname,
                                       CRM_SYSTEM_CRMD, crm_system_name, our_pid);
 
-        crm_debug("Re-checking the state of all resources on %s", host_uname);
+        crm_debug("Re-checking the state of all resources on %s", host_uname?host_uname:"all nodes");
+
+        rc = attrd_update_delegate(
+            NULL, 'u', host_uname, "fail-count-*", NULL, XML_CIB_TAG_STATUS, NULL, NULL, NULL, FALSE);
+
         if (crm_ipc_send(crmd_channel, cmd, 0, 0, NULL) > 0) {
             start_mainloop();
         }
 
         free_xml(cmd);
+#else
+        GListPtr rIter = NULL;
+
+        crmd_replies_needed = 0;
+        for (rIter = data_set.resources; rIter; rIter = rIter->next) {
+            resource_t *rsc = rIter->data;
+            delete_lrm_rsc(cib_conn, crmd_channel, host_uname, rsc, &data_set);
+        }
+
+        start_mainloop();
+#endif
 
     } else if (rsc_cmd == 'D') {
         xmlNode *msg_data = NULL;

@@ -52,6 +52,7 @@ gboolean crm_read_options(gpointer user_data);
 gboolean fsa_has_quorum = FALSE;
 crm_trigger_t *fsa_source = NULL;
 crm_trigger_t *config_read = NULL;
+bool no_quorum_suicide_escalation = FALSE;
 
 static gboolean
 election_timeout_popped(gpointer data)
@@ -873,7 +874,9 @@ pe_cluster_option crmd_opts[] = {
 	{ "crmd-integration-timeout", NULL, "time", NULL, "3min", &check_timer, "*** Advanced Use Only ***.", "If need to adjust this value, it probably indicates the presence of a bug." },
 	{ "crmd-finalization-timeout", NULL, "time", NULL, "30min", &check_timer, "*** Advanced Use Only ***.", "If you need to adjust this value, it probably indicates the presence of a bug." },
 	{ "crmd-transition-delay", NULL, "time", NULL, "0s", &check_timer, "*** Advanced Use Only ***\nEnabling this option will slow down cluster recovery under all conditions", "Delay cluster recovery for the configured interval to allow for additional/related events to occur.\nUseful if your configuration is sensitive to the order in which ping updates arrive." },
-
+	{ "stonith-watchdog-timeout", NULL, "time", NULL, NULL, &check_timer,
+	  "How long to wait before we can assume nodes are safely down", NULL },
+	{ "no-quorum-policy", "no_quorum_policy", "enum", "stop, freeze, ignore, suicide", "stop", &check_quorum, NULL, NULL },
 
 #if SUPPORT_PLUGIN
 	{ XML_ATTR_EXPECTED_VOTES, NULL, "integer", NULL, "2", &check_number, "The number of nodes expected to be in the cluster", "Used to calculate quorum in openais based clusters." },
@@ -908,6 +911,8 @@ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
     const char *value = NULL;
     GHashTable *config_hash = NULL;
     crm_time_t *now = crm_time_new(NULL);
+    long st_timeout = 0;
+    long sbd_timeout = 0;
 
     if (rc != pcmk_ok) {
         fsa_data_t *msg_data = NULL;
@@ -942,6 +947,43 @@ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
         throttle_load_target = strtof(value, NULL) / 100;
     }
 
+    value = getenv("SBD_WATCHDOG_TIMEOUT");
+    sbd_timeout = crm_get_msec(value);
+
+    value = crmd_pref(config_hash, "stonith-watchdog-timeout");
+    st_timeout = crm_get_msec(value);
+
+    if(st_timeout > 0 && !daemon_option_enabled(crm_system_name, "watchdog")) {
+        do_crm_log_always(LOG_EMERG, "Shutting down pacemaker, no watchdog device configured");
+        crmd_exit(DAEMON_RESPAWN_STOP);
+
+    } else if(!daemon_option_enabled(crm_system_name, "watchdog")) {
+        crm_trace("Watchdog disabled");
+
+    } else if(value == NULL && sbd_timeout > 0) {
+        char *timeout = NULL;
+
+        st_timeout = 2 * sbd_timeout / 1000;
+        timeout = g_strdup_printf("%lds", st_timeout);
+        crm_notice("Setting stonith-watchdog-timeout=%s", timeout);
+
+        update_attr_delegate(fsa_cib_conn, cib_none, XML_CIB_TAG_CRMCONFIG, NULL, NULL, NULL, NULL,
+                             "stonith-watchdog-timeout", timeout, FALSE, NULL, NULL);
+        free(timeout);
+
+    } else if(st_timeout <= 0) {
+        crm_notice("Watchdog enabled but stonith-watchdog-timeout is disabled");
+
+    } else if(st_timeout < sbd_timeout) {
+        do_crm_log_always(LOG_EMERG, "Shutting down pacemaker, stonith-watchdog-timeout (%ldms) is too short (must be greater than %ldms)",
+                          st_timeout, sbd_timeout);
+        crmd_exit(DAEMON_RESPAWN_STOP);
+    }
+
+    value = crmd_pref(config_hash, "no-quorum-policy");
+    if (safe_str_eq(value, "suicide") && daemon_option_enabled(crm_system_name, "watchdog")) {
+        no_quorum_suicide_escalation = TRUE;
+    }
 
     value = crmd_pref(config_hash, XML_CONFIG_ATTR_FORCE_QUIT);
     shutdown_escalation_timer->period_ms = crm_get_msec(value);

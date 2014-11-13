@@ -32,6 +32,7 @@ extern "C" {
 #  include <glib.h>
 #  include <stdio.h>
 #  include <string.h>
+#  include <stdbool.h>
 
 #  ifndef OCF_ROOT_DIR
 #    define OCF_ROOT_DIR "/usr/lib/ocf"
@@ -49,6 +50,13 @@ extern "C" {
 #  ifndef SERVICE_SCRIPT
 #    define SERVICE_SCRIPT "/sbin/service"
 #  endif
+
+
+/* This is the string passed in the OCF_EXIT_REASON_PREFIX
+ * environment variable. The stderr output that occurs
+ * after this prefix is encountered is considered the exit
+ * reason for a completed operationt */
+#define PCMK_OCF_REASON_PREFIX "ocf-exit-reason:"
 
 /* *INDENT-OFF* */
 enum lsb_exitcode {
@@ -144,6 +152,7 @@ enum nagios_exitcode {
         int status;
         int sequence;
         int expected_rc;
+        int synchronous;
 
         char *stderr_data;
         char *stdout_data;
@@ -253,8 +262,9 @@ enum nagios_exitcode {
  */
     svc_action_t *services_action_create_generic(const char *exec, const char *args[]);
 
-    void
-     services_action_free(svc_action_t * op);
+    void services_action_cleanup(svc_action_t * op);
+
+    void services_action_free(svc_action_t * op);
 
     gboolean services_action_sync(svc_action_t * op);
 

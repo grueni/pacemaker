@@ -277,11 +277,9 @@ remote_op_done(remote_fencing_op_t * op, xmlNode * data, int rc, int dup)
     }
 
     if (!op->delegate && data) {
-        xmlNode *ndata = get_xpath_object("//@" F_STONITH_DELEGATE, data, LOG_WARNING);
+        xmlNode *ndata = get_xpath_object("//@" F_STONITH_DELEGATE, data, LOG_TRACE);
         if(ndata) {
             op->delegate = crm_element_value_copy(ndata, F_STONITH_DELEGATE);
-        } else {
-            op->delegate = crm_element_value_copy(data, F_ORIG);
         }
     }
 
@@ -335,6 +333,20 @@ remote_op_done(remote_fencing_op_t * op, xmlNode * data, int rc, int dup)
 }
 
 static gboolean
+remote_op_watchdog_done(gpointer userdata)
+{
+    remote_fencing_op_t *op = userdata;
+
+    op->op_timer_one = 0;
+
+    crm_notice("Remote %s operation on %s for %s.%8s assumed complete",
+               op->action, op->target, op->client_name, op->id);
+    op->state = st_done;
+    remote_op_done(op, NULL, pcmk_ok, FALSE);
+    return FALSE;
+}
+
+static gboolean
 remote_op_timeout_one(gpointer userdata)
 {
     remote_fencing_op_t *op = userdata;
@@ -363,6 +375,7 @@ remote_op_timeout(gpointer userdata)
     crm_debug("Action %s (%s) for %s (%s) timed out",
               op->action, op->id, op->target, op->client_name);
     op->state = st_failed;
+
     remote_op_done(op, NULL, -ETIME, FALSE);
 
     return FALSE;
@@ -1040,16 +1053,34 @@ call_remote_stonith(remote_fencing_op_t * op, st_query_result_t * peer)
 
         } else {
             timeout_one = TIMEOUT_MULTIPLY_FACTOR * get_peer_timeout(peer, op->base_timeout);
-            crm_info("Requesting that %s perform op %s %s for %s (%ds)",
-                     peer->host, op->action, op->target, op->client_name, timeout_one);
+            crm_info("Requesting that %s perform op %s %s for %s (%ds, %ds)",
+                     peer->host, op->action, op->target, op->client_name, timeout_one, stonith_watchdog_timeout_ms);
             crm_xml_add(remote_op, F_STONITH_MODE, "smart");
+
         }
 
         op->state = st_exec;
         if (op->op_timer_one) {
             g_source_remove(op->op_timer_one);
         }
-        op->op_timer_one = g_timeout_add((1000 * timeout_one), remote_op_timeout_one, op);
+
+        if(stonith_watchdog_timeout_ms > 0 && device && safe_str_eq(device, "watchdog")) {
+            crm_notice("Waiting %ds for %s to self-terminate for %s.%.8s (%p)",
+                       stonith_watchdog_timeout_ms/1000, op->target, op->client_name, op->id, device);
+            op->op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);
+
+            /* TODO: We should probably look into peer->device_list to verify watchdog is going to be in use */
+        } else if(stonith_watchdog_timeout_ms > 0
+                  && safe_str_eq(peer->host, op->target)
+                  && safe_str_neq(op->action, "on")) {
+            crm_notice("Waiting %ds for %s to self-terminate for %s.%.8s (%p)",
+                       stonith_watchdog_timeout_ms/1000, op->target, op->client_name, op->id, device);
+            op->op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);
+
+        } else {
+            op->op_timer_one = g_timeout_add((1000 * timeout_one), remote_op_timeout_one, op);
+        }
+
 
         send_cluster_message(crm_get_peer(0, peer->host), crm_msg_stonith_ng, remote_op, FALSE);
         peer->tried = TRUE;
@@ -1072,6 +1103,14 @@ call_remote_stonith(remote_fencing_op_t * op, st_query_result_t * peer)
         /* if the operation never left the query state,
          * but we have all the expected replies, then no devices
          * are available to execute the fencing operation. */
+        if(stonith_watchdog_timeout_ms && (device == NULL || safe_str_eq(device, "watchdog"))) {
+            crm_notice("Waiting %ds for %s to self-terminate for %s.%.8s (%p)",
+                     stonith_watchdog_timeout_ms/1000, op->target, op->client_name, op->id, device);
+
+            op->op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);
+            return;
+        }
+
         if (op->state == st_query) {
            crm_info("None of the %d peers have devices capable of terminating %s for %s (%d)",
                    op->replies, op->target, op->client_name, op->state);

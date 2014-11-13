@@ -51,6 +51,7 @@
 
 char *stonith_our_uname = NULL;
 char *stonith_our_uuid = NULL;
+long stonith_watchdog_timeout_ms = 0;
 
 GMainLoop *mainloop = NULL;
 
@@ -414,7 +415,7 @@ topology_remove_helper(const char *node, int level)
     xmlNode *data = create_xml_node(NULL, F_STONITH_LEVEL);
     xmlNode *notify_data = create_xml_node(NULL, STONITH_OP_LEVEL_DEL);
 
-    crm_xml_add(data, "origin", __FUNCTION__);
+    crm_xml_add(data, F_STONITH_ORIGIN, __FUNCTION__);
     crm_xml_add_int(data, XML_ATTR_ID, level);
     crm_xml_add(data, F_STONITH_TARGET, node);
 
@@ -942,6 +943,7 @@ update_cib_cache_cb(const char *event, xmlNode * msg)
 {
     int rc = pcmk_ok;
     xmlNode *stonith_enabled_xml = NULL;
+    xmlNode *stonith_watchdog_xml = NULL;
     const char *stonith_enabled_s = NULL;
     static gboolean stonith_enabled_saved = TRUE;
 
@@ -998,6 +1000,27 @@ update_cib_cache_cb(const char *event, xmlNode * msg)
     stonith_enabled_xml = get_xpath_object("//nvpair[@name='stonith-enabled']", local_cib, LOG_TRACE);
     if (stonith_enabled_xml) {
         stonith_enabled_s = crm_element_value(stonith_enabled_xml, XML_NVPAIR_ATTR_VALUE);
+    }
+
+    if(daemon_option_enabled(crm_system_name, "watchdog")) {
+        const char *value = NULL;
+        long timeout_ms = 0;
+
+        if(value == NULL) {
+            stonith_watchdog_xml = get_xpath_object("//nvpair[@name='stonith-watchdog-timeout']", local_cib, LOG_TRACE);
+            if (stonith_watchdog_xml) {
+                value = crm_element_value(stonith_watchdog_xml, XML_NVPAIR_ATTR_VALUE);
+            }
+        }
+
+        if(value) {
+            timeout_ms = crm_get_msec(value);
+        }
+
+        if(timeout_ms != stonith_watchdog_timeout_ms) {
+            crm_notice("New watchdog timeout %lds (was %lds)", timeout_ms/1000, stonith_watchdog_timeout_ms/1000);
+            stonith_watchdog_timeout_ms = timeout_ms;
+        }
     }
 
     if (stonith_enabled_s && crm_is_true(stonith_enabled_s) == FALSE) {
@@ -1340,6 +1363,19 @@ main(int argc, char **argv)
     device_list = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, free_device);
 
     topology = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, free_topology_entry);
+
+    if(daemon_option_enabled(crm_system_name, "watchdog")) {
+        xmlNode *xml;
+        stonith_key_value_t *params = NULL;
+
+        params = stonith_key_value_add(params, STONITH_ATTR_HOSTLIST, stonith_our_uname);
+
+        xml = create_device_registration_xml("watchdog", "internal", STONITH_WATCHDOG_AGENT, params, NULL);
+        stonith_device_register(xml, NULL, FALSE);
+
+        stonith_key_value_freeall(params, 1, 1);
+        free_xml(xml);
+    }
 
     stonith_ipc_server_init(&ipcs, &ipc_callbacks);
 

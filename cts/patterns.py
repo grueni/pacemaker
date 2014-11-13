@@ -56,6 +56,9 @@ class BasePatterns:
             "Pat:Fencing_ok"    : "stonith.*remote_op_done:.*Operation .* of %s by .*: OK",
 
             "Pat:RscOpOK"       : "process_lrm_event:.*Operation %s_%s.*ok.*confirmed",
+            "Pat:RscRemoteOpOK" : "process_lrm_event:.*Operation %s_%s.*ok.*node=%s, .*confirmed.*true",
+            "Pat:NodeFenced"    : "tengine_stonith_notify:.*Peer %s was terminated .*: OK",
+            "Pat:FenceOpOK"     : "Operation .* for host '%s' with device .* returned: 0",
         }
 
     def get_component(self, key):
@@ -177,6 +180,9 @@ class crm_cs_v0(BasePatterns):
             r"error: log_operation:.*Operation 'reboot' .* with device 'FencingFail' returned:",
             r"Child process .* terminated with signal 9",
             r"getinfo response error: 1$",
+            "sbd.* error: inquisitor_child: DEBUG MODE IS ACTIVE",
+            "sbd.* pcmk:    error: crm_ipc_read: Connection to cib_ro failed",
+            "sbd.* pcmk:    error: mainloop_gio_callback: Connection to cib_ro.* closed .I/O condition=17",
         ]
 
         self.BadNews = [
@@ -205,6 +211,7 @@ class crm_cs_v0(BasePatterns):
             r"Faking parameter digest creation",
             r"Parameters to .* action changed:",
             r"Parameters to .* changed",
+            r"The .* process .* terminated with signal",
             r"Child process .* terminated with signal",
             r"LogActions:.*Recover",
             r"rsyslogd.* imuxsock lost .* messages from pid .* due to rate-limiting",
@@ -259,9 +266,13 @@ class crm_cs_v0(BasePatterns):
         
         self.components["corosync-ignore"] = [
             r"error: pcmk_cpg_dispatch:.*Connection to the CPG API failed: Library error",
+            r"The .* process .* exited",
             r"pacemakerd.*error: pcmk_child_exit:.*Child process .* exited",
             r"cib.*error: cib_cs_destroy:.*Corosync connection lost",
             r"stonith-ng.*error: stonith_peer_cs_destroy:.*Corosync connection terminated",
+            r"The cib process .* exited: Invalid argument",
+            r"The attrd process .* exited: Transport endpoint is not connected",
+            r"The crmd process .* exited: Link has been severed",
             r"error: pcmk_child_exit:.*Child process cib .* exited: Invalid argument",
             r"error: pcmk_child_exit:.*Child process attrd .* exited: Transport endpoint is not connected",
             r"error: pcmk_child_exit:.*Child process crmd .* exited: Link has been severed",
@@ -303,8 +314,8 @@ class crm_cs_v0(BasePatterns):
                     "Connection to cib_.* failed",
                     "Connection to cib_.* closed",
                     "Connection to the CIB terminated...",
-                    "Child process crmd .* exited: Generic Pacemaker error",
-                    "Child process attrd .* exited: (Connection reset by peer|Transport endpoint is not connected)",
+                    "(Child process|The) crmd .* exited: Generic Pacemaker error",
+                    "(Child process|The) attrd .* exited: (Connection reset by peer|Transport endpoint is not connected)",
                     "Lost connection to CIB service",
                     "crmd.*Input I_TERMINATE from do_recover",
                     "crmd.*I_ERROR.*crmd_cib_connection_destroy",
@@ -318,7 +329,7 @@ class crm_cs_v0(BasePatterns):
                     "Connection to lrmd failed",
                     "Connection to lrmd.* closed",
                     "crmd.*I_ERROR.*lrm_connection_destroy",
-                    "Child process crmd .* exited: Generic Pacemaker error",
+                    "(Child process|The) crmd .* exited: Generic Pacemaker error",
                     "crmd.*Input I_TERMINATE from do_recover",
                     "crmd.*Could not recover from internal error",
                     ]
@@ -339,7 +350,7 @@ class crm_cs_v0(BasePatterns):
         self.components["pengine"] = [
                     "State transition .* S_RECOVERY",
                     "Respawning .* crmd",
-                    "Child process crmd .* exited: Generic Pacemaker error",
+                    "(The|Child process) crmd .* exited: Generic Pacemaker error",
                     "Connection to pengine failed",
                     "Connection to pengine.* closed",
                     "Connection to the Policy Engine failed",
@@ -359,9 +370,12 @@ class crm_cs_v0(BasePatterns):
         self.components["stonith-ignore"] = [
             "LogActions: Recover Fencing",
             "Updating failcount for Fencing",
+            "error: crm_ipc_read: Connection to stonith-ng failed",
+            "error: mainloop_gio_callback: Connection to stonith-ng.*closed (I/O condition=17)",
+            "crit: tengine_stonith_connection_destroy: Fencing daemon connection failed",
             "error: te_connect_stonith:.*Sign-in failed: triggered a retry",
             "STONITH connection failed, finalizing .* pending operations.",
-            "process_lrm_event:.*Operation Fencing.* Error"
+            "process_lrm_event:.*Operation Fencing.* Error",
         ]
         self.components["stonith-ignore"].extend(self.components["common-ignore"])
 
@@ -390,7 +404,8 @@ class crm_mcp(crm_cs_v0):
             "Pat:They_stopped" : "%s\W.*crmd.*Node %s\[.*state is now lost",
             "Pat:They_dead"    : "crmd.*Node %s\[.*state is now lost",
 
-            "Pat:ChildKilled"  : "%s\W.*pacemakerd.*Child process %s terminated with signal 9",
+            "Pat:ChildExit"    : "The .* process exited",
+            "Pat:ChildKilled"  : "%s\W.*pacemakerd.*The %s process .* terminated with signal 9",
             "Pat:ChildRespawn" : "%s\W.*pacemakerd.*Respawning failed child process: %s",
 
             "Pat:InfraUp"      : "%s\W.*corosync.*Initializing transport",
@@ -402,6 +417,20 @@ class crm_mcp(crm_cs_v0):
 #                # When systemd is in use, we can look for this instead
 #                "Pat:We_stopped"   : "%s.*Stopped Corosync Cluster Engine",
 #            })
+
+class crm_mcp_docker(crm_mcp):
+    '''
+    The crm version 4 cluster manager class.
+    It implements the things we need to talk to and manipulate
+    crm clusters running on top of native corosync (no plugins)
+    '''
+    def __init__(self, name):
+        crm_mcp.__init__(self, name)
+
+        self.commands.update({
+            "StartCmd"       : "pcmk_start",
+            "StopCmd"        : "pcmk_stop",
+        })
 
 class crm_cman(crm_cs_v0):
     '''
@@ -424,7 +453,7 @@ class crm_cman(crm_cs_v0):
             "Pat:They_stopped" : "%s\W.*crmd.*Node %s\[.*state is now lost",
             "Pat:They_dead"    : "crmd.*Node %s\[.*state is now lost",
 
-            "Pat:ChildKilled"  : "%s\W.*pacemakerd.*Child process %s terminated with signal 9",
+            "Pat:ChildKilled"  : "%s\W.*pacemakerd.*The %s process .* terminated with signal 9",
             "Pat:ChildRespawn" : "%s\W.*pacemakerd.*Respawning failed child process: %s",
         })
 
@@ -448,6 +477,8 @@ class PatternSelector:
             crm_cman(name)
         elif name == "crm-mcp":
             crm_mcp(name)
+        elif name == "crm-mcp-docker":
+            crm_mcp_docker(name)
 
     def get_variant(self, variant):
         if patternvariants.has_key(variant):

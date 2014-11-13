@@ -49,6 +49,11 @@
       <optional>
 	<ref name="element-lifetime"/>
       </optional>
+      <optional>
+	<attribute name="resource-discovery">
+	  <ref name="attribute-discovery"/>
+	</attribute>
+      </optional>
     </element>
   </define>
 
@@ -63,6 +68,14 @@
 	  </optional>
 	  <optional>
 	    <attribute name="require-all"><data type="boolean"/></attribute>
+	  </optional>
+	  <optional>
+	    <attribute name="ordering">
+	      <choice>
+		<value>group</value>
+		<value>listed</value>
+	      </choice>
+	    </attribute>
 	  </optional>
 	  <optional>
 	    <attribute name="action">
@@ -204,6 +217,14 @@
 	</attribute>
       </optional>
     </element>
+  </define>
+
+  <define name="attribute-discovery">
+    <choice>
+      <value>always</value>
+      <value>never</value>
+      <value>exclusive</value>
+    </choice>
   </define>
 
   <define name="attribute-actions">

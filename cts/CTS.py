@@ -225,10 +225,13 @@ class CtsLab:
 
 class NodeStatus:
     def __init__(self, env):
-        pass
+        self.Env = env
 
     def IsNodeBooted(self, node):
         '''Return TRUE if the given node is booted (responds to pings)'''
+        if self.Env["docker"]:
+            return RemoteFactory().getInstance()("localhost", "docker inspect --format {{.State.Running}} %s | grep -q true" % node, silent=True) == 0
+
         return RemoteFactory().getInstance()("localhost", "ping -nq -c1 -w1 %s" % node, silent=True) == 0
 
     def IsSshdUp(self, node):
@@ -392,23 +395,26 @@ class ClusterManager(UserDict):
                 else:
                     self.debug("NOT Removing cache file on: "+node)
 
-    def prepare_fencing_watcher(self, node):
+    def prepare_fencing_watcher(self, name):
         # If we don't have quorum now but get it as a result of starting this node,
         # then a bunch of nodes might get fenced
         upnode = None
         if self.HasQuorum(None):
+            self.debug("Have quorum")
             return None
 
-        if not self.has_key("Pat:Fencing_start"):
+        if not self.templates["Pat:Fencing_start"]:
+            print "No start pattern"
             return None
 
-        if not self.has_key("Pat:Fencing_ok"):
+        if not self.templates["Pat:Fencing_ok"]:
+            print "No ok pattern"
             return None
 
         stonith = None
         stonithPats = []
         for peer in self.Env["nodes"]:
-            if peer != node and self.ShouldBeStatus[peer] != "up":
+            if self.ShouldBeStatus[peer] != "up":
                 stonithPats.append(self.templates["Pat:Fencing_ok"] % peer)
                 stonithPats.append(self.templates["Pat:Fencing_start"] % peer)
             elif self.Env["Stack"] == "corosync (cman)":
@@ -418,14 +424,7 @@ class ClusterManager(UserDict):
                 stonithPats.append(self.templates["Pat:Fencing_ok"] % peer)
                 stonithPats.append(self.templates["Pat:Fencing_start"] % peer)
 
-            if peer != node and not upnode and self.ShouldBeStatus[peer] == "up":
-                upnode = peer
-
-        # Look for STONITH ops, depending on Env["at-boot"] we might need to change the nodes status
-        if not upnode:
-            return None
-
-        stonith = LogWatcher(self.Env["LogFileName"], stonithPats, "StartupFencing", 0, hosts=[upnode], kind=self.Env["LogWatcher"])
+        stonith = LogWatcher(self.Env["LogFileName"], stonithPats, "StartupFencing", 0, hosts=self.Env["nodes"], kind=self.Env["LogWatcher"])
         stonith.setwatch()
         return stonith
 
@@ -446,6 +445,9 @@ class ClusterManager(UserDict):
             self.debug("Quorum: %d Len: %d" % (q, len(self.Env["nodes"])))
             return peer_list
 
+        for n in self.Env["nodes"]:
+            peer_state[n] = "unknown"
+
         # Now see if any states need to be updated
         self.debug("looking for: " + repr(stonith.regexes))
         shot = stonith.look(0)
@@ -461,7 +463,8 @@ class ClusterManager(UserDict):
                     peer_state[peer] = "complete"
                     self.__instance_errorstoignore.append(self.templates["Pat:Fencing_ok"] % peer)
 
-                elif re.search(self.templates["Pat:Fencing_start"] % n, shot):
+                elif peer_state[n] != "complete" and re.search(self.templates["Pat:Fencing_start"] % n, shot):
+                    # TODO: Correctly detect multiple fencing operations for the same host
                     peer = n
                     peer_state[peer] = "in-progress"
                     self.__instance_errorstoignore.append(self.templates["Pat:Fencing_start"] % peer)

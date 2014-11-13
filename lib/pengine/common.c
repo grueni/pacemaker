@@ -29,24 +29,6 @@ gboolean was_processing_error = FALSE;
 gboolean was_processing_warning = FALSE;
 
 static gboolean
-check_quorum(const char *value)
-{
-    if (safe_str_eq(value, "stop")) {
-        return TRUE;
-
-    } else if (safe_str_eq(value, "freeze")) {
-        return TRUE;
-
-    } else if (safe_str_eq(value, "ignore")) {
-        return TRUE;
-
-    } else if (safe_str_eq(value, "suicide")) {
-        return TRUE;
-    }
-    return FALSE;
-}
-
-static gboolean
 check_health(const char *value)
 {
     if (safe_str_eq(value, "none")) {
@@ -124,6 +106,8 @@ pe_cluster_option pe_opts[] = {
 	  "Action to send to STONITH device", NULL },
 	{ "stonith-timeout", NULL, "time", NULL, "60s", &check_timer,
 	  "How long to wait for the STONITH action to complete", NULL },
+	{ XML_ATTR_HAVE_WATCHDOG, NULL, "boolean", NULL, "false", &check_boolean,
+	  "Enable watchdog integration", "Set automatically by the cluster if SBD is detected.  User configured values are ignored." },
 	{ "startup-fencing", "startup_fencing", "boolean", NULL, "true", &check_boolean,
 	  "STONITH unseen nodes", "Advanced Use Only!  Not using the default is very unsafe!" },
 

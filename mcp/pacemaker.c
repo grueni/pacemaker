@@ -145,19 +145,12 @@ pcmk_process_exit(pcmk_child_t * child)
         mainloop_set_trigger(shutdown_trigger);
         update_node_processes(local_nodeid, NULL, get_process_list());
 
+    } else if (child->respawn && crm_is_true(getenv("PCMK_fail_fast"))) {
+        crm_err("Rebooting system because of %s", child->name);
+        pcmk_panic(__FUNCTION__);
+
     } else if (child->respawn) {
-        gboolean fail_fast = crm_is_true(getenv("PCMK_fail_fast"));
-
         crm_notice("Respawning failed child process: %s", child->name);
-
-#ifdef RB_HALT_SYSTEM
-        if (fail_fast) {
-            crm_err("Rebooting system", child->name);
-            sync();
-            reboot(RB_HALT_SYSTEM);
-            crm_exit(DAEMON_RESPAWN_STOP);
-        }
-#endif
         start_child(child);
     }
 }
@@ -168,21 +161,37 @@ pcmk_child_exit(mainloop_child_t * p, pid_t pid, int core, int signo, int exitco
     pcmk_child_t *child = mainloop_child_userdata(p);
     const char *name = mainloop_child_name(p);
 
-    if (signo) {
-        crm_notice("Child process %s terminated with signal %d (pid=%d, core=%d)",
-                   name, signo, pid, core);
+    if (signo && signo == SIGKILL) {
+        crm_warn("The %s process (%d) terminated with signal %d (core=%d)", name, pid, signo, core);
+
+    } else if (signo) {
+        crm_err("The %s process (%d) terminated with signal %d (core=%d)", name, pid, signo, core);
 
     } else {
-        do_crm_log(exitcode == 0 ? LOG_INFO : LOG_ERR,
-                   "Child process %s (%d) exited: %s (%d)", name, pid, pcmk_strerror(exitcode), exitcode);
-    }
+        switch(exitcode) {
+            case pcmk_ok:
+                crm_info("The %s process (%d) exited: %s (%d)", name, pid, pcmk_strerror(exitcode), exitcode);
+                break;
 
-    if (exitcode == 100) {
-        crm_warn("Pacemaker child process %s no longer wishes to be respawned. "
-                 "Shutting ourselves down.", name);
-        child->respawn = FALSE;
-        fatal_error = TRUE;
-        pcmk_shutdown(15);
+            case DAEMON_RESPAWN_STOP:
+                crm_warn("The %s process (%d) can no longer be respawned, shutting the cluster down.", name, pid);
+                child->respawn = FALSE;
+                fatal_error = TRUE;
+                pcmk_shutdown(SIGTERM);
+                break;
+
+            case pcmk_err_panic:
+                do_crm_log_always(LOG_EMERG, "The %s process (%d) instructed the machine to reset", name, pid);
+                child->respawn = FALSE;
+                fatal_error = TRUE;
+                pcmk_panic(__FUNCTION__);
+                pcmk_shutdown(SIGTERM);
+                break;
+
+            default:
+                crm_err("The %s process (%d) exited: %s (%d)", name, pid, pcmk_strerror(exitcode), exitcode);
+                break;
+        }
     }
 
     pcmk_process_exit(child);
@@ -428,6 +437,12 @@ pcmk_ignore(int nsig)
     crm_info("Ignoring signal %s (%d)", strsignal(nsig), nsig);
 }
 
+static void
+pcmk_sigquit(int nsig)
+{
+    pcmk_panic(__FUNCTION__);
+}
+
 void
 pcmk_shutdown(int nsig)
 {
@@ -667,7 +682,7 @@ check_active_before_startup_processes(gpointer user_data)
     return keep_tracking;
 }
 
-static void
+static bool
 find_and_track_existing_processes(void)
 {
     DIR *dp;
@@ -679,7 +694,7 @@ find_and_track_existing_processes(void)
     if (!dp) {
         /* no proc directory to search through */
         crm_notice("Can not read /proc directory to track existing components");
-        return;
+        return FALSE;
     }
 
     while ((entry = readdir(dp)) != NULL) {
@@ -746,6 +761,8 @@ find_and_track_existing_processes(void)
                               NULL);
     }
     closedir(dp);
+
+    return start_tracker;
 }
 
 static void
@@ -858,6 +875,7 @@ main(int argc, char **argv)
     crm_log_preinit(NULL, argc, argv);
     crm_set_options(NULL, "mode [options]", long_options, "Start/Stop Pacemaker\n");
     mainloop_add_signal(SIGHUP, pcmk_ignore);
+    mainloop_add_signal(SIGQUIT, pcmk_sigquit);
 
     while (1) {
         flag = crm_get_option(argc, argv, &option_index);
@@ -951,6 +969,7 @@ main(int argc, char **argv)
 
     crm_notice("Starting Pacemaker %s (Build: %s): %s", VERSION, BUILD_VERSION, CRM_FEATURES);
     mainloop = g_main_new(FALSE);
+    sysrq_init();
 
     rc = getrlimit(RLIMIT_CORE, &cores);
     if (rc < 0) {
@@ -979,6 +998,7 @@ main(int argc, char **argv)
         }
 #endif
     }
+    rc = pcmk_ok;
 
     if (crm_user_lookup(CRM_DAEMON_USER, &pcmk_uid, &pcmk_gid) < 0) {
         crm_err("Cluster user %s does not exist, aborting Pacemaker startup", CRM_DAEMON_USER);
@@ -1018,17 +1038,24 @@ main(int argc, char **argv)
         crm_exit(ENOPROTOOPT);
     }
 
+    if(pcmk_locate_sbd() > 0) {
+        setenv("PCMK_watchdog", "true", 1);
+    } else {
+        setenv("PCMK_watchdog", "false", 1);
+    }
+
+    find_and_track_existing_processes();
+
     cluster.destroy = mcp_cpg_destroy;
     cluster.cpg.cpg_deliver_fn = mcp_cpg_deliver;
     cluster.cpg.cpg_confchg_fn = mcp_cpg_membership;
 
     if(cluster_connect_cpg(&cluster) == FALSE) {
         crm_err("Couldn't connect to Corosync's CPG service");
-        crm_exit(ENOPROTOOPT);
+        rc = -ENOPROTOOPT;
     }
 
-    rc = pcmk_ok;
-    if (is_corosync_cluster()) {
+    if (rc == pcmk_ok && is_corosync_cluster()) {
         /* Keep the membership list up-to-date for crm_node to query */
         if(cluster_connect_quorum(mcp_quorum_callback, mcp_quorum_destroy) == FALSE) {
             rc = -ENOTCONN;
@@ -1042,7 +1069,6 @@ main(int argc, char **argv)
         mainloop_add_signal(SIGTERM, pcmk_shutdown);
         mainloop_add_signal(SIGINT, pcmk_shutdown);
 
-        find_and_track_existing_processes();
         init_children_processes();
 
         crm_info("Starting mainloop");
