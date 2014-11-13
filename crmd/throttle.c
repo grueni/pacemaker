@@ -388,7 +388,6 @@ static bool throttle_load_avg(float *load)
 static bool throttle_io_load(float *load, unsigned int *blocked)
 {
     char buffer[64*1024];
-    FILE *stream = NULL;
 
     if(load == NULL) {
         return FALSE;
@@ -440,6 +439,14 @@ static bool throttle_io_load(float *load, unsigned int *blocked)
         unsigned long long cpu_xxx = 0; /* not separated out until the 2.6.0-test4 kernel */
         unsigned long long cpu_yyy = 0; /* not separated out until the 2.6.0-test4 kernel */
         unsigned long long cpu_zzz = 0; /* not separated out until the 2.6.11 kernel */
+
+		long long divo2 = 0;
+		long long duse = 0;
+		long long dsys = 0;
+		long long didl =0;
+		long long diow =0;
+		long long dstl = 0;
+		long long Div = 0;
 
         b = strstr(buffer, "cpu ");
         if(b) sscanf(b,  "cpu  %Lu %Lu %Lu %Lu %Lu %Lu %Lu %Lu",
