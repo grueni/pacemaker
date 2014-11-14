@@ -450,7 +450,7 @@ case "$host_os" in
 		;;
 *solaris*)
 		AC_DEFINE_UNQUOTED(ON_SOLARIS, 1, Compiling for Solaris platform)
-        LDFLAGSi+=" -lssp_nonshared"
+		LDFLAGS+=" -lssp -lssp_nonshared"
 		;;
 *linux*)
 		AC_DEFINE_UNQUOTED(ON_LINUX, 1, Compiling for Linux platform)

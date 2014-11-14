@@ -208,7 +208,7 @@ pcmk_panic_local(void)
     sysrq_trigger('b');
     /* reboot(RB_HALT_SYSTEM); rc = errno; */
 #ifdef ON_SOLARIS
-    reboot(RB_AUTOBOOT, 'reboot initiated by pacemaker');
+    reboot(RB_AUTOBOOT, (char *)"reboot initiated by pacemaker");
 #else
     reboot(RB_AUTOBOOT);
 #endif
