@@ -1719,18 +1719,13 @@ else
 		-Wpointer-arith
 		-Wstrict-prototypes
 		-Wwrite-strings
+		-Wunsigned-char
 		-Wunused-but-set-variable"
 
 
 # Additional warnings it might be nice to enable one day
 #		-Wshadow
 #		-Wunreachable-code
-	case "$host_os" in
-	    *solaris*) ;;
-	    *) EXTRA_FLAGS="$EXTRA_FLAGS
-			-Wunsigned-char"
-		;;
-	esac
 	for j in $EXTRA_FLAGS
 	do
 	  if
