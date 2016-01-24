@@ -531,13 +531,6 @@ attrd_peer_message(crm_node_t *peer, xmlNode *xml)
     } else if (safe_str_eq(op, ATTRD_OP_SYNC)) {
         attrd_peer_sync(peer, xml);
 
-<<<<<<< HEAD
-    } else if(safe_str_eq(op, "peer-remove")) {
-        int host_id = 0;
-
-        crm_element_value_int(xml, F_ATTRD_HOST_ID, &host_id);
-        attrd_peer_remove(host_id, host, TRUE, peer->uname);
-=======
     } else if (safe_str_eq(op, ATTRD_OP_PEER_REMOVE)) {
         int host_id = 0;
         char *endptr = NULL;
@@ -550,7 +543,6 @@ attrd_peer_message(crm_node_t *peer, xmlNode *xml)
         }
         attrd_peer_remove(host_id, host, TRUE, peer->uname);
 
->>>>>>> 81e8f11eda8e9a531c2110c5698f46fcb3e9f95b
 
     } else if (safe_str_eq(op, ATTRD_OP_SYNC_RESPONSE)
               && safe_str_neq(peer->uname, attrd_cluster->uname)) {
