@@ -168,6 +168,10 @@ unpack_config(xmlNode * config, pe_working_set_t * data_set)
     data_set->stonith_action = pe_pref(data_set->config_hash, "stonith-action");
     crm_trace("STONITH will %s nodes", data_set->stonith_action);
 
+    set_config_flag(data_set, "concurrent-fencing", pe_flag_concurrent_fencing);
+    crm_debug("Concurrent fencing is %s",
+              is_set(data_set->flags, pe_flag_concurrent_fencing) ? "enabled" : "disabled");
+
     set_config_flag(data_set, "stop-all-resources", pe_flag_stop_everything);
     crm_debug("Stop all active resources: %s",
               is_set(data_set->flags, pe_flag_stop_everything) ? "true" : "false");
@@ -1145,6 +1149,8 @@ unpack_remote_status(xmlNode * status, pe_working_set_t * data_set)
 {
     const char *id = NULL;
     const char *uname = NULL;
+    const char *shutdown = NULL;
+
     GListPtr gIter = NULL;
 
     xmlNode *state = NULL;
@@ -1190,6 +1196,15 @@ unpack_remote_status(xmlNode * status, pe_working_set_t * data_set)
         attrs = find_xml_node(state, XML_TAG_TRANSIENT_NODEATTRS, FALSE);
         add_node_attrs(attrs, this_node, TRUE, data_set);
 
+        shutdown = g_hash_table_lookup(this_node->details->attrs, XML_CIB_ATTR_SHUTDOWN);
+        if (shutdown != NULL && safe_str_neq("0", shutdown)) {
+            resource_t *rsc = this_node->details->remote_rsc;
+
+            crm_info("Node %s is shutting down", this_node->details->uname);
+            this_node->details->shutdown = TRUE;
+            rsc->next_role = RSC_ROLE_STOPPED;
+        }
+ 
         if (crm_is_true(g_hash_table_lookup(this_node->details->attrs, "standby"))) {
             crm_info("Node %s is in standby-mode", this_node->details->uname);
             this_node->details->standby = TRUE;
@@ -2657,7 +2672,7 @@ unpack_rsc_op_failure(resource_t *rsc, node_t *node, int rc, xmlNode *xml_op, en
             }
         }
         crm_warn("Making sure %s doesn't come up again", fail_rsc->id);
-        /* make sure it doesnt come up again */
+        /* make sure it doesn't come up again */
         g_hash_table_destroy(fail_rsc->allowed_nodes);
         fail_rsc->allowed_nodes = node_hash_from_list(data_set->nodes);
         g_hash_table_foreach(fail_rsc->allowed_nodes, set_node_score, &score);
@@ -2820,7 +2835,7 @@ static bool check_operation_expiry(resource_t *rsc, node_t *node, int rc, xmlNod
             node_t *remote_node = pe_find_node(data_set->nodes, rsc->id);
             if (remote_node && remote_node->details->remote_was_fenced == 0) {
                 if (strstr(ID(xml_op), "last_failure")) {
-                    crm_info("Waiting to clear monitor failure for remote node %s until fencing has occured", rsc->id); 
+                    crm_info("Waiting to clear monitor failure for remote node %s until fencing has occurred", rsc->id); 
                 }
                 /* disabling failure timeout for this operation because we believe
                  * fencing of the remote node should occur first. */ 

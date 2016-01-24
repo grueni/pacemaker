@@ -90,6 +90,14 @@ typedef struct lrmd_key_value_s {
 #define LRMD_OP_POKE              "lrmd_rsc_poke"
 #define LRMD_OP_NEW_CLIENT        "lrmd_rsc_new_client"
 
+#define LRMD_IPC_OP_NEW           "new"
+#define LRMD_IPC_OP_DESTROY       "destroy"
+#define LRMD_IPC_OP_EVENT         "event"
+#define LRMD_IPC_OP_REQUEST       "request"
+#define LRMD_IPC_OP_RESPONSE      "response"
+#define LRMD_IPC_OP_SHUTDOWN_REQ  "shutdown_req"
+#define LRMD_IPC_OP_SHUTDOWN_ACK  "shutdown_ack"
+
 #define F_LRMD_IPC_OP           "lrmd_ipc_op"
 #define F_LRMD_IPC_IPC_SERVER   "lrmd_ipc_server"
 #define F_LRMD_IPC_SESSION      "lrmd_ipc_session"
@@ -135,7 +143,7 @@ bool lrmd_dispatch(lrmd_t * lrmd);
  * \brief Poll for a specified timeout period to determine if a message
  *        is ready for dispatch.
  * \retval 1 msg is ready
- * \retval 0 timeout occured
+ * \retval 0 timeout occurred
  * \retval negative error code
  */
 int lrmd_poll(lrmd_t * lrmd, int timeout);

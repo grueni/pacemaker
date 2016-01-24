@@ -383,9 +383,6 @@ crm_remote_parse_buffer(crm_remote_t * remote)
         return NULL;
     }
 
-    /* take ownership of the buffer */
-    remote->buffer_offset = 0;
-
     /* Support compression on the receiving end now, in case we ever want to add it later */
     if (header->payload_compressed) {
         int rc = 0;
@@ -421,6 +418,9 @@ crm_remote_parse_buffer(crm_remote_t * remote)
         header = crm_remote_header(remote);
     }
 
+    /* take ownership of the buffer */
+    remote->buffer_offset = 0;
+
     CRM_LOG_ASSERT(remote->buffer[sizeof(struct crm_remote_header_v0) + header->payload_uncompressed - 1] == 0);
 
     xml = string2xml(remote->buffer + header->payload_offset);
@@ -439,7 +439,7 @@ crm_remote_parse_buffer(crm_remote_t * remote)
  * \internal
  * \brief Determine if a remote session has data to read
  *
- * \retval 0, timeout occured.
+ * \retval 0, timeout occurred.
  * \retval positive, data is ready to be read
  * \retval negative, session has ended
  */

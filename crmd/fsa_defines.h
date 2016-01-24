@@ -2,7 +2,7 @@
  * Copyright (C) 2004 Andrew Beekhof <andrew@beekhof.net>
  * 
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
+ * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
  * 
@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  * 
- * You should have received a copy of the GNU General Public
+ * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
@@ -237,8 +237,8 @@ enum crmd_fsa_input {
  * actions
  *
  * Some of the actions below will always occur together for now, but I can
- * forsee that this may not always be the case.  So I've spilt them up so
- * that if they ever do need to be called independantly in the future, it
+ * foresee that this may not always be the case.  So I've split them up so
+ * that if they ever do need to be called independently in the future, it
  * won't be a problem.
  *
  * For example, separating A_LRM_CONNECT from A_STARTUP might be useful
