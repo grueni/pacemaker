@@ -301,8 +301,18 @@ static char *extract_node_uuid(const char *xpath)
     char *search = NULL;
     char *match = NULL;
 
-    match = strstr(mutable_path, "node_state[@id=\'") + strlen("node_state[@id=\'");
+    match = strstr(mutable_path, "node_state[@id=\'");
+    if (match == NULL) {
+        free(mutable_path);
+        return NULL;
+    }
+    match += strlen("node_state[@id=\'");
+
     search = strchr(match, '\'');
+    if (search == NULL) {
+        free(mutable_path);
+        return NULL;
+    }
     search[0] = 0;
 
     node_uuid = strdup(match);
@@ -437,16 +447,21 @@ te_update_diff(const char *event, xmlNode * msg)
         } else if(strstr(xpath, "/"XML_LRM_TAG_RSC_OP"[") && safe_str_eq(op, "delete")) {
             crm_action_t *cancel = NULL;
             char *mutable_key = strdup(xpath);
-            char *search = NULL;
+            char *key, *node_uuid;
 
-            const char *key = NULL;
-            char *node_uuid = extract_node_uuid(xpath);
+            /* Extract the part of xpath between last pair of single quotes */
+            key = strrchr(mutable_key, '\'');
+            if (key != NULL) {
+                *key = '\0';
+                key = strrchr(mutable_key, '\'');
+            }
+            if (key++ == NULL) {
+                crm_warn("Ignoring malformed CIB update (resource deletion)");
+                free(mutable_key);
+                continue;
+            }
 
-            search = strrchr(mutable_key, '\'');
-            search[0] = 0;
-
-            key = strrchr(mutable_key, '\'') + 1;
-
+            node_uuid = extract_node_uuid(xpath);
             cancel = get_cancel_action(key, node_uuid);
             if (cancel == NULL) {
                 abort_transition(INFINITY, tg_restart, "Resource operation removal", change);
@@ -701,7 +716,6 @@ tengine_stonith_callback(stonith_t * stonith, stonith_callback_data_t * data)
         goto bail;
     }
 
-    /* this will mark the event complete if a match is found */
     action = get_action(stonith_id, FALSE);
     if (action == NULL) {
         crm_err("Stonith action not matched");
@@ -720,6 +734,7 @@ tengine_stonith_callback(stonith_t * stonith, stonith_callback_data_t * data)
             te_action_confirmed(action);
             if (action->sent_update == FALSE && safe_str_neq("on", op)) {
                 send_stonith_update(action, target, uuid);
+                action->sent_update = TRUE;
             }
         }
         st_fail_count_reset(target);

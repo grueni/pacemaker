@@ -1,6 +1,6 @@
 /* 
  * Copyright (C) 2012
- * David Vossel  <dvossel@redhat.com>
+ * David Vossel  <davidvossel@gmail.com>
  *
  * This program is crm_free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -272,7 +272,7 @@ cfg_register_topology(struct topology *topo)
     for (i = 0; i < topo->priority_levels_count; i++) {
         devices = stonith_key_value_add(devices, NULL, topo->priority_levels[i].device_name);
 
-        data = create_level_registration_xml(topo->node_name,
+        data = create_level_registration_xml(topo->node_name, NULL, NULL, NULL,
                                              topo->priority_levels[i].level, devices);
 
         dump = dump_xml_formatted(data);

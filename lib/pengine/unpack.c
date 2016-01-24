@@ -44,7 +44,7 @@ CRM_TRACE_INIT_DATA(pe_status);
 
 gboolean unpack_rsc_op(resource_t * rsc, node_t * node, xmlNode * xml_op,
                        enum action_fail_response *failed, pe_working_set_t * data_set);
-static gboolean determine_remote_online_status(node_t * this_node);
+static gboolean determine_remote_online_status(pe_working_set_t * data_set, node_t * this_node);
 
 static gboolean
 is_dangling_container_remote_node(node_t *node)
@@ -73,6 +73,8 @@ pe_fence_node(pe_working_set_t * data_set, node_t * node, const char *reason)
         if (is_set(rsc->flags, pe_rsc_failed) == FALSE) {
             crm_warn("Remote node %s will be fenced by recovering container resource %s",
                 node->details->uname, rsc->id, reason);
+            /* node->details->unclean = TRUE; */
+            node->details->remote_requires_reset = TRUE;
             set_bit(rsc->flags, pe_rsc_failed);
         }
     } else if (is_dangling_container_remote_node(node)) {
@@ -274,9 +276,13 @@ destroy_digest_cache(gpointer ptr)
     op_digest_cache_t *data = ptr;
 
     free_xml(data->params_all);
+    free_xml(data->params_secure);
     free_xml(data->params_restart);
+
     free(data->digest_all_calc);
     free(data->digest_restart_calc);
+    free(data->digest_secure_calc);
+
     free(data);
 }
 
@@ -1157,7 +1163,7 @@ unpack_remote_status(xmlNode * status, pe_working_set_t * data_set)
         if ((this_node == NULL) || (is_remote_node(this_node) == FALSE)) {
             continue;
         }
-        determine_remote_online_status(this_node);
+        determine_remote_online_status(data_set, this_node);
     }
 
     /* process attributes */
@@ -1312,7 +1318,9 @@ determine_online_status_fencing(pe_working_set_t * data_set, xmlNode * node_stat
 
     if (this_node->details->shutdown) {
         crm_debug("%s is shutting down", this_node->details->uname);
-        online = crm_is_true(is_peer);  /* Slightly different criteria since we cant shut down a dead peer */
+
+        /* Slightly different criteria since we can't shut down a dead peer */
+        online = crm_is_true(is_peer);
 
     } else if (in_cluster == NULL) {
         pe_fence_node(data_set, this_node, "because the peer has not been seen by the cluster");
@@ -1366,7 +1374,7 @@ determine_online_status_fencing(pe_working_set_t * data_set, xmlNode * node_stat
 }
 
 static gboolean
-determine_remote_online_status(node_t * this_node)
+determine_remote_online_status(pe_working_set_t * data_set, node_t * this_node)
 {
     resource_t *rsc = this_node->details->remote_rsc;
     resource_t *container = NULL;
@@ -1393,13 +1401,21 @@ determine_remote_online_status(node_t * this_node)
     }
 
     /* Now check all the failure conditions. */
-    if (is_set(rsc->flags, pe_rsc_failed) ||
-        (rsc->role == RSC_ROLE_STOPPED) ||
-        (container && is_set(container->flags, pe_rsc_failed)) ||
-        (container && container->role == RSC_ROLE_STOPPED)) {
-
-        crm_trace("Remote node %s is set to OFFLINE. node is stopped or rsc failed.", this_node->details->id);
+    if(container && is_set(container->flags, pe_rsc_failed)) {
+        crm_trace("Remote node %s is set to UNCLEAN. rsc failed.", this_node->details->id);
         this_node->details->online = FALSE;
+        this_node->details->remote_requires_reset = TRUE;
+
+    } else if(is_set(rsc->flags, pe_rsc_failed)) {
+        crm_trace("Remote node %s is set to OFFLINE. rsc failed.", this_node->details->id);
+        this_node->details->online = FALSE;
+
+    } else if (rsc->role == RSC_ROLE_STOPPED
+        || (container && container->role == RSC_ROLE_STOPPED)) {
+
+        crm_trace("Remote node %s is set to OFFLINE. node is stopped.", this_node->details->id);
+        this_node->details->online = FALSE;
+        this_node->details->remote_requires_reset = FALSE;
     }
 
 remote_online_done:
@@ -1771,39 +1787,10 @@ process_orphan_resource(xmlNode * rsc_entry, node_t * node, pe_working_set_t * d
         clear_bit(rsc->flags, pe_rsc_managed);
 
     } else {
-        GListPtr gIter = NULL;
-
         print_resource(LOG_DEBUG_3, "Added orphan", rsc, FALSE);
 
         CRM_CHECK(rsc != NULL, return NULL);
         resource_location(rsc, NULL, -INFINITY, "__orphan_dont_run__", data_set);
-
-        for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
-            node_t *node = (node_t *) gIter->data;
-
-            if (node->details->online && get_failcount(node, rsc, NULL, data_set)) {
-                action_t *clear_op = NULL;
-                action_t *ready = NULL;
-
-                if (is_remote_node(node)) {
-                    char *pseudo_op_name = crm_concat(CRM_OP_PROBED, node->details->id, '_');
-                    ready = get_pseudo_op(pseudo_op_name, data_set);
-                    free(pseudo_op_name);
-                } else {
-                    ready = get_pseudo_op(CRM_OP_PROBED, data_set);
-                }
-
-                clear_op = custom_action(rsc, crm_concat(rsc->id, CRM_OP_CLEAR_FAILCOUNT, '_'),
-                                         CRM_OP_CLEAR_FAILCOUNT, node, FALSE, TRUE, data_set);
-
-                add_hash_param(clear_op->meta, XML_ATTR_TE_NOWAIT, XML_BOOLEAN_TRUE);
-                pe_rsc_info(rsc, "Clearing failcount (%d) for orphaned resource %s on %s (%s)",
-                            get_failcount(node, rsc, NULL, data_set), rsc->id, node->details->uname,
-                            clear_op->uuid);
-
-                order_actions(clear_op, ready, pe_order_optional);
-            }
-        }
     }
     return rsc;
 }
@@ -2536,9 +2523,7 @@ record_failed_op(xmlNode *op, node_t* node, pe_working_set_t * data_set)
     xmlNode *xIter = NULL;
     const char *op_key = crm_element_value(op, XML_LRM_ATTR_TASK_KEY);
 
-    if (node->details->shutdown) {
-        return;
-    } else if(node->details->online == FALSE) {
+    if ((node->details->shutdown) && (node->details->online == FALSE)) {
         return;
     }
 
@@ -2708,7 +2693,7 @@ determine_op_status(
     }
 
     /* we could clean this up significantly except for old LRMs and CRMs that
-     * didnt include target_rc and liked to remap status
+     * didn't include target_rc and liked to remap status
      */
     switch (rc) {
         case PCMK_OCF_OK:
@@ -3375,7 +3360,8 @@ find_operations(const char *rsc, const char *node, gboolean active_filter,
                 continue;
 
             } else if (is_remote_node(this_node)) {
-                determine_remote_online_status(this_node);
+                determine_remote_online_status(data_set, this_node);
+
             } else {
                 determine_online_status(node_state, this_node, data_set);
             }

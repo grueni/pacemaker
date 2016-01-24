@@ -124,17 +124,7 @@ static xmlNode *stonith_construct_async_reply(async_command_t * cmd, const char 
 static gboolean
 is_action_required(const char *action, stonith_device_t *device)
 {
-    if(device == NULL) {
-        return FALSE;
-
-    } else if (device->required_actions == NULL) {
-        return FALSE;
-
-    } else if (strstr(device->required_actions, action)) {
-        return TRUE;
-    }
-
-    return FALSE;
+    return device && device->automatic_unfencing && safe_str_eq(action, "on");
 }
 
 static int
@@ -449,7 +439,6 @@ free_device(gpointer data)
     free_xml(device->agent_metadata);
     free(device->namespace);
     free(device->on_target_actions);
-    free(device->required_actions);
     free(device->agent);
     free(device->id);
     free(device);
@@ -713,8 +702,6 @@ read_action_metadata(stonith_device_t *device)
     for (lpc = 0; lpc < max; lpc++) {
         const char *on_target = NULL;
         const char *action = NULL;
-        const char *automatic = NULL;
-        const char *required = NULL;
         xmlNode *match = getXpathResult(xpath, lpc);
 
         CRM_LOG_ASSERT(match != NULL);
@@ -722,8 +709,6 @@ read_action_metadata(stonith_device_t *device)
 
         on_target = crm_element_value(match, "on_target");
         action = crm_element_value(match, "name");
-        automatic = crm_element_value(match, "automatic");
-        required = crm_element_value(match, "required");
 
         if(safe_str_eq(action, "list")) {
             set_bit(device->flags, st_device_supports_list);
@@ -731,16 +716,20 @@ read_action_metadata(stonith_device_t *device)
             set_bit(device->flags, st_device_supports_status);
         } else if(safe_str_eq(action, "reboot")) {
             set_bit(device->flags, st_device_supports_reboot);
-        } else if(safe_str_eq(action, "on") && (crm_is_true(automatic))) {
-            /* this setting implies required=true for unfencing */
-            required = "true";
+        } else if (safe_str_eq(action, "on")) {
+            /* "automatic" means the cluster will unfence node when it joins */
+            const char *automatic = crm_element_value(match, "automatic");
+
+            /* "required" is a deprecated synonym for "automatic" */
+            const char *required = crm_element_value(match, "required");
+
+            if (crm_is_true(automatic) || crm_is_true(required)) {
+                device->automatic_unfencing = TRUE;
+            }
         }
 
         if (action && crm_is_true(on_target)) {
             device->on_target_actions = add_action(device->on_target_actions, action);
-        }
-        if (action && crm_is_true(required)) {
-            device->required_actions = add_action(device->required_actions, action);
         }
     }
 
@@ -778,8 +767,7 @@ build_device_from_xml(xmlNode * msg)
 
     value = crm_element_value(dev, "rsc_provides");
     if (safe_str_eq(value, "unfencing")) {
-        /* if this agent requires unfencing, 'on' is considered a required action */
-        device->required_actions = add_action(device->required_actions, "on");
+        device->automatic_unfencing = TRUE;
     }
 
     if (is_action_required("on", device)) {
@@ -1103,103 +1091,223 @@ free_topology_entry(gpointer data)
             g_list_free_full(tp->levels[lpc], free);
         }
     }
-    free(tp->node);
+    free(tp->target);
+    free(tp->target_value);
+    free(tp->target_pattern);
+    free(tp->target_attribute);
     free(tp);
+}
+
+char *stonith_level_key(xmlNode *level, int mode)
+{
+    if(mode == -1) {
+        mode = stonith_level_kind(level);
+    }
+
+    switch(mode) {
+        case 0:
+            return crm_element_value_copy(level, XML_ATTR_STONITH_TARGET);
+        case 1:
+            return crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_PATTERN);
+        case 2:
+            {
+                const char *name = crm_element_value(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE);
+                const char *value = crm_element_value(level, XML_ATTR_STONITH_TARGET_VALUE);
+
+                if(name && value) {
+                    return crm_strdup_printf("%s=%s", name, value);
+                }
+            }
+        default:
+            return crm_strdup_printf("Unknown-%d-%s", mode, ID(level));
+    }
+}
+
+int stonith_level_kind(xmlNode * level)
+{
+    int mode = 0;
+    const char *target = crm_element_value(level, XML_ATTR_STONITH_TARGET);
+
+    if(target == NULL) {
+        mode++;
+        target = crm_element_value(level, XML_ATTR_STONITH_TARGET_PATTERN);
+    }
+
+    if(stand_alone == FALSE && target == NULL) {
+
+        mode++;
+
+        if(crm_element_value(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE) == NULL) {
+            mode++;
+
+        } else if(crm_element_value(level, XML_ATTR_STONITH_TARGET_VALUE) == NULL) {
+            mode++;
+        }
+    }
+
+    return mode;
+}
+
+static stonith_key_value_t *
+parse_device_list(const char *devices)
+{
+    int lpc = 0;
+    int max = 0;
+    int last = 0;
+    stonith_key_value_t *output = NULL;
+
+    if (devices == NULL) {
+        return output;
+    }
+
+    max = strlen(devices);
+    for (lpc = 0; lpc <= max; lpc++) {
+        if (devices[lpc] == ',' || devices[lpc] == 0) {
+            char *line = NULL;
+
+            line = calloc(1, 2 + lpc - last);
+            snprintf(line, 1 + lpc - last, "%s", devices + last);
+            output = stonith_key_value_add(output, NULL, line);
+            free(line);
+
+            last = lpc + 1;
+        }
+    }
+
+    return output;
 }
 
 /*!
  * \internal
- * \brief Register a STONITH level for a node
+ * \brief Register a STONITH level for a target
  *
- * Given an XML request specifying the node name, level index, and device IDs
- * for the level, this will create an entry for the node in the global topology
+ * Given an XML request specifying the target name, level index, and device IDs
+ * for the level, this will create an entry for the target in the global topology
  * table if one does not already exist, then append the specified device IDs to
  * the entry's device list for the specified level.
  *
  * \param[in]  msg   XML request for STONITH level registration
- * \param[out] desc  If not NULL, will be set to string representation ("NODE[LEVEL]")
+ * \param[out] desc  If not NULL, will be set to string representation ("TARGET[LEVEL]")
  *
  * \return pcmk_ok on success, -EINVAL if XML does not specify valid level index
  */
 int
-stonith_level_register(xmlNode * msg, char **desc)
+stonith_level_register(xmlNode *msg, char **desc)
 {
     int id = 0;
-    int rc = pcmk_ok;
-    xmlNode *child = NULL;
+    xmlNode *level;
+    int mode;
+    char *target;
 
-    xmlNode *level = get_xpath_object("//" F_STONITH_LEVEL, msg, LOG_ERR);
-    const char *node = crm_element_value(level, F_STONITH_TARGET);
-    stonith_topology_t *tp = g_hash_table_lookup(topology, node);
+    stonith_topology_t *tp;
+    stonith_key_value_t *dIter = NULL;
+    stonith_key_value_t *devices = NULL;
 
-    CRM_LOG_ASSERT(node != NULL);
-
-    crm_element_value_int(level, XML_ATTR_ID, &id);
-    if (desc) {
-        *desc = crm_strdup_printf("%s[%d]", node, id);
+    /* Allow the XML here to point to the level tag directly, or wrapped in
+     * another tag. If directly, don't search by xpath, because it might give
+     * multiple hits (e.g. if the XML is the CIB).
+     */
+    if (safe_str_eq(TYPE(msg), XML_TAG_FENCING_LEVEL)) {
+        level = msg;
+    } else {
+        level = get_xpath_object("//" XML_TAG_FENCING_LEVEL, msg, LOG_ERR);
     }
-    if (id <= 0 || id >= ST_LEVEL_MAX) {
+    CRM_CHECK(level != NULL, return -EINVAL);
+
+    mode = stonith_level_kind(level);
+    target = stonith_level_key(level, mode);
+    crm_element_value_int(level, XML_ATTR_STONITH_INDEX, &id);
+
+    if (desc) {
+        *desc = crm_strdup_printf("%s[%d]", target, id);
+    }
+
+    /* Sanity-check arguments */
+    if (mode >= 3 || (id <= 0) || (id >= ST_LEVEL_MAX)) {
+        free(target);
+        crm_trace("Could not add %s[%d] (%d) to the topology (%d active entries)", target, id, mode, g_hash_table_size(topology));
+        crm_log_xml_err(level, "Bad topology");
         return -EINVAL;
     }
 
+    /* Find or create topology table entry */
+    tp = g_hash_table_lookup(topology, target);
     if (tp == NULL) {
         tp = calloc(1, sizeof(stonith_topology_t));
-        tp->node = strdup(node);
-        g_hash_table_replace(topology, tp->node, tp);
-        crm_trace("Added %s to the topology (%d active entries)", node,
-                  g_hash_table_size(topology));
+        tp->kind = mode;
+        tp->target = target;
+        tp->target_value = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_VALUE);
+        tp->target_pattern = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_PATTERN);
+        tp->target_attribute = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE);
+
+        g_hash_table_replace(topology, tp->target, tp);
+        crm_trace("Added %s (%d) to the topology (%d active entries)",
+                  target, mode, g_hash_table_size(topology));
+    } else {
+        free(target);
     }
 
     if (tp->levels[id] != NULL) {
-        crm_info("Adding to the existing %s[%d] topology entry (%d active entries)", node, id,
-                 count_active_levels(tp));
+        crm_info("Adding to the existing %s[%d] topology entry",
+                 tp->target, id);
     }
 
-    for (child = __xml_first_child(level); child != NULL; child = __xml_next(child)) {
-        const char *device = ID(child);
+    devices = parse_device_list(crm_element_value(level, XML_ATTR_STONITH_DEVICES));
+    for (dIter = devices; dIter; dIter = dIter->next) {
+        const char *device = dIter->value;
 
-        crm_trace("Adding device '%s' for %s (%d)", device, node, id);
+        crm_trace("Adding device '%s' for %s[%d]", device, tp->target, id);
         tp->levels[id] = g_list_append(tp->levels[id], strdup(device));
     }
+    stonith_key_value_freeall(devices, 1, 1);
 
-    crm_info("Node %s has %d active fencing levels", node, count_active_levels(tp));
-    return rc;
+    crm_info("Target %s has %d active fencing levels",
+             tp->target, count_active_levels(tp));
+    return pcmk_ok;
 }
 
 int
-stonith_level_remove(xmlNode * msg, char **desc)
+stonith_level_remove(xmlNode *msg, char **desc)
 {
     int id = 0;
-    xmlNode *level = get_xpath_object("//" F_STONITH_LEVEL, msg, LOG_ERR);
-    const char *node = crm_element_value(level, F_STONITH_TARGET);
-    stonith_topology_t *tp = g_hash_table_lookup(topology, node);
+    stonith_topology_t *tp;
+    char *target;
 
-    CRM_LOG_ASSERT(node != NULL);
+    /* Unlike additions, removal requests should always have one level tag */
+    xmlNode *level = get_xpath_object("//" XML_TAG_FENCING_LEVEL, msg, LOG_ERR);
 
-    if (desc) {
-        *desc = crm_strdup_printf("%s[%d]", node, id);
-    }
+    CRM_CHECK(level != NULL, return -EINVAL);
+
+    target = stonith_level_key(level, -1);
     crm_element_value_int(level, XML_ATTR_ID, &id);
+    if (desc) {
+        *desc = crm_strdup_printf("%s[%d]", target, id);
+    }
 
-    if (tp == NULL) {
-        crm_info("Node %s not found (%d active entries)", node, g_hash_table_size(topology));
-        return pcmk_ok;
-
-    } else if (id < 0 || id >= ST_LEVEL_MAX) {
+    /* Sanity-check arguments */
+    if (id >= ST_LEVEL_MAX) {
+        free(target);
         return -EINVAL;
     }
 
-    if (id == 0 && g_hash_table_remove(topology, node)) {
+    tp = g_hash_table_lookup(topology, target);
+    if (tp == NULL) {
+        crm_info("Topology for %s not found (%d active entries)",
+                 target, g_hash_table_size(topology));
+
+    } else if (id == 0 && g_hash_table_remove(topology, target)) {
         crm_info("Removed all %s related entries from the topology (%d active entries)",
-                 node, g_hash_table_size(topology));
+                 target, g_hash_table_size(topology));
 
     } else if (id > 0 && tp->levels[id] != NULL) {
         g_list_free_full(tp->levels[id], free);
         tp->levels[id] = NULL;
 
-        crm_info("Removed entry '%d' from %s's topology (%d active entries remaining)",
-                 id, node, count_active_levels(tp));
+        crm_info("Removed level '%d' from topology for %s (%d active levels remaining)",
+                 id, target, count_active_levels(tp));
     }
+
+    free(target);
     return pcmk_ok;
 }
 
@@ -2128,6 +2236,7 @@ check_alternate_host(const char *target)
 {
     const char *alternate_host = NULL;
 
+    crm_trace("Checking if we (%s) can fence %s", stonith_our_uname, target);
     if (find_topology_for_host(target) && safe_str_eq(target, stonith_our_uname)) {
         GHashTableIter gIter;
         crm_node_t *entry = NULL;
@@ -2294,11 +2403,12 @@ handle_request(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * req
 
                 crm_notice("Forwarding complex self fencing request to peer %s", alternate_host);
 
-                if (client) {
+                if (client->id) {
                     client_id = client->id;
                 } else {
                     client_id = crm_element_value(request, F_STONITH_CLIENTID);
                 }
+
                 /* Create a record of it, otherwise call_id will be 0 if we need to notify of failures */
                 create_remote_stonith_op(client_id, request, FALSE);
 
@@ -2318,53 +2428,29 @@ handle_request(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * req
 
     } else if (crm_str_eq(op, STONITH_OP_DEVICE_ADD, TRUE)) {
         const char *id = NULL;
-        xmlNode *notify_data = create_xml_node(NULL, op);
 
         rc = stonith_device_register(request, &id, FALSE);
-
-        crm_xml_add(notify_data, F_STONITH_DEVICE, id);
-        crm_xml_add_int(notify_data, F_STONITH_ACTIVE, g_hash_table_size(device_list));
-
-        do_stonith_notify(call_options, op, rc, notify_data);
-        free_xml(notify_data);
+        do_stonith_notify_device(call_options, op, rc, id);
 
     } else if (crm_str_eq(op, STONITH_OP_DEVICE_DEL, TRUE)) {
         xmlNode *dev = get_xpath_object("//" F_STONITH_DEVICE, request, LOG_ERR);
         const char *id = crm_element_value(dev, XML_ATTR_ID);
-        xmlNode *notify_data = create_xml_node(NULL, op);
 
         rc = stonith_device_remove(id, FALSE);
-
-        crm_xml_add(notify_data, F_STONITH_DEVICE, id);
-        crm_xml_add_int(notify_data, F_STONITH_ACTIVE, g_hash_table_size(device_list));
-
-        do_stonith_notify(call_options, op, rc, notify_data);
-        free_xml(notify_data);
+        do_stonith_notify_device(call_options, op, rc, id);
 
     } else if (crm_str_eq(op, STONITH_OP_LEVEL_ADD, TRUE)) {
         char *id = NULL;
-        xmlNode *notify_data = create_xml_node(NULL, op);
 
         rc = stonith_level_register(request, &id);
-
-        crm_xml_add(notify_data, F_STONITH_DEVICE, id);
-        crm_xml_add_int(notify_data, F_STONITH_ACTIVE, g_hash_table_size(topology));
-
-        do_stonith_notify(call_options, op, rc, notify_data);
-        free_xml(notify_data);
+        do_stonith_notify_level(call_options, op, rc, id);
         free(id);
 
     } else if (crm_str_eq(op, STONITH_OP_LEVEL_DEL, TRUE)) {
         char *id = NULL;
-        xmlNode *notify_data = create_xml_node(NULL, op);
 
         rc = stonith_level_remove(request, &id);
-
-        crm_xml_add(notify_data, F_STONITH_DEVICE, id);
-        crm_xml_add_int(notify_data, F_STONITH_ACTIVE, g_hash_table_size(topology));
-
-        do_stonith_notify(call_options, op, rc, notify_data);
-        free_xml(notify_data);
+        do_stonith_notify_level(call_options, op, rc, id);
 
     } else if (crm_str_eq(op, STONITH_OP_CONFIRM, TRUE)) {
         async_command_t *cmd = create_async_command(request);

@@ -61,6 +61,7 @@ enum xml_log_options
 {
     xml_log_option_filtered   = 0x0001,
     xml_log_option_formatted  = 0x0002,
+    xml_log_option_text       = 0x0004, /* add this option to dump text into xml */
     xml_log_option_diff_plus  = 0x0010,
     xml_log_option_diff_minus = 0x0020,
     xml_log_option_diff_short = 0x0040,
@@ -223,8 +224,9 @@ unsigned int get_crm_log_level(void);
  *       if CRM_XS is used inside fmt and will not show up in syslog.
  */
 #  define crm_perror(level, fmt, args...) do {				\
-	const char *err = strerror(errno);				\
-        if(level <= crm_log_level) {                                    \
+        const char *err = strerror(errno);                              \
+        /* cast to int makes coverity happy when level == 0 */          \
+        if (level <= (int)crm_log_level) {                              \
             fprintf(stderr, fmt ": %s (%d)\n" , ##args, err, errno);    \
         }                                                               \
         do_crm_log(level, fmt ": %s (%d)" , ##args, err, errno);        \

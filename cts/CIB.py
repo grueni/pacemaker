@@ -8,7 +8,6 @@ Copyright (C) 2008 Andrew Beekhof
 import os, string, warnings
 
 from cts.CTSvars import *
-from cts.CTS     import ClusterManager
 
 
 class CibBase:
@@ -16,7 +15,6 @@ class CibBase:
         self.tag = tag
         self.name = _id
         self.kwargs = kwargs
-        self.values = []
         self.children = []
         self.Factory = Factory
 
@@ -30,7 +28,7 @@ class CibBase:
         if value:
             self.kwargs[key] = value
         else:
-            self.values.append(key)
+            self.kwargs.pop(key, None)
 
 from cib_xml import *
 
@@ -110,6 +108,54 @@ class CIB11(ConfigBase):
         r.add_op("monitor", "5s")
         return r
 
+    def get_node_id(self, node_name):
+        """ Check the cluster configuration for a node ID. """
+
+        # We can't account for every possible configuration,
+        # so we only return a node ID if:
+        # * The node is specified in /etc/corosync/corosync.conf
+        #   with "ring0_addr:" equal to node_name and "nodeid:"
+        #   explicitly specified.
+        # * Or, the node is specified in /etc/cluster/cluster.conf
+        #   with name="node_name" nodeid="X"
+        # In all other cases, we return 0.
+        node_id = 0
+
+        # awkward command: use } as record separator
+        # so each corosync.conf "object" is one record;
+        # match the "node {" record that has "ring0_addr: node_name";
+        # then print the substring of that record after "nodeid:"
+        (rc, output) = self.Factory.rsh(self.Factory.target,
+            r"""awk -v RS="}" """
+            r"""'/^(\s*nodelist\s*{)?\s*node\s*{.*(ring0_addr|name):\s*%s(\s+|$)/"""
+            r"""{gsub(/.*nodeid:\s*/,"");gsub(/\s+.*$/,"");print}'"""
+            r""" /etc/corosync/corosync.conf""" % node_name, None)
+
+        if rc == 0 and len(output) == 1:
+            try:
+                node_id = int(output[0])
+            except ValueError:
+                node_id = 0
+
+        # another awkward command: use < or > as record separator
+        # so each cluster.conf XML tag is one record;
+        # match the clusternode record that has name="node_name";
+        # then print the substring of that record for nodeid="X"
+        if node_id == 0:
+            (rc, output) = self.Factory.rsh(self.Factory.target,
+                r"""awk -v RS="[<>]" """
+                r"""'/^clusternode\s+.*name="%s".*/"""
+                r"""{gsub(/.*nodeid="/,"");gsub(/".*/,"");print}'"""
+                r""" /etc/cluster/cluster.conf""" % node_name, None)
+
+            if rc == 0 and len(output) == 1:
+                try:
+                    node_id = int(output[0])
+                except ValueError:
+                    node_id = 0
+
+        return node_id
+
     def install(self, target):
         old = self.Factory.tmpfile
 
@@ -133,34 +179,46 @@ class CIB11(ConfigBase):
         self.Factory.rsh(self.Factory.target, "HOME=/root cibadmin --empty %s > %s" % (self.version, self.Factory.tmpfile))
         #cib_base = self.cib_template % (self.feature_set, self.version, ''' remote-tls-port='9898' remote-clear-port='9999' ''')
 
-        nodelist = ""
-        self.num_nodes = 0
-        for node in self.CM.Env["nodes"]:
-            nodelist += node + " "
-            self.num_nodes = self.num_nodes + 1
+        self.num_nodes = len(self.CM.Env["nodes"])
 
         no_quorum = "stop"
         if self.num_nodes < 3:
             no_quorum = "ignore"
-            self.Factory.log("Cluster only has %d nodes, configuring: no-quroum-policy=ignore" % self.num_nodes)
+            self.Factory.log("Cluster only has %d nodes, configuring: no-quorum-policy=ignore" % self.num_nodes)
+
+        # We don't need a nodes section unless we add attributes
+        stn = None
 
         # Fencing resource
         # Define first so that the shell doesn't reject every update
         if self.CM.Env["DoFencing"]:
+
+            # Define the "real" fencing device
             st = Resource(self.Factory, "Fencing", ""+self.CM.Env["stonith-type"], "stonith")
+
             # Set a threshold for unreliable stonith devices such as the vmware one
             st.add_meta("migration-threshold", "5")
             st.add_op("monitor", "120s", timeout="120s")
             st.add_op("stop", "0", timeout="60s")
             st.add_op("start", "0", timeout="60s")
 
+            # For remote node tests, a cluster node is stopped and brought back up
+            # as a remote node with the name "remote_OLDNAME". To allow fencing
+            # devices to fence these nodes, create a list of all possible node names.
+            all_node_names = [ prefix+n for n in self.CM.Env["nodes"] for prefix in ('', 'remote_') ]
+
+            # Add all parameters specified by user
             entries = string.split(self.CM.Env["stonith-params"], ',')
             for entry in entries:
-                (name, value) = string.split(entry, '=')
-                if name == "hostlist" and value == "all":
-                    value = string.join(self.CM.Env["nodes"], " ")
-                elif name == "pcmk_host_list" and value == "all":
-                    value = string.join(self.CM.Env["nodes"], " ")
+                try:
+                    (name, value) = string.split(entry, '=', 1)
+                except ValueError:
+                    print("Warning: skipping invalid fencing parameter: %s" % entry)
+                    continue
+
+                # Allow user to specify "all" as the node list, and expand it here
+                if name in [ "hostlist", "pcmk_host_list" ] and value == "all":
+                    value = string.join(all_node_names, " ")
 
                 st[name] = value
 
@@ -170,22 +228,56 @@ class CIB11(ConfigBase):
             if True:
                 stf_nodes = []
                 stt_nodes = []
+                attr_nodes = {}
 
                 # Create the levels
                 stl = FencingTopology(self.Factory)
                 for node in self.CM.Env["nodes"]:
+                    # Remote node tests will rename the node
+                    remote_node = "remote_" + node
+
+                    # Randomly assign node to a fencing method
                     ftype = self.CM.Env.RandomGen.choice(["levels-and", "levels-or ", "broadcast "])
-                    self.CM.log(" - Using %s fencing for node: %s" % (ftype, node))
-                    # for baremetal remote node tests
-                    stt_nodes.append("remote_%s" % node)
+
+                    # For levels-and, randomly choose targeting by node name or attribute
+                    by = ""
                     if ftype == "levels-and":
-                        stl.level(1, node, "FencingPass,Fencing")
-                        stt_nodes.append(node)
+                        node_id = self.get_node_id(node)
+                        if node_id == 0 or self.CM.Env.RandomGen.choice([True, False]):
+                            by = " (by name)"
+                        else:
+                            attr_nodes[node] = node_id
+                            by = " (by attribute)"
+
+                    self.CM.log(" - Using %s fencing for node: %s%s" % (ftype, node, by))
+
+                    if ftype == "levels-and":
+                        # If targeting by name, add a topology level for this node
+                        if node not in attr_nodes:
+                            stl.level(1, node, "FencingPass,Fencing")
+
+                        # Always target remote nodes by name, otherwise we would need to add
+                        # an attribute to the remote node only during remote tests (we don't
+                        # want nonexistent remote nodes showing up in the non-remote tests).
+                        # That complexity is not worth the effort.
+                        stl.level(1, remote_node, "FencingPass,Fencing")
+
+                        # Add the node (and its remote equivalent) to the list of levels-and nodes.
+                        stt_nodes.extend([node, remote_node])
 
                     elif ftype == "levels-or ":
-                        stl.level(1, node, "FencingFail")
-                        stl.level(2, node, "Fencing")
-                        stf_nodes.append(node)
+                        for n in [ node, remote_node ]:
+                            stl.level(1, n, "FencingFail")
+                            stl.level(2, n, "Fencing")
+                        stf_nodes.extend([node, remote_node])
+
+                # If any levels-and nodes were targeted by attribute,
+                # create the attributes and a level for the attribute.
+                if attr_nodes:
+                    stn = Nodes(self.Factory)
+                    for (node_name, node_id) in attr_nodes.items():
+                        stn.add_node(node_name, node_id, { "cts-fencing" : "levels-and" })
+                    stl.level(1, None, "FencingPass,Fencing", "cts-fencing", "levels-and")
 
                 # Create a Dummy agent that always passes for levels-and
                 if len(stt_nodes):
@@ -220,10 +312,18 @@ class CIB11(ConfigBase):
         o["no-quorum-policy"] = no_quorum
         o["expected-quorum-votes"] = self.num_nodes
 
+        if self.Factory.rsh.exists_on_all(self.CM.Env["notification-agent"], self.CM.Env["nodes"]):
+            o["notification-agent"] = self.CM.Env["notification-agent"]
+            o["notification-recipient"] = self.CM.Env["notification-recipient"]
+
         if self.CM.Env["DoBSC"] == 1:
             o["ident-string"] = "Linux-HA TEST configuration file - REMOVEME!!"
 
         o.commit()
+
+        # Commit the nodes section if we defined one
+        if stn is not None:
+            stn.commit()
 
         # Add resources?
         if self.CM.Env["CIBResource"] == 1:
@@ -351,7 +451,7 @@ class CIB12(CIB11):
 
 class CIB20(CIB11):
     feature_set = "3.0"
-    version = "pacemaker-2.0"
+    version = "pacemaker-2.4"
 
 #class HASI(CIB10):
 #    def add_resources(self):
@@ -427,25 +527,28 @@ class ConfigFactoryItem:
         _kargs.update(kargs)
         return self._function(*_args,**_kargs)
 
-# Basic Sanity Testing
 if __name__ == '__main__':
-    import CTSlab
-    env = CTSlab.LabEnvironment()
-    env["nodes"] = []
-    env["nodes"].append("pcmk-1")
-    env["nodes"].append("pcmk-2")
-    env["nodes"].append("pcmk-3")
-    env["nodes"].append("pcmk-4")
+    """ Unit test (pass cluster node names as command line arguments) """
 
-    env["CIBResource"] = 1
-    env["IPBase"] = "fe80::1234:56:7890:1000"
-    env["DoStonith"] = 1
-    env["stonith-type"] = "fence_xvm"
-    env["stonith-params"] = "pcmk_arg_map=domain:uname"
+    import CTS
+    import CM_ais
+    import sys
 
-    manager = ClusterManager(env)
-    manager.cluster_monitor = False
+    if len(sys.argv) < 2:
+        print("Usage: %s <node> ..." % sys.argv[0])
+        sys.exit(1)
 
-    CibFactory = ConfigFactory(manager)
+    args = [
+        "--nodes", " ".join(sys.argv[1:]),
+        "--clobber-cib",
+        "--populate-resources",
+        "--stack", "corosync",
+        "--test-ip-base", "fe80::1234:56:7890:1000",
+        "--stonith", "rhcs",
+        "--stonith-args", "pcmk_arg_map=domain:uname"
+    ]
+    env = CTS.CtsLab(args)
+    cm = CM_ais.crm_mcp(env)
+    CibFactory = ConfigFactory(cm)
     cib = CibFactory.createConfig("pacemaker-1.1")
     print(cib.contents())

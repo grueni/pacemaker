@@ -1,5 +1,5 @@
 /* 
- * Copyright (C) 2012 David Vossel <dvossel@redhat.com>
+ * Copyright (C) 2012 David Vossel <davidvossel@gmail.com>
  * 
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -84,7 +84,6 @@ fail_pending_op(gpointer key, gpointer value, gpointer user_data)
     event.rc = PCMK_OCF_CONNECTION_DIED;
     event.op_status = PCMK_LRM_OP_ERROR;
     event.t_run = op->start_time;
-    event.t_rcchange = op->start_time;
     event.t_rcchange = op->start_time;
 
     event.call_id = op->call_id;
@@ -490,7 +489,7 @@ remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)
         if (remote_proxy_new(lrm_state->node_name, session, channel) == NULL) {
             remote_proxy_notify_destroy(lrmd, session);
         }
-        crm_info("new remote proxy client established to %s, session id %s", channel, session);
+        crm_trace("new remote proxy client established to %s, session id %s", channel, session);
     } else if (safe_str_eq(op, "destroy")) {
         remote_proxy_end_session(session);
 
@@ -534,7 +533,15 @@ remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)
             }
 
         } else if(is_set(flags, crm_ipc_proxied)) {
-            int rc = crm_ipc_send(proxy->ipc, request, flags, 5000, NULL);
+            const char *type = crm_element_value(request, F_TYPE);
+            int rc = 0;
+
+            if (safe_str_eq(type, T_ATTRD)
+                && crm_element_value(request, F_ATTRD_HOST) == NULL) {
+                crm_xml_add(request, F_ATTRD_HOST, proxy->node_name);
+            }
+
+            rc = crm_ipc_send(proxy->ipc, request, flags, 5000, NULL);
 
             if(rc < 0) {
                 xmlNode *op_reply = create_xml_node(NULL, "nack");

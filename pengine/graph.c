@@ -470,7 +470,7 @@ update_action(action_t * then)
         then->runnable_before = 0;
 
         /* for backwards compatibility with previous options that use
-         * the 'requires_any' flag, initalize required to 1 if it is
+         * the 'requires_any' flag, initialize required to 1 if it is
          * not set. */ 
         if (then->required_runnable_before == 0) {
             then->required_runnable_before = 1;
@@ -697,7 +697,12 @@ stonith_constraints(node_t * node, action_t * stonith_op, pe_working_set_t * dat
         for (lpc = data_set->resources; lpc != NULL; lpc = lpc->next) {
             resource_t *rsc = (resource_t *) lpc->data;
 
-            rsc_stonith_ordering(rsc, stonith_op, data_set);
+            if(stonith_op->rsc == NULL) {
+                rsc_stonith_ordering(rsc, stonith_op, data_set);
+
+            } else if(stonith_op->rsc != rsc && stonith_op->rsc != rsc->container) {
+                rsc_stonith_ordering(rsc, stonith_op, data_set);
+            }
         }
     }
 

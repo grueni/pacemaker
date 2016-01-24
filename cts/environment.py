@@ -57,6 +57,8 @@ class Environment:
         self["Stack"] = "corosync"
         self["stonith-type"] = "external/ssh"
         self["stonith-params"] = "hostlist=all,livedangerously=yes"
+        self["notification-agent"] = "/var/lib/pacemaker/notify.sh"
+        self["notification-recipient"] = "/var/lib/pacemaker/notify.log"
         self["loop-minutes"] = 60
         self["valgrind-prefix"] = None
         self["valgrind-procs"] = "attrd cib crmd lrmd pengine stonith-ng"
@@ -70,6 +72,7 @@ class Environment:
         self["scenario"] = "random"
         self["stats"] = 0
         self["docker"] = 0
+        self["continue"] = 0
 
         self.RandomGen = random.Random()
         self.logger = LogFactory()
@@ -347,7 +350,8 @@ class Environment:
             elif args[i] == "--docker":
                 self["docker"] = 1
                 RemoteFactory().enable_docker()
-
+            elif args[i] == "--yes" or args[i] == "-y":
+                self["continue"] = 1
             elif args[i] == "--stonith" or args[i] == "--fencing":
                 skipthis=1
                 if args[i+1] == "1" or args[i+1] == "yes":
@@ -578,6 +582,14 @@ class Environment:
             elif args[i] == "--boot":
                 self["scenario"] = "boot"
 
+            elif args[i] == "--notification-agent":
+                self["notification-agent"] = args[i+1]
+                skipthis = 1
+
+            elif args[i] == "--notification-recipient":
+                self["notification-recipient"] = args[i+1]
+                skipthis = 1
+
             elif args[i] == "--valgrind-tests":
                 self["valgrind-tests"] = 1
 
@@ -658,6 +670,8 @@ class Environment:
         print("\t [--stonith-type type]")
         print("\t [--stonith-args name=value]")
         print("\t [--bsc]")
+        print("\t [--notification-agent path]  script to configure for Pacemaker notifications")
+        print("\t [--notification-recipient r] recipient to pass to notification agent")
         print("\t [--no-loop-tests]            dont run looping/time-based tests")
         print("\t [--no-unsafe-tests]          dont run tests that are unsafe for use with ocfs2/drbd")
         print("\t [--valgrind-tests]           include tests using valgrind")
@@ -668,6 +682,7 @@ class Environment:
         print("\t [--docker]                   Indicates nodes are docker nodes.")
         print("\t [--seed random_seed]")
         print("\t [--set option=value]")
+        print("\t [--yes | -y]                 continue to run cts when there is an interaction whether to continue running pacemaker-cts")
         print("\t ")
         print("\t Example: ")
         print("\t    python sys.argv[0] -g virt1 --stack cs -r --stonith ssh --schema pacemaker-1.0 500")

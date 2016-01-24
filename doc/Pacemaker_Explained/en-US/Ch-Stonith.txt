@@ -76,6 +76,9 @@ one set of meta-attributes and one set of instance attributes.  This
 can be revisited if it becomes a significant limitation for people.
 ===========
 
+See the table below or run `man stonithd` to see special instance attributes
+that may be set for any fencing resource, regardless of fence agent.
+
 .Properties of Fencing Resources
 [width="95%",cols="5m,2,3,10<a",options="header",align="center"]
 |=========================================================
@@ -129,6 +132,16 @@ can be revisited if it becomes a significant limitation for people.
 
 indexterm:[pcmk_host_check,Fencing]
 indexterm:[Fencing,Property,pcmk_host_check]
+
+|pcmk_delay_max
+|time
+|0s
+|Enable a random delay of up to the time specified before executing stonith
+actions. This is sometimes used in two-node clusters to ensure that the
+nodes don't fence each other at the same time.
+
+indexterm:[pcmk_delay_max,Fencing]
+indexterm:[Fencing,Property,pcmk_delay_max]
 
 |pcmk_host_argument
 |string
@@ -522,7 +535,8 @@ Simply create the individual devices as you normally would, then
 define one or more +fencing-level+ entries in the +fencing-topology+ section of
 the configuration.
 
-* Each fencing level is attempted in order of ascending +index+.
+* Each fencing level is attempted in order of ascending +index+. Allowed
+  indexes are 0 to 9.
 * If a device fails, processing terminates for the current level.
   No further devices in that level are exercised, and the next level is attempted instead.
 * If the operation succeeds for all the listed devices in a level, the level is deemed to have passed.
@@ -536,7 +550,7 @@ Some possible uses of topologies include:
 * Initiate a kdump and then poweroff the node
 
 .Properties of Fencing Levels
-[width="95%",cols="1m,6<",options="header",align="center"]
+[width="95%",cols="1m,3<",options="header",align="center"]
 |=========================================================
 
 |Field
@@ -548,9 +562,21 @@ Some possible uses of topologies include:
  indexterm:[Fencing,fencing-level,id]
 
 |target
-|The node to which this level applies
+|The name of a single node to which this level applies
  indexterm:[target,fencing-level]
  indexterm:[Fencing,fencing-level,target]
+
+|target-pattern
+|A regular expression matching the names of nodes to which this level applies
+'(since 1.1.14)'
+ indexterm:[target-pattern,fencing-level]
+ indexterm:[Fencing,fencing-level,target-pattern]
+
+|target-attribute
+|The name of a node attribute that is set for nodes to which this level applies
+'(since 1.1.14)'
+ indexterm:[target-attribute,fencing-level]
+ indexterm:[Fencing,fencing-level,target-attribute]
 
 |index
 |The order in which to attempt the levels.
@@ -857,3 +883,10 @@ be logged but ignored.
 When a reboot operation is remapped, any action-specific timeout for the
 remapped action will be used (for example, +pcmk_off_timeout+ will be used when
 executing the +off+ command, not +pcmk_reboot_timeout+).
+
+[NOTE]
+====
+In Pacemaker versions 1.1.13 and earlier, reboots will not be remapped in the
+second case. To achieve the same effect, separate fencing devices for off and
+on actions must be configured.
+====

@@ -426,6 +426,8 @@ upstart_async_dispatch(DBusPendingCall *pending, void *user_data)
     }
 }
 
+/* For an asynchronous 'op', returns FALSE if 'op' should be free'd by the caller */
+/* For a synchronous 'op', returns FALSE if 'op' fails */
 gboolean
 upstart_job_exec(svc_action_t * op, gboolean synchronous)
 {
@@ -481,6 +483,7 @@ upstart_job_exec(svc_action_t * op, gboolean synchronous)
                 return op->rc == PCMK_OCF_OK;
             } else if (pending) {
                 services_set_op_pending(op, pending);
+                services_add_inflight_op(op);
                 return TRUE;
             }
             return FALSE;
@@ -524,6 +527,7 @@ upstart_job_exec(svc_action_t * op, gboolean synchronous)
 
         if(pending) {
             services_set_op_pending(op, pending);
+            services_add_inflight_op(op);
             return TRUE;
         }
         return FALSE;
@@ -567,8 +571,7 @@ upstart_job_exec(svc_action_t * op, gboolean synchronous)
     }
 
     if (op->synchronous == FALSE) {
-        operation_finalize(op);
-        return TRUE;
+        return operation_finalize(op);
     }
     return op->rc == PCMK_OCF_OK;
 }

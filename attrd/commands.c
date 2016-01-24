@@ -773,10 +773,15 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
 {
     if ((kind == crm_status_nstate) || (kind == crm_status_rstate)) {
         if (safe_str_eq(peer->state, CRM_NODE_MEMBER)) {
-            if ((election_state(writer) == election_won)) {
+            /* If we're the writer, send new peers a list of all attributes
+             * (unless it's a remote node, which doesn't run its own attrd)
+             */
+            if ((election_state(writer) == election_won)
+                && !is_set(peer->flags, crm_remote_node)) {
                 attrd_peer_sync(peer, NULL);
             }
         } else {
+            /* Remove all attribute values associated with lost nodes */
             attrd_peer_remove(peer->id, peer->uname, FALSE, __FUNCTION__);
             if (peer_writer && safe_str_eq(peer->uname, peer_writer)) {
                 free(peer_writer);
@@ -965,7 +970,7 @@ write_attribute(attribute_t *a)
     /* Iterate over each peer value of this attribute */
     g_hash_table_iter_init(&iter, a->values);
     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & v)) {
-        crm_node_t *peer = crm_get_peer_full(v->nodeid, v->nodename, CRM_GET_PEER_REMOTE|CRM_GET_PEER_CLUSTER);
+        crm_node_t *peer = crm_get_peer_full(v->nodeid, v->nodename, CRM_GET_PEER_ANY);
 
         /* If the value's peer info does not correspond to a peer, ignore it */
         if (peer == NULL) {

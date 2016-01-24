@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 David Vossel <dvossel@redhat.com>
+ * Copyright (c) 2012 David Vossel <davidvossel@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -165,14 +165,14 @@ ipc_proxy_forward_client(crm_client_t *ipc_proxy, xmlNode *xml)
      */
 
     if (safe_str_eq(msg_type, "event")) {
-        crm_info("Sending event to %s", ipc_client->id);
+        crm_trace("Sending event to %s", ipc_client->id);
         rc = crm_ipcs_send(ipc_client, 0, msg, crm_ipc_server_event);
 
     } else if (safe_str_eq(msg_type, "response")) {
         int msg_id = 0;
 
         crm_element_value_int(xml, F_LRMD_IPC_MSG_ID, &msg_id);
-        crm_info("Sending response to %d - %s", ipc_client->request_id, ipc_client->id);
+        crm_trace("Sending response to %d - %s", ipc_client->request_id, ipc_client->id);
         rc = crm_ipcs_send(ipc_client, msg_id, msg, FALSE);
 
         CRM_LOG_ASSERT(msg_id == ipc_client->request_id);
@@ -223,9 +223,9 @@ ipc_proxy_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
     }
 
     CRM_CHECK(client != NULL, crm_err("Invalid client");
-              return FALSE);
+              free_xml(request); return FALSE);
     CRM_CHECK(client->id != NULL, crm_err("Invalid client: %p", client);
-              return FALSE);
+              free_xml(request); return FALSE);
 
     /* this ensures that synced request/responses happen over the event channel
      * in the crmd, allowing the crmd to process the messages async */
@@ -241,6 +241,7 @@ ipc_proxy_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
     crm_xml_add_int(msg, F_LRMD_IPC_MSG_FLAGS, flags);
     add_message_xml(msg, F_LRMD_IPC_MSG, request);
     lrmd_server_send_notify(ipc_proxy, msg);
+    free_xml(request);
     free_xml(msg);
 
     return 0;

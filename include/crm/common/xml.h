@@ -37,7 +37,7 @@
 #  include <libxml/tree.h>
 #  include <libxml/xpath.h>
 
-/* Encryption costs a LOT, don't do it unless we're hitting message limits
+/* Compression costs a LOT, don't do it unless we're hitting message limits
  *
  * For now, use 256k as the lower size, which means we can have 4 big data fields
  *  before we hit heartbeat's message limit
@@ -101,6 +101,24 @@ const char *crm_xml_replace(xmlNode * node, const char *name, const char *value)
 
 const char *crm_xml_add_int(xmlNode * node, const char *name, int value);
 
+/*!
+ * \brief Add a boolean attribute to an XML object
+ *
+ * Add an attribute with the value XML_BOOLEAN_TRUE or XML_BOOLEAN_FALSE
+ * as appropriate to an XML object.
+ *
+ * \param[in/out] node   XML object to add attribute to
+ * \param[in]     name   Name of attribute to add
+ * \param[in]     value  Boolean whose value will be tested
+ *
+ * \return Pointer to newly created XML attribute's content, or NULL on error
+ */
+static inline const char *
+crm_xml_add_boolean(xmlNode *node, const char *name, gboolean value)
+{
+    return crm_xml_add(node, name, (value? "true" : "false"));
+}
+
 /*
  * Unlink the node and set its doc pointer to NULL so free_xml()
  * will act appropriately
@@ -140,6 +158,8 @@ int write_xml_fd(xmlNode * xml_node, const char *filename, int fd, gboolean comp
 int write_xml_file(xmlNode * xml_node, const char *filename, gboolean compress);
 
 char *dump_xml_formatted(xmlNode * msg);
+/* Also dump the text node with xml_log_option_text enabled */ 
+char *dump_xml_formatted_with_text(xmlNode * msg);
 
 char *dump_xml_unformatted(xmlNode * msg);
 
@@ -182,7 +202,11 @@ const char *crm_element_value_const(const xmlNode * data, const char *name);
 xmlNode *get_xpath_object(const char *xpath, xmlNode * xml_obj, int error_level);
 xmlNode *get_xpath_object_relative(const char *xpath, xmlNode * xml_obj, int error_level);
 
-#  define crm_element_name(xml) (xml)?(const char *)(xml)->name:NULL
+static inline const char *
+crm_element_name(xmlNode *xml)
+{
+    return xml? (const char *)(xml->name) : NULL;
+}
 
 const char *crm_element_value(xmlNode * data, const char *name);
 
@@ -248,6 +272,8 @@ xmlNode *first_named_child(xmlNode * parent, const char *name);
 
 xmlNode *sorted_xml(xmlNode * input, xmlNode * parent, gboolean recursive);
 xmlXPathObjectPtr xpath_search(xmlNode * xml_top, const char *path);
+void crm_foreach_xpath_result(xmlNode *xml, const char *xpath,
+                              void (*helper)(xmlNode*, void*), void *user_data);
 gboolean cli_config_update(xmlNode ** xml, int *best_version, gboolean to_logs);
 xmlNode *expand_idref(xmlNode * input, xmlNode * top);
 

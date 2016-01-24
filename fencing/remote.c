@@ -60,13 +60,13 @@ typedef struct device_properties_s {
     /* The remaining members are indexed by the operation's "phase" */
 
     /* Whether this device has been executed in each phase */
-    gboolean executed[3];
+    gboolean executed[st_phase_max];
     /* Whether this device is disallowed from executing in each phase */
-    gboolean disallowed[3];
+    gboolean disallowed[st_phase_max];
     /* Action-specific timeout for each phase */
-    int custom_action_timeout[3];
+    int custom_action_timeout[st_phase_max];
     /* Action-specific maximum random delay for each phase */
-    int delay_max[3];
+    int delay_max[st_phase_max];
 } device_properties_t;
 
 typedef struct st_query_result_s {
@@ -207,22 +207,6 @@ grab_peer_device(const remote_fencing_op_t *op, st_query_result_t *peer,
     return TRUE;
 }
 
-/*
- * \internal
- * \brief Free the list of required devices for a particular phase
- *
- * \param[in,out] op     Operation to modify
- * \param[in]     phase  Phase to modify
- */
-static void
-free_required_list(remote_fencing_op_t *op, enum st_remap_phase phase)
-{
-    if (op->required_list[phase]) {
-        g_list_free_full(op->required_list[phase], free);
-        op->required_list[phase] = NULL;
-    }
-}
-
 static void
 clear_remote_op_timers(remote_fencing_op_t * op)
 {
@@ -268,9 +252,7 @@ free_remote_op(gpointer data)
         g_list_free_full(op->devices_list, free);
         op->devices_list = NULL;
     }
-    free_required_list(op, st_phase_requested);
-    free_required_list(op, st_phase_off);
-    free_required_list(op, st_phase_on);
+    g_list_free_full(op->automatic_list, free);
     free(op);
 }
 
@@ -323,10 +305,10 @@ op_phase_on(remote_fencing_op_t *op)
     op->phase = st_phase_on;
     strcpy(op->action, "on");
 
-    /* Any devices that are required for "on" will be automatically executed by
-     * the cluster when the node next joins, so we skip them here.
+    /* Skip devices with automatic unfencing, because the cluster will handle it
+     * when the node rejoins.
      */
-    for (iter = op->required_list[op->phase]; iter != NULL; iter = iter->next) {
+    for (iter = op->automatic_list; iter != NULL; iter = iter->next) {
         GListPtr match = g_list_find_custom(op->devices_list, iter->data,
                                             sort_strings);
 
@@ -334,12 +316,8 @@ op_phase_on(remote_fencing_op_t *op)
             op->devices_list = g_list_remove(op->devices_list, match->data);
         }
     }
-
-    /* We know this level will succeed, because phase 1 completed successfully
-     * and we ignore any errors from phase 2. So we can free the required list,
-     * which will keep them from being executed after the device list is done.
-     */
-    free_required_list(op, op->phase);
+    g_list_free_full(op->automatic_list, free);
+    op->automatic_list = NULL;
 
     /* Rewind device list pointer */
     op->devices = op->devices_list;
@@ -659,28 +637,25 @@ topology_is_empty(stonith_topology_t *tp)
 
 /*
  * \internal
- * \brief Add a device to the required list for a particular phase
+ * \brief Add a device to an operation's automatic unfencing list
  *
  * \param[in,out] op      Operation to modify
- * \param[in]     phase   Phase to modify
  * \param[in]     device  Device ID to add
  */
 static void
-add_required_device(remote_fencing_op_t *op, enum st_remap_phase phase,
-                    const char *device)
+add_required_device(remote_fencing_op_t *op, const char *device)
 {
-    GListPtr match  = g_list_find_custom(op->required_list[phase], device,
+    GListPtr match  = g_list_find_custom(op->automatic_list, device,
                                          sort_strings);
 
     if (!match) {
-        op->required_list[phase] = g_list_prepend(op->required_list[phase],
-                                                  strdup(device));
+        op->automatic_list = g_list_prepend(op->automatic_list, strdup(device));
     }
 }
 
 /*
  * \internal
- * \brief Remove a device from the required list for the current phase
+ * \brief Remove a device from the automatic unfencing list
  *
  * \param[in,out] op      Operation to modify
  * \param[in]     device  Device ID to remove
@@ -688,12 +663,11 @@ add_required_device(remote_fencing_op_t *op, enum st_remap_phase phase,
 static void
 remove_required_device(remote_fencing_op_t *op, const char *device)
 {
-    GListPtr match = g_list_find_custom(op->required_list[op->phase], device,
+    GListPtr match = g_list_find_custom(op->automatic_list, device,
                                         sort_strings);
 
     if (match) {
-        op->required_list[op->phase] = g_list_remove(op->required_list[op->phase],
-                                                     match->data);
+        op->automatic_list = g_list_remove(op->automatic_list, match->data);
     }
 }
 
@@ -713,37 +687,80 @@ set_op_device_list(remote_fencing_op_t * op, GListPtr devices)
     op->devices = op->devices_list;
 }
 
+/*
+ * \internal
+ * \brief Check whether a node matches a topology target
+ *
+ * \param[in] tp    Topology table entry to check
+ * \param[in] node  Name of node to check
+ *
+ * \return TRUE if node matches topology target
+ */
+static gboolean
+topology_matches(const stonith_topology_t *tp, const char *node)
+{
+    regex_t r_patt;
+
+    CRM_CHECK(node && tp && tp->target, return FALSE);
+    switch(tp->kind) {
+        case 2:
+            /* This level targets by attribute, so tp->target is a NAME=VALUE pair
+             * of a permanent attribute applied to targeted nodes. The test below
+             * relies on the locally cached copy of the CIB, so if fencing needs to
+             * be done before the initial CIB is received or after a malformed CIB
+             * is received, then the topology will be unable to be used.
+             */
+            if (node_has_attr(node, tp->target_attribute, tp->target_value)) {
+                crm_notice("Matched %s with %s by attribute", node, tp->target);
+                return TRUE;
+            }
+            break;
+        case 1:
+            /* This level targets by name, so tp->target is a regular expression
+             * matching names of nodes to be targeted.
+             */
+
+            if (regcomp(&r_patt, tp->target_pattern, REG_EXTENDED)) {
+                crm_info("Bad regex '%s' for fencing level", tp->target);
+            } else {
+                int status = regexec(&r_patt, node, 0, NULL, 0);
+
+                regfree(&r_patt);
+                if (status == 0) {
+                    crm_notice("Matched %s with %s by name", node, tp->target);
+                    return TRUE;
+                }
+            }
+            break;
+        case 0:
+            crm_trace("Testing %s against %s", node, tp->target);
+            return safe_str_eq(tp->target, node);
+    }
+    crm_trace("No match for %s with %s", node, tp->target);
+    return FALSE;
+}
+
 stonith_topology_t *
 find_topology_for_host(const char *host) 
 {
+    GHashTableIter tIter;
     stonith_topology_t *tp = g_hash_table_lookup(topology, host);
 
-    if(tp == NULL) {
-        int status = 1;
-        regex_t r_patt;
-        GHashTableIter tIter;
+    if(tp != NULL) {
+        crm_trace("Found %s for %s in %d entries", tp->target, host, g_hash_table_size(topology));
+        return tp;
+    }
 
-        crm_trace("Testing %d topologies for a match", g_hash_table_size(topology));
-        g_hash_table_iter_init(&tIter, topology);
-        while (g_hash_table_iter_next(&tIter, NULL, (gpointer *) & tp)) {
-
-            if (regcomp(&r_patt, tp->node, REG_EXTENDED)) {
-                crm_info("Bad regex '%s' for fencing level", tp->node);
-            } else {
-                status = regexec(&r_patt, host, 0, NULL, 0);
-                regfree(&r_patt);
-            }
-
-            if (status == 0) {
-                crm_notice("Matched %s with %s", host, tp->node);
-                break;
-            }
-            crm_trace("No match for %s with %s", host, tp->node);
-            tp = NULL;
+    g_hash_table_iter_init(&tIter, topology);
+    while (g_hash_table_iter_next(&tIter, NULL, (gpointer *) & tp)) {
+        if (topology_matches(tp, host)) {
+            crm_trace("Found %s for %s in %d entries", tp->target, host, g_hash_table_size(topology));
+            return tp;
         }
     }
 
-    return tp;
+    crm_trace("No matches for %s in %d topology entries", host, g_hash_table_size(topology));
+    return NULL;
 }
 
 /*!
@@ -938,7 +955,7 @@ create_remote_stonith_op(const char *client, xmlNode * request, gboolean peer)
 
     op = calloc(1, sizeof(remote_fencing_op_t));
 
-    crm_element_value_int(request, F_STONITH_TIMEOUT, (int *)&(op->base_timeout));
+    crm_element_value_int(request, F_STONITH_TIMEOUT, &(op->base_timeout));
 
     if (peer && dev) {
         op->id = crm_element_value_copy(dev, F_STONITH_REMOTE_OP_ID);
@@ -974,7 +991,7 @@ create_remote_stonith_op(const char *client, xmlNode * request, gboolean peer)
     crm_element_value_int(request, F_STONITH_CALLOPTS, &call_options);
     op->call_options = call_options;
 
-    crm_element_value_int(request, F_STONITH_CALLID, (int *)&(op->client_callid));
+    crm_element_value_int(request, F_STONITH_CALLID, &(op->client_callid));
 
     crm_trace("%s new stonith op: %s - %s of %s for %s",
               (peer
@@ -1352,14 +1369,17 @@ advance_op_topology(remote_fencing_op_t *op, const char *device, xmlNode *msg,
         op->devices = op->devices->next;
     }
 
-    /* If this device was required, it's not anymore */
-    remove_required_device(op, device);
+    /* Handle automatic unfencing if an "on" action was requested */
+    if ((op->phase == st_phase_requested) && safe_str_eq(op->action, "on")) {
+        /* If the device we just executed was required, it's not anymore */
+        remove_required_device(op, device);
 
-    /* If there are no more devices at this topology level,
-     * run through any required devices not already executed
-     */
-    if (op->devices == NULL) {
-        op->devices = op->required_list[op->phase];
+        /* If there are no more devices at this topology level, run through any
+         * remaining devices with automatic unfencing
+         */
+        if (op->devices == NULL) {
+            op->devices = op->automatic_list;
+        }
     }
 
     if ((op->devices == NULL) && (op->phase == st_phase_off)) {
@@ -1430,15 +1450,15 @@ call_remote_stonith(remote_fencing_op_t * op, st_query_result_t * peer)
         if (device) {
             timeout_one = TIMEOUT_MULTIPLY_FACTOR *
                           get_device_timeout(op, peer, device);
-            crm_info("Requesting that %s perform op %s %s with %s for %s (%ds)", peer->host,
-                     op->action, op->target, device, op->client_name, timeout_one);
+            crm_info("Requesting that '%s' perform op '%s %s' with '%s' for %s (%ds)", peer->host,
+                     op->target, op->action, device, op->client_name, timeout_one);
             crm_xml_add(remote_op, F_STONITH_DEVICE, device);
             crm_xml_add(remote_op, F_STONITH_MODE, "slave");
 
         } else {
             timeout_one = TIMEOUT_MULTIPLY_FACTOR * get_peer_timeout(op, peer);
-            crm_info("Requesting that %s perform op %s %s for %s (%ds, %ds)",
-                     peer->host, op->action, op->target, op->client_name, timeout_one, stonith_watchdog_timeout_ms);
+            crm_info("Requesting that '%s' perform op '%s %s' for %s (%ds, %ds)",
+                     peer->host, op->target, op->action, op->client_name, timeout_one, stonith_watchdog_timeout_ms);
             crm_xml_add(remote_op, F_STONITH_MODE, "smart");
 
         }
@@ -1613,8 +1633,6 @@ parse_action_specific(xmlNode *xml, const char *peer, const char *device,
                       const char *action, remote_fencing_op_t *op,
                       enum st_remap_phase phase, device_properties_t *props)
 {
-    int required;
-
     props->custom_action_timeout[phase] = 0;
     crm_element_value_int(xml, F_STONITH_ACTION_TIMEOUT,
                           &props->custom_action_timeout[phase]);
@@ -1630,20 +1648,16 @@ parse_action_specific(xmlNode *xml, const char *peer, const char *device,
                   peer, device, props->delay_max[phase], action);
     }
 
-    required = 0;
-    crm_element_value_int(xml, F_STONITH_DEVICE_REQUIRED, &required);
-    if (required) {
-        /* If the action is marked as required, add the device to the
-         * operation's list of required devices for this phase. We use this
-         * for unfencing when executing a topology. In phase 0 (requested
-         * action) or phase 1 (remapped "off"), required devices get executed
-         * regardless of their topology level; in phase 2 (remapped "on"),
-         * required devices are not attempted, because the cluster will
-         * execute them automatically later.
-         */
-        crm_trace("Peer %s requires device %s to execute for action %s",
-                  peer, device, action);
-        add_required_device(op, phase, device);
+    /* Handle devices with automatic unfencing */
+    if (safe_str_eq(action, "on")) {
+        int required = 0;
+
+        crm_element_value_int(xml, F_STONITH_DEVICE_REQUIRED, &required);
+        if (required) {
+            crm_trace("Peer %s requires device %s to execute for action %s",
+                      peer, device, action);
+            add_required_device(op, device);
+        }
     }
 
     /* If a reboot is remapped to off+on, it's possible that a node is allowed
@@ -1920,8 +1934,8 @@ process_remote_stonith_exec(xmlNode * msg)
     if (is_set(op->call_options, st_opt_topology)) {
         const char *device = crm_element_value(msg, F_STONITH_DEVICE);
 
-        crm_notice("Call to %s for %s on behalf of %s@%s: %s (%d)",
-                   device, op->target, op->client_name, op->originator,
+        crm_notice("Call to %s for '%s %s' on behalf of %s@%s: %s (%d)",
+                   device, op->target, op->action, op->client_name, op->originator,
                    pcmk_strerror(rc), rc);
 
         /* We own the op, and it is complete. broadcast the result to all nodes

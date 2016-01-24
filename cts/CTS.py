@@ -241,7 +241,13 @@ class NodeStatus:
             timeout = timeout - 1
 
         LogFactory().log("%s did not come up within %d tries" % (node, Timeout))
-        answer = raw_input('Continue? [nY]')
+        if self.Env["continue"] == 1:
+            answer = "Y"
+        else:
+            try:
+                answer = raw_input('Continue? [nY]')
+            except EOFError, e:
+                answer = "n"
         if answer and answer == "n":
             raise ValueError("%s did not come up within %d tries" % (node, Timeout))
 
@@ -688,6 +694,7 @@ class ClusterManager(UserDict):
                 self.ns.WaitForAllNodesToComeUp(nodelist, 300)
 
         if not quick:
+            # This is used for "basic sanity checks", so only start one node ...
             if not self.StartaCM(node, verbose=verbose):
                 return 0
             return 1

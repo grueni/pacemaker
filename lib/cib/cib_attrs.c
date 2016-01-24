@@ -43,6 +43,13 @@
 	}					\
     } while(0)
 
+/* could also check for possible truncation */
+#define attr_snprintf(_str, _offset, _limit, ...) do {              \
+    _offset += snprintf(_str + _offset,                             \
+                        (_limit > _offset) ? _limit - _offset : 0,  \
+                        __VA_ARGS__);                               \
+    } while(0)
+
 extern int
 find_nvpair_attr_delegate(cib_t * the_cib, const char *attr, const char *section,
                           const char *node_uuid, const char *attr_set_type, const char *set_name,
@@ -86,10 +93,12 @@ find_nvpair_attr_delegate(cib_t * the_cib, const char *attr, const char *section
     }
 
     xpath_string = calloc(1, xpath_max);
-    offset += snprintf(xpath_string + offset, xpath_max - offset, "%.128s", get_object_path(section));
+    CRM_CHECK(xpath_string != NULL, return -ENOMEM);
+
+    attr_snprintf(xpath_string, offset, xpath_max, "%.128s", get_object_path(section));
 
     if (safe_str_eq(node_type, XML_CIB_TAG_TICKETS)) {
-        offset += snprintf(xpath_string + offset, xpath_max - offset, "//%s", node_type);
+        attr_snprintf(xpath_string, offset, xpath_max, "//%s", node_type);
 
     } else if (node_uuid) {
         const char *node_type = XML_CIB_TAG_NODE;
@@ -98,31 +107,29 @@ find_nvpair_attr_delegate(cib_t * the_cib, const char *attr, const char *section
             node_type = XML_CIB_TAG_STATE;
             set_type = XML_TAG_TRANSIENT_NODEATTRS;
         }
-        offset +=
-            snprintf(xpath_string + offset, xpath_max - offset, "//%s[@id='%s']", node_type,
-                     node_uuid);
+        attr_snprintf(xpath_string, offset, xpath_max, "//%s[@id='%s']", node_type,
+                      node_uuid);
     }
 
     if (set_name) {
-        offset +=
-            snprintf(xpath_string + offset, xpath_max - offset, "//%s[@id='%.128s']", set_type,
-                     set_name);
+        attr_snprintf(xpath_string, offset, xpath_max, "//%s[@id='%.128s']", set_type,
+                      set_name);
     } else {
-        offset += snprintf(xpath_string + offset, xpath_max - offset, "//%s", set_type);
+        attr_snprintf(xpath_string, offset, xpath_max, "//%s", set_type);
     }
 
-    offset += snprintf(xpath_string + offset, xpath_max - offset, "//nvpair[");
+    attr_snprintf(xpath_string, offset, xpath_max, "//nvpair[");
     if (attr_id) {
-        offset += snprintf(xpath_string + offset, xpath_max - offset, "@id='%s'", attr_id);
+        attr_snprintf(xpath_string, offset, xpath_max, "@id='%s'", attr_id);
     }
 
     if (attr_name) {
         if (attr_id) {
-            offset += snprintf(xpath_string + offset, xpath_max - offset, " and ");
+            attr_snprintf(xpath_string, offset, xpath_max, " and ");
         }
-        offset += snprintf(xpath_string + offset, xpath_max - offset, "@name='%.128s'", attr_name);
+        attr_snprintf(xpath_string, offset, xpath_max, "@name='%.128s'", attr_name);
     }
-    offset += snprintf(xpath_string + offset, xpath_max - offset, "]");
+    attr_snprintf(xpath_string, offset, xpath_max, "]");
     CRM_LOG_ASSERT(offset > 0);
 
     rc = cib_internal_op(the_cib, CIB_OP_QUERY, NULL, xpath_string, NULL, &xml_search,
@@ -411,9 +418,15 @@ found_remote_node_xpath(cib_t *the_cib, const char *xpath)
 static int
 get_remote_node_uuid(cib_t * the_cib, const char *uname, char **uuid)
 {
-#define CONTAINER_REMOTE_NODE_XPATH "//" XML_CIB_TAG_NVPAIR "[@name='remote-node'][@value='%s']"
+#define CONTAINER_REMOTE_NODE_XPATH "//" XML_CIB_TAG_NVPAIR \
+    "[@name='" XML_RSC_ATTR_REMOTE_NODE "'][@value='%s']"
+
 #define BAREMETAL_REMOTE_NODE_XPATH "//" XML_CIB_TAG_RESOURCE "[@type='remote'][@provider='pacemaker'][@id='%s']"
-#define ORPHAN_REMOTE_NODE_XPATH "//" XML_CIB_TAG_STATUS "//" XML_CIB_TAG_STATE "[@id='%s'][@remote_node='true']"
+
+#define ORPHAN_REMOTE_NODE_XPATH \
+    "//" XML_CIB_TAG_STATUS "//" XML_CIB_TAG_STATE \
+    "[@" XML_ATTR_UUID "='%s'][@" XML_NODE_IS_REMOTE "='true']"
+
     int len = 128 + strlen(uname);
     int rc = pcmk_ok;
     char *xpath_string = calloc(1, len);

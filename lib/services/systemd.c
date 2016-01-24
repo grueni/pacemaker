@@ -78,6 +78,14 @@ systemd_init(void)
     static int need_init = 1;
     /* http://dbus.freedesktop.org/doc/api/html/group__DBusConnection.html */
 
+    if (systemd_proxy
+        && dbus_connection_get_is_connected(systemd_proxy) == FALSE) {
+        crm_warn("Connection to System DBus is closed. Reconnecting...");
+        pcmk_dbus_disconnect(systemd_proxy);
+        systemd_proxy = NULL;
+        need_init = 1;
+    }
+
     if (need_init) {
         need_init = 0;
         systemd_proxy = pcmk_dbus_connect();
@@ -155,14 +163,40 @@ systemd_daemon_reload(int timeout)
     return TRUE;
 }
 
+static bool
+systemd_mask_error(svc_action_t *op, const char *error)
+{
+    crm_trace("Could not issue %s for %s: %s", op->action, op->rsc, error);
+    if(strstr(error, "org.freedesktop.systemd1.InvalidName")
+       || strstr(error, "org.freedesktop.systemd1.LoadFailed")
+       || strstr(error, "org.freedesktop.systemd1.NoSuchUnit")) {
+
+        if (safe_str_eq(op->action, "stop")) {
+            crm_trace("Masking %s failure for %s: unknown services are stopped", op->action, op->rsc);
+            op->rc = PCMK_OCF_OK;
+            return TRUE;
+
+        } else {
+            crm_trace("Mapping %s failure for %s: unknown services are not installed", op->action, op->rsc);
+            op->rc = PCMK_OCF_NOT_INSTALLED;
+            op->status = PCMK_LRM_OP_NOT_INSTALLED;
+            return FALSE;
+        }
+    }
+
+    return FALSE;
+}
+
 static const char *
 systemd_loadunit_result(DBusMessage *reply, svc_action_t * op)
 {
     const char *path = NULL;
+    DBusError error;
 
-    if(pcmk_dbus_find_error("LoadUnit", (void*)&path, reply, NULL)) {
-        if(op) {
-            crm_warn("No unit found for %s", op->rsc);
+    if(pcmk_dbus_find_error("LoadUnit", (void*)&path, reply, &error)) {
+        if(op && !systemd_mask_error(op, error.name)) {
+            crm_err("Could not find unit %s for %s: LoadUnit error '%s'",
+                    op->agent, op->id, error.name);
         }
 
     } else if(pcmk_dbus_type_check(reply, NULL, DBUS_TYPE_OBJECT_PATH, __FUNCTION__, __LINE__)) {
@@ -172,7 +206,12 @@ systemd_loadunit_result(DBusMessage *reply, svc_action_t * op)
     }
 
     if(op) {
-        systemd_unit_exec_with_unit(op, path);
+        if (path) {
+            systemd_unit_exec_with_unit(op, path);
+
+        } else if (op->synchronous == FALSE) {
+            operation_finalize(op);
+        }
     }
 
     return path;
@@ -381,11 +420,10 @@ systemd_unit_metadata(const char *name, int timeout)
                            "  <parameters>\n"
                            "  </parameters>\n"
                            "  <actions>\n"
-                           "    <action name=\"start\"   timeout=\"15\" />\n"
-                           "    <action name=\"stop\"    timeout=\"15\" />\n"
-                           "    <action name=\"status\"  timeout=\"15\" />\n"
-                           "    <action name=\"restart\"  timeout=\"15\" />\n"
-                           "    <action name=\"monitor\" timeout=\"15\" interval=\"15\" start-delay=\"15\" />\n"
+                           "    <action name=\"start\"   timeout=\"100\" />\n"
+                           "    <action name=\"stop\"    timeout=\"100\" />\n"
+                           "    <action name=\"status\"  timeout=\"100\" />\n"
+                           "    <action name=\"monitor\" timeout=\"100\" interval=\"60\"/>\n"
                            "    <action name=\"meta-data\"  timeout=\"5\" />\n"
                            "  </actions>\n"
                            "  <special tag=\"systemd\">\n"
@@ -393,29 +431,6 @@ systemd_unit_metadata(const char *name, int timeout)
     free(desc);
     free(path);
     return meta;
-}
-
-static bool
-systemd_mask_error(svc_action_t *op, const char *error)
-{
-    crm_trace("Could not issue %s for %s: %s", op->action, op->rsc, error);
-    if(strstr(error, "org.freedesktop.systemd1.InvalidName")
-       || strstr(error, "org.freedesktop.systemd1.LoadFailed")
-       || strstr(error, "org.freedesktop.systemd1.NoSuchUnit")) {
-
-        if (safe_str_eq(op->action, "stop")) {
-            crm_trace("Masking %s failure for %s: unknown services are stopped", op->action, op->rsc);
-            op->rc = PCMK_OCF_OK;
-
-        } else {
-            crm_trace("Mapping %s failure for %s: unknown services are not installed", op->action, op->rsc);
-            op->rc = PCMK_OCF_NOT_INSTALLED;
-            op->status = PCMK_LRM_OP_NOT_INSTALLED;
-        }
-        return TRUE;
-    }
-
-    return FALSE;
 }
 
 static void
@@ -427,7 +442,7 @@ systemd_exec_result(DBusMessage *reply, svc_action_t *op)
 
         /* ignore "already started" or "not running" errors */
         if (!systemd_mask_error(op, error.name)) {
-            crm_err("Could not issue %s for %s: %s (%s)", op->action, op->rsc, error.message);
+            crm_err("Could not issue %s for %s: %s", op->action, op->rsc, error.message);
         }
 
     } else {
@@ -507,12 +522,7 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
     DBusMessage *msg = NULL;
     DBusMessage *reply = NULL;
 
-    if (unit == NULL) {
-        crm_debug("Could not obtain unit named '%s'", op->agent);
-        op->rc = PCMK_OCF_NOT_INSTALLED;
-        op->status = PCMK_LRM_OP_NOT_INSTALLED;
-        goto cleanup;
-    }
+    CRM_ASSERT(unit);
 
     if (safe_str_eq(op->action, "monitor") || safe_str_eq(method, "status")) {
         DBusPendingCall *pending = NULL;
@@ -529,9 +539,10 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
         } else if (pending) {
             services_set_op_pending(op, pending);
             return TRUE;
-        }
 
-        return FALSE;
+        } else {
+            return operation_finalize(op);
+        }
 
     } else if (g_strcmp0(method, "start") == 0) {
         FILE *file_strm = NULL;
@@ -611,8 +622,10 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
         if(pending) {
             services_set_op_pending(op, pending);
             return TRUE;
+
+        } else {
+            return operation_finalize(op);
         }
-        return FALSE;
 
     } else {
         DBusError error;
@@ -629,8 +642,7 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
 
   cleanup:
     if (op->synchronous == FALSE) {
-        operation_finalize(op);
-        return TRUE;
+        return operation_finalize(op);
     }
 
     return op->rc == PCMK_OCF_OK;
@@ -648,6 +660,8 @@ systemd_timeout_callback(gpointer p)
     return FALSE;
 }
 
+/* For an asynchronous 'op', returns FALSE if 'op' should be free'd by the caller */
+/* For a synchronous 'op', returns FALSE if 'op' fails */
 gboolean
 systemd_unit_exec(svc_action_t * op)
 {
@@ -665,7 +679,7 @@ systemd_unit_exec(svc_action_t * op)
         op->rc = PCMK_OCF_OK;
 
         if (op->synchronous == FALSE) {
-            operation_finalize(op);
+            return operation_finalize(op);
         }
         return TRUE;
     }
@@ -674,8 +688,14 @@ systemd_unit_exec(svc_action_t * op)
     free(unit);
 
     if (op->synchronous == FALSE) {
-        op->opaque->timerid = g_timeout_add(op->timeout + 5000, systemd_timeout_callback, op);
-        return TRUE;
+        if (op->opaque->pending) {
+            op->opaque->timerid = g_timeout_add(op->timeout + 5000, systemd_timeout_callback, op);
+            services_add_inflight_op(op);
+            return TRUE;
+
+        } else {
+            return operation_finalize(op);
+        }
     }
 
     return op->rc == PCMK_OCF_OK;

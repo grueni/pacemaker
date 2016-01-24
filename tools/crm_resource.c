@@ -247,6 +247,7 @@ main(int argc, char **argv)
     const char *prop_set = NULL;
     const char *rsc_long_cmd = NULL;
     const char *longname = NULL;
+    GHashTable *override_params = NULL;
 
     char *xml_file = NULL;
     crm_ipc_t *crmd_channel = NULL;
@@ -303,6 +304,7 @@ main(int argc, char **argv)
                     || safe_str_eq("force-check",   longname)) {
                     rsc_cmd = flag;
                     rsc_long_cmd = longname;
+                    crm_log_args(argc, argv);
 
                 } else if (safe_str_eq("list-ocf-providers", longname)
                            || safe_str_eq("list-ocf-alternatives", longname)
@@ -432,6 +434,7 @@ main(int argc, char **argv)
                 break;
             case 'f':
                 do_force = TRUE;
+                crm_log_args(argc, argv);
                 break;
             case 'i':
                 prop_id = optarg;
@@ -451,41 +454,55 @@ main(int argc, char **argv)
             case 'T':
                 timeout_ms = crm_get_msec(optarg);
                 break;
+
             case 'C':
             case 'R':
             case 'P':
-                rsc_cmd = 'C';
+                crm_log_args(argc, argv);
                 require_resource = FALSE;
                 require_crmd = TRUE;
+                rsc_cmd = 'C';
                 break;
+
             case 'F':
-                rsc_cmd = flag;
+                crm_log_args(argc, argv);
                 require_crmd = TRUE;
+                rsc_cmd = flag;
                 break;
+
+            case 'U':
+            case 'B':
+            case 'M':
+            case 'D':
+                crm_log_args(argc, argv);
+                rsc_cmd = flag;
+                break;
+
             case 'L':
             case 'c':
             case 'l':
             case 'q':
             case 'w':
-            case 'D':
             case 'W':
-            case 'M':
-            case 'U':
-            case 'B':
             case 'O':
             case 'o':
             case 'A':
             case 'a':
                 rsc_cmd = flag;
                 break;
+
             case 'j':
                 print_pending = TRUE;
                 break;
             case 'p':
-            case 'g':
             case 'd':
             case 'S':
+                crm_log_args(argc, argv);
+                prop_name = optarg;
+                rsc_cmd = flag;
+                break;
             case 'G':
+            case 'g':
                 prop_name = optarg;
                 rsc_cmd = flag;
                 break;
@@ -503,11 +520,35 @@ main(int argc, char **argv)
         }
     }
 
-    if (optind < argc && argv[optind] != NULL) {
+    if (optind < argc
+        && argv[optind] != NULL
+        && rsc_cmd == 0
+        && rsc_long_cmd) {
+
+        override_params = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);
+        while (optind < argc && argv[optind] != NULL) {
+            char *name = calloc(1, strlen(argv[optind]));
+            char *value = calloc(1, strlen(argv[optind]));
+            int rc = sscanf(argv[optind], "%[^=]=%s", name, value);
+
+            if(rc == 2) {
+                g_hash_table_replace(override_params, name, value);
+
+            } else {
+                CMD_ERR("Error parsing '%s' as a name=value pair for --%s", argv[optind], rsc_long_cmd);
+                free(value);
+                free(name);
+                argerr++;
+            }
+            optind++;
+        }
+
+    } else if (optind < argc && argv[optind] != NULL && rsc_cmd == 0) {
         CMD_ERR("non-option ARGV-elements: ");
         while (optind < argc && argv[optind] != NULL) {
-            CMD_ERR("%s ", argv[optind++]);
-            ++argerr;
+            CMD_ERR("[%d of %d] %s ", optind, argc, argv[optind]);
+            optind++;
+            argerr++;
         }
     }
 
@@ -516,7 +557,8 @@ main(int argc, char **argv)
     }
 
     if (argerr) {
-        crm_help('?', EX_USAGE);
+        CMD_ERR("Invalid option(s) supplied, use --help for valid usage");
+        return crm_exit(EX_USAGE);
     }
 
     our_pid = calloc(1, 11);
@@ -631,7 +673,7 @@ main(int argc, char **argv)
         rc = wait_till_stable(timeout_ms, cib_conn);
 
     } else if (rsc_cmd == 0 && rsc_long_cmd) { /* force-(stop|start|check) */
-        rc = cli_resource_execute(rsc_id, rsc_long_cmd, cib_conn, &data_set);
+        rc = cli_resource_execute(rsc_id, rsc_long_cmd, override_params, cib_conn, &data_set);
 
     } else if (rsc_cmd == 'A' || rsc_cmd == 'a') {
         GListPtr lpc = NULL;
@@ -853,6 +895,7 @@ main(int argc, char **argv)
             rc = -ENXIO;
             goto bail;
         }
+
         rc = cli_resource_print_attribute(rsc_id, prop_name, &data_set);
 
     } else if (rsc_cmd == 'p') {
@@ -883,12 +926,21 @@ main(int argc, char **argv)
     } else if (rsc_cmd == 'C' && rsc_id) {
         resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);
 
-        crm_debug("Re-checking the state of %s on %s", rsc_id, host_uname);
+        if(do_force == FALSE) {
+            rsc = uber_parent(rsc);
+        }
+
+        crm_debug("Re-checking the state of %s for %s on %s", rsc->id, rsc_id, host_uname);
         if(rsc) {
             crmd_replies_needed = 0;
             rc = cli_resource_delete(cib_conn, crmd_channel, host_uname, rsc, &data_set);
         } else {
             rc = -ENODEV;
+        }
+
+        if(rc == pcmk_ok && BE_QUIET == FALSE) {
+            /* Now check XML_RSC_ATTR_TARGET_ROLE and XML_RSC_ATTR_MANAGED */
+            cli_resource_check(cib_conn, rsc);
         }
 
         if (rc == pcmk_ok) {

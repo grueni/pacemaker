@@ -51,9 +51,6 @@ LAST_RC		?= $(shell test -e /Volumes || git tag -l | grep Pacemaker | sort -Vr |
 LAST_RELEASE	?= $(shell test -e /Volumes || git tag -l | grep Pacemaker | sort -Vr | grep -v rc | head -n 1)
 NEXT_RELEASE	?= $(shell echo $(LAST_RELEASE) | awk -F. '/[0-9]+\./{$$3+=1;OFS=".";print $$1,$$2,$$3}')
 
-beekhof:
-	echo $(LAST_RELEASE) $(NEXT_RELEASE)
-
 BUILD_COUNTER	?= build.counter
 LAST_COUNT      = $(shell test ! -e $(BUILD_COUNTER) && echo 0; test -e $(BUILD_COUNTER) && cat $(BUILD_COUNTER))
 COUNT           = $(shell expr 1 + $(LAST_COUNT))
@@ -61,7 +58,7 @@ COUNT           = $(shell expr 1 + $(LAST_COUNT))
 SPECVERSION	?= $(COUNT)
 
 init:
-	./autogen.sh
+	./autogen.sh init
 
 export:
 	rm -f $(PACKAGE)-dirty.tar.* $(PACKAGE)-tip.tar.* $(PACKAGE)-HEAD.tar.*
@@ -289,8 +286,8 @@ www:	all global doxygen
 
 summary:
 	@printf "\n* `date +"%a %b %d %Y"` `git config user.name` <`git config user.email`> $(NEXT_RELEASE)-1"
-	@printf "\n- Update source tarball to revision: `git id`"
-	@printf "\n- Changesets: `git log --pretty=format:'%h' $(LAST_RELEASE)..HEAD | wc -l`"
+	@printf "\n- Update source tarball to revision: `git log --pretty=format:%h -n 1`"
+	@printf "\n- Changesets: `git log --pretty=oneline $(LAST_RELEASE)..HEAD | wc -l`"
 	@printf "\n- Diff:      "
 	@git diff -r $(LAST_RELEASE)..HEAD --stat include lib mcp pengine/*.c pengine/*.h  cib crmd fencing lrmd tools xml | tail -n 1
 

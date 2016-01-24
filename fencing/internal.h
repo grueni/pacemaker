@@ -26,12 +26,13 @@ typedef struct stonith_device_s {
 
     /*! list of actions that must execute on the target node. Used for unfencing */
     char *on_target_actions;
-    char *required_actions;
     GListPtr targets;
     time_t targets_age;
     gboolean has_attr_map;
     /* should nodeid parameter for victim be included in agent arguments */
     gboolean include_nodeid;
+    /* whether the cluster should automatically unfence nodes with the device */
+    gboolean automatic_unfencing;
     guint priority;
     guint active_pid;
 
@@ -59,7 +60,8 @@ typedef struct stonith_device_s {
 enum st_remap_phase {
     st_phase_requested = 0,
     st_phase_off = 1,
-    st_phase_on = 2
+    st_phase_on = 2,
+    st_phase_max = 3
 };
 
 typedef struct remote_fencing_op_s {
@@ -128,15 +130,9 @@ typedef struct remote_fencing_op_s {
     /*! The current operation phase being executed */
     enum st_remap_phase phase;
 
-    /* For phase 0 or 1 (requested action or a remapped "off"), required devices
-     * will be executed regardless of what topology level is being executed
-     * currently. For phase 1 (remapped "on"), required devices will not be
-     * attempted, because the cluster will execute them automatically when the
-     * node next joins the cluster.
-     */
-    /*! Lists of devices marked as required for each phase */
-    GListPtr required_list[3];
-    /*! The device list of all the devices at the current executing topology level. */
+    /*! Devices with automatic unfencing (always run if "on" requested, never if remapped) */
+    GListPtr automatic_list;
+    /*! List of all devices at the currently executing topology level */
     GListPtr devices_list;
     /*! Current entry in the topology device list */
     GListPtr devices;
@@ -162,51 +158,63 @@ typedef struct remote_fencing_op_s {
  * Topology levels start from 1, so levels[0] is unused and always NULL.
  */
 typedef struct stonith_topology_s {
-    char *node;
+    int kind;
+
+    /*! Node name regex or attribute name=value for which topology applies */
+    char *target;
+    char *target_value;
+    char *target_pattern;
+    char *target_attribute;
+
+    /*! Names of fencing devices at each topology level */
     GListPtr levels[ST_LEVEL_MAX];
 
 } stonith_topology_t;
 
-extern long long get_stonith_flag(const char *name);
+long long get_stonith_flag(const char *name);
 
-extern void stonith_command(crm_client_t * client, uint32_t id, uint32_t flags,
+void stonith_command(crm_client_t * client, uint32_t id, uint32_t flags,
                             xmlNode * op_request, const char *remote_peer);
 
-extern int stonith_device_register(xmlNode * msg, const char **desc, gboolean from_cib);
+int stonith_device_register(xmlNode * msg, const char **desc, gboolean from_cib);
 
-extern int stonith_device_remove(const char *id, gboolean from_cib);
+int stonith_device_remove(const char *id, gboolean from_cib);
 
-extern int stonith_level_register(xmlNode * msg, char **desc);
+char *stonith_level_key(xmlNode * msg, int mode);
+int stonith_level_kind(xmlNode * msg);
+int stonith_level_register(xmlNode * msg, char **desc);
 
-extern int stonith_level_remove(xmlNode * msg, char **desc);
+int stonith_level_remove(xmlNode * msg, char **desc);
 
-extern stonith_topology_t *find_topology_for_host(const char *host);
+stonith_topology_t *find_topology_for_host(const char *host);
 
-extern void do_local_reply(xmlNode * notify_src, const char *client_id, gboolean sync_reply,
+void do_local_reply(xmlNode * notify_src, const char *client_id, gboolean sync_reply,
                            gboolean from_peer);
 
-extern xmlNode *stonith_construct_reply(xmlNode * request, const char *output, xmlNode * data,
+xmlNode *stonith_construct_reply(xmlNode * request, const char *output, xmlNode * data,
                                         int rc);
 
 void
  do_stonith_async_timeout_update(const char *client, const char *call_id, int timeout);
 
-extern void do_stonith_notify(int options, const char *type, int result, xmlNode * data);
+void do_stonith_notify(int options, const char *type, int result, xmlNode * data);
+void do_stonith_notify_device(int options, const char *op, int rc, const char *desc);
+void do_stonith_notify_level(int options, const char *op, int rc, const char *desc);
 
-extern remote_fencing_op_t *initiate_remote_stonith_op(crm_client_t * client, xmlNode * request,
+remote_fencing_op_t *initiate_remote_stonith_op(crm_client_t * client, xmlNode * request,
                                                        gboolean manual_ack);
 
-extern int process_remote_stonith_exec(xmlNode * msg);
+int process_remote_stonith_exec(xmlNode * msg);
 
-extern int process_remote_stonith_query(xmlNode * msg);
+int process_remote_stonith_query(xmlNode * msg);
 
-extern void *create_remote_stonith_op(const char *client, xmlNode * request, gboolean peer);
+void *create_remote_stonith_op(const char *client, xmlNode * request, gboolean peer);
 
-extern int stonith_fence_history(xmlNode * msg, xmlNode ** output);
+int stonith_fence_history(xmlNode * msg, xmlNode ** output);
 
-extern void free_device(gpointer data);
+void free_device(gpointer data);
 
-extern void free_topology_entry(gpointer data);
+void free_topology_entry(gpointer data);
 
 bool fencing_peer_active(crm_node_t *peer);
 
@@ -215,6 +223,8 @@ int stonith_manual_ack(xmlNode * msg, remote_fencing_op_t * op);
 void unfence_cb(GPid pid, int rc, const char *output, gpointer user_data);
 
 gboolean string_in_list(GListPtr list, const char *item);
+
+gboolean node_has_attr(const char *node, const char *name, const char *value);
 
 void
 schedule_internal_command(const char *origin,

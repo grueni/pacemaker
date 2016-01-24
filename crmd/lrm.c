@@ -831,27 +831,21 @@ build_active_RAs(lrm_state_t * lrm_state, xmlNode * rsc_list)
     return FALSE;
 }
 
-xmlNode *
-do_lrm_query_internal(lrm_state_t * lrm_state, gboolean is_replace)
+static xmlNode *
+do_lrm_query_internal(lrm_state_t *lrm_state, int update_flags)
 {
     xmlNode *xml_state = NULL;
     xmlNode *xml_data = NULL;
     xmlNode *rsc_list = NULL;
     const char *uuid = NULL;
 
-    if (safe_str_eq(lrm_state->node_name, fsa_our_uname)) {
+    if (lrm_state_is_local(lrm_state)) {
         crm_node_t *peer = crm_get_peer(0, lrm_state->node_name);
-        xml_state = do_update_node_cib(peer, node_update_cluster|node_update_peer, NULL, __FUNCTION__);
-        /* The next two lines shouldn't be necessary for newer DCs */
-        crm_xml_add(xml_state, XML_NODE_JOIN_STATE, CRMD_JOINSTATE_MEMBER);
-        crm_xml_add(xml_state, XML_NODE_EXPECTED, CRMD_JOINSTATE_MEMBER);
+        xml_state = do_update_node_cib(peer, update_flags, NULL, __FUNCTION__);
         uuid = fsa_our_uuid;
 
     } else {
-        xml_state = create_xml_node(NULL, XML_CIB_TAG_STATE);
-        crm_xml_add(xml_state, XML_NODE_IS_REMOTE, "true");
-        crm_xml_add(xml_state, XML_ATTR_ID, lrm_state->node_name);
-        crm_xml_add(xml_state, XML_ATTR_UNAME, lrm_state->node_name);
+        xml_state = simple_remote_node_status(lrm_state->node_name, NULL, __FUNCTION__);
         uuid = lrm_state->node_name;
     }
 
@@ -871,12 +865,23 @@ xmlNode *
 do_lrm_query(gboolean is_replace, const char *node_name)
 {
     lrm_state_t *lrm_state = lrm_state_find(node_name);
+    xmlNode *xml_state;
 
     if (!lrm_state) {
         crm_err("Could not query lrm state for lrmd node %s", node_name);
         return NULL;
     }
-    return do_lrm_query_internal(lrm_state, is_replace);
+    xml_state = do_lrm_query_internal(lrm_state,
+                                      node_update_cluster|node_update_peer);
+
+    /* In case this function is called to generate a join confirmation to
+     * send to the DC, force the current and expected join state to member.
+     * This isn't necessary for newer DCs but is backward compatible.
+     */
+    crm_xml_add(xml_state, XML_NODE_JOIN_STATE, CRMD_JOINSTATE_MEMBER);
+    crm_xml_add(xml_state, XML_NODE_EXPECTED, CRMD_JOINSTATE_MEMBER);
+
+    return xml_state;
 }
 
 static void
@@ -1541,7 +1546,7 @@ do_lrm_invoke(long long action,
 
     if (safe_str_eq(crm_op, CRM_OP_LRM_REFRESH)) {
         int rc = pcmk_ok;
-        xmlNode *fragment = do_lrm_query_internal(lrm_state, TRUE);
+        xmlNode *fragment = do_lrm_query_internal(lrm_state, node_update_all);
 
         fsa_cib_update(XML_CIB_TAG_STATUS, fragment, cib_quorum_override, rc, user_name);
         crm_info("Forced a local LRM refresh: call=%d", rc);
@@ -1562,7 +1567,7 @@ do_lrm_invoke(long long action,
         free_xml(fragment);
 
     } else if (safe_str_eq(crm_op, CRM_OP_LRM_QUERY)) {
-        xmlNode *data = do_lrm_query_internal(lrm_state, FALSE);
+        xmlNode *data = do_lrm_query_internal(lrm_state, node_update_all);
         xmlNode *reply = create_reply(input->msg, data);
 
         if (relay_message(reply, TRUE) == FALSE) {
@@ -1648,7 +1653,7 @@ do_lrm_invoke(long long action,
             gboolean in_progress = FALSE;
 
             CRM_CHECK(params != NULL, crm_log_xml_warn(input->xml, "Bad command");
-                      return);
+                      lrmd_free_rsc_info(rsc); return);
 
             meta_key = crm_meta_name(XML_LRM_ATTR_INTERVAL);
             op_interval = crm_element_value(params, meta_key);
@@ -1663,9 +1668,9 @@ do_lrm_invoke(long long action,
             free(meta_key);
 
             CRM_CHECK(op_task != NULL, crm_log_xml_warn(input->xml, "Bad command");
-                      return);
+                      lrmd_free_rsc_info(rsc); return);
             CRM_CHECK(op_interval != NULL, crm_log_xml_warn(input->xml, "Bad command");
-                      return);
+                      lrmd_free_rsc_info(rsc); return);
 
             op_key = generate_op_key(rsc->id, op_task, crm_parse_int(op_interval, "0"));
 
@@ -1702,7 +1707,7 @@ do_lrm_invoke(long long action,
 
             free(op_key);
 
-        } else if (rsc != NULL && safe_str_eq(operation, CRMD_ACTION_DELETE)) {
+        } else if (safe_str_eq(operation, CRMD_ACTION_DELETE)) {
             gboolean unregister = TRUE;
 
 #if ENABLE_ACL
@@ -1725,6 +1730,7 @@ do_lrm_invoke(long long action,
                 }
                 send_direct_ack(from_host, from_sys, NULL, op, rsc->id);
                 lrmd_free_event(op);
+                lrmd_free_rsc_info(rsc);
                 return;
             }
 #endif
@@ -1734,7 +1740,7 @@ do_lrm_invoke(long long action,
 
             delete_resource(lrm_state, rsc->id, rsc, NULL, from_sys, from_host, user_name, input, unregister);
 
-        } else if (rsc != NULL) {
+        } else {
             do_lrm_rsc_op(lrm_state, rsc, operation, input->xml, input->msg);
         }
 
@@ -2122,6 +2128,18 @@ cib_rsc_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *use
     }
 }
 
+/*
+ * \internal
+ * \brief Initialize status section for a newly started pacemaker_remote node
+ *
+ * Clear the XML_NODE_IS_FENCED flag in the CIB status section for a remote node
+ * or guest node (intended to be called when the node starts). If the node ever
+ * needs to be fenced, this flag will allow various actions to determine whether
+ * the fencing has happened yet.
+ *
+ * \param[in] node_name  Name of new remote node
+ * \param[in] call_opt   Call options to pass to CIB update method
+ */
 static void
 remote_node_init_status(const char *node_name, int call_opt)
 {
@@ -2132,9 +2150,22 @@ remote_node_init_status(const char *node_name, int call_opt)
     state = simple_remote_node_status(node_name, update,__FUNCTION__);
     crm_xml_add(state, XML_NODE_IS_FENCED, "0");
 
+    /* TODO: Consider forcing a synchronous or asynchronous call here.
+     * In practice, it's currently always async, the benefit of which is
+     * quicker startup. The argument for sync is to close the tiny window
+     * in which the remote connection could drop immediately after connecting,
+     * and fencing might not happen because it appears to already have been.
+     */
     fsa_cib_update(XML_CIB_TAG_STATUS, update, call_opt, call_id, NULL);
-    if (call_id != pcmk_ok) {
-        crm_debug("Failed to init status section for remote-node %s", node_name);
+    if (call_id < 0) {
+        /* TODO: Return an error code on failure, and handle it somehow.
+         * If this fails, later actions could mistakenly think the node has
+         * already been fenced, thus preventing actual fencing, or allowing
+         * recurring monitor failures to be cleared too soon.
+         */
+        crm_perror(LOG_WARNING,
+                   "Initializing status for pacemaker_remote node %s in CIB",
+                   node_name);
     }
     free_xml(update);
 }
@@ -2163,15 +2194,10 @@ do_update_resource(const char *node_name, lrmd_rsc_info_t * rsc, lrmd_event_data
 */
     int rc = pcmk_ok;
     xmlNode *update, *iter = NULL;
-    int call_opt = cib_quorum_override;
+    int call_opt = crmd_cib_smart_opt();
     const char *uuid = NULL;
 
     CRM_CHECK(op != NULL, return 0);
-
-    if (fsa_state == S_ELECTION || fsa_state == S_PENDING) {
-        crm_info("Sending update to local CIB in state: %s", fsa_state2string(fsa_state));
-        call_opt |= cib_scope_local;
-    }
 
     iter = create_xml_node(iter, XML_CIB_TAG_STATUS);
     update = iter;
@@ -2228,11 +2254,11 @@ do_update_resource(const char *node_name, lrmd_rsc_info_t * rsc, lrmd_event_data
             const char *remote_node = g_hash_table_lookup(op->params, CRM_META"_remote_node");
 
             if (remote_node) {
-                /* A container for a remote-node has started, initalize remote-node's status */
+                /* A container for a remote-node has started, initialize remote-node's status */
                 crm_info("Initalizing lrm status for container remote-node %s. Container successfully started.", remote_node);
                 remote_node_clear_status(remote_node, call_opt);
             } else if (container == FALSE && safe_str_eq(rsc->type, "remote") && safe_str_eq(rsc->provider, "pacemaker")) {
-                /* baremetal remote node connection resource has started, initalize remote-node's status */
+                /* baremetal remote node connection resource has started, initialize remote-node's status */
                 crm_info("Initializing lrm status for baremetal remote-node %s", rsc->id);
                 remote_node_clear_status(rsc->id, call_opt);
             }
@@ -2414,6 +2440,8 @@ process_lrm_event(lrm_state_t * lrm_state, lrmd_event_data_t * op, struct recurr
         }
         free(prefix);
     }
+
+    crmd_notify_resource_op(lrm_state->node_name, op);
 
     if (op->rsc_deleted) {
         crm_info("Deletion of resource '%s' complete after %s", op->rsc_id, op_key);

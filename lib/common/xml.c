@@ -587,6 +587,7 @@ pcmkRegisterNode(xmlNodePtr node)
             break;
         case XML_TEXT_NODE:
         case XML_DTD_NODE:
+        case XML_CDATA_SECTION_NODE:
             break;
         default:
             /* Ignore */
@@ -1945,6 +1946,46 @@ __add_xml_object(xmlNode * parent, xmlNode * target, xmlNode * patch)
     }
 }
 
+/*
+ * \internal
+ * \brief Find additions or removals in a patch set
+ *
+ * \param[in]     patchset   XML of patch
+ * \param[in]     format     Patch version
+ * \param[in]     added      TRUE if looking for additions, FALSE if removals
+ * \param[in/out] patch_node Will be set to node if found
+ *
+ * \return TRUE if format is valid, FALSE if invalid
+ */
+static bool
+find_patch_xml_node(xmlNode *patchset, int format, bool added,
+                    xmlNode **patch_node)
+{
+    xmlNode *cib_node;
+    const char *label;
+
+    switch(format) {
+        case 1:
+            label = added? "diff-added" : "diff-removed";
+            *patch_node = find_xml_node(patchset, label, FALSE);
+            cib_node = find_xml_node(*patch_node, "cib", FALSE);
+            if (cib_node != NULL) {
+                *patch_node = cib_node;
+            }
+            break;
+        case 2:
+            label = added? "target" : "source";
+            *patch_node = find_xml_node(patchset, "version", FALSE);
+            *patch_node = find_xml_node(*patch_node, label, FALSE);
+            break;
+        default:
+            crm_warn("Unknown patch format: %d", format);
+            *patch_node = NULL;
+            return FALSE;
+    }
+    return TRUE;
+}
+
 bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3])
 {
     int lpc = 0;
@@ -1959,24 +2000,11 @@ bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3])
 
 
     crm_element_value_int(patchset, "format", &format);
-    switch(format) {
-        case 1:
-            tmp = find_xml_node(patchset, "diff-removed", FALSE);
-            tmp = find_xml_node(tmp, "cib", FALSE);
-            if(tmp == NULL) {
-                /* Revert to the diff-removed line */
-                tmp = find_xml_node(patchset, "diff-removed", FALSE);
-            }
-            break;
-        case 2:
-            tmp = find_xml_node(patchset, "version", FALSE);
-            tmp = find_xml_node(tmp, "source", FALSE);
-            break;
-        default:
-            crm_warn("Unknown patch format: %d", format);
-            return -EINVAL;
-    }
 
+    /* Process removals */
+    if (!find_patch_xml_node(patchset, format, FALSE, &tmp)) {
+        return -EINVAL;
+    }
     if (tmp) {
         for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
             crm_element_value_int(tmp, vfields[lpc], &(del[lpc]));
@@ -1984,24 +2012,10 @@ bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3])
         }
     }
 
-    switch(format) {
-        case 1:
-            tmp = find_xml_node(patchset, "diff-added", FALSE);
-            tmp = find_xml_node(tmp, "cib", FALSE);
-            if(tmp == NULL) {
-                /* Revert to the diff-added line */
-                tmp = find_xml_node(patchset, "diff-added", FALSE);
-            }
-            break;
-        case 2:
-            tmp = find_xml_node(patchset, "version", FALSE);
-            tmp = find_xml_node(tmp, "target", FALSE);
-            break;
-        default:
-            crm_warn("Unknown patch format: %d", format);
-            return -EINVAL;
+    /* Process additions */
+    if (!find_patch_xml_node(patchset, format, TRUE, &tmp)) {
+        return -EINVAL;
     }
-
     if (tmp) {
         for(lpc = 0; lpc < DIMOF(vfields); lpc++) {
             crm_element_value_int(tmp, vfields[lpc], &(add[lpc]));
@@ -3080,7 +3094,7 @@ decompress_file(const char *filename)
     buffer[length] = '\0';
 
     if (rc != BZ_STREAM_END) {
-        crm_err("Couldnt read compressed xml from file");
+        crm_err("Couldn't read compressed xml from file");
         free(buffer);
         buffer = NULL;
     }
@@ -3687,11 +3701,10 @@ log_data_element(int log_level, const char *file, const char *function, int line
         for (a_child = __xml_first_child(data); a_child != NULL; a_child = __xml_next(a_child)) {
             log_data_element(log_level, file, function, line, prefix, a_child, depth + 1, options);
         }
-        return;
+    } else {
+        __xml_log_element(log_level, file, function, line, prefix, data, depth,
+                          options|xml_log_option_open|xml_log_option_close|xml_log_option_children);
     }
-
-    __xml_log_element(log_level, file, function, line,
-                      prefix, data, depth, options|xml_log_option_open|xml_log_option_close|xml_log_option_children);
     free(prefix_m);
 }
 
@@ -3773,8 +3786,7 @@ dump_xml_element(xmlNode * data, int options, char **buffer, int *offset, int *m
 
     if (data->children) {
         xmlNode *xChild = NULL;
-
-        for (xChild = __xml_first_child(data); xChild != NULL; xChild = __xml_next(xChild)) {
+        for(xChild = data->children; xChild != NULL; xChild = xChild->next) {
             crm_xml_dump(xChild, options, buffer, offset, max, depth + 1);
         }
 
@@ -3786,6 +3798,33 @@ dump_xml_element(xmlNode * data, int options, char **buffer, int *offset, int *m
         }
     }
 }
+
+static void
+dump_xml_text(xmlNode * data, int options, char **buffer, int *offset, int *max, int depth)
+{
+    CRM_ASSERT(max != NULL);
+    CRM_ASSERT(offset != NULL);
+    CRM_ASSERT(buffer != NULL);
+
+    if (data == NULL) {
+        crm_trace("Nothing to dump");
+        return;
+    }
+
+    if (*buffer == NULL) {
+        *offset = 0;
+        *max = 0;
+    }
+
+    insert_prefix(options, buffer, offset, max, depth);
+
+    buffer_print(*buffer, *max, *offset, "%s", data->content);
+
+    if (options & xml_log_option_formatted) {
+        buffer_print(*buffer, *max, *offset, "\n");
+    }
+}
+
 
 static void
 dump_xml_comment(xmlNode * data, int options, char **buffer, int *offset, int *max, int depth)
@@ -3882,7 +3921,10 @@ crm_xml_dump(xmlNode * data, int options, char **buffer, int *offset, int *max, 
             dump_xml_element(data, options, buffer, offset, max, depth);
             break;
         case XML_TEXT_NODE:
-            /* Ignore */
+            /* if option xml_log_option_text is enabled, then dump XML_TEXT_NODE */
+            if (options & xml_log_option_text) {
+                dump_xml_text(data, options, buffer, offset, max, depth);
+            }
             return;
         case XML_COMMENT_NODE:
             dump_xml_comment(data, options, buffer, offset, max, depth);
@@ -3919,6 +3961,16 @@ void
 crm_buffer_add_char(char **buffer, int *offset, int *max, char c)
 {
     buffer_print(*buffer, *max, *offset, "%c", c);
+}
+
+char *
+dump_xml_formatted_with_text(xmlNode * an_xml_node)
+{
+    char *buffer = NULL;
+    int offset = 0, max = 0;
+
+    crm_xml_dump(an_xml_node, xml_log_option_formatted|xml_log_option_text, &buffer, &offset, &max, 0);
+    return buffer;
 }
 
 char *
@@ -4219,7 +4271,7 @@ __xml_diff_object(xmlNode * old, xmlNode * new)
             char *value = crm_element_value_copy(new, name);
 
             crm_trace("Created %s@%s=%s", new->name, name, value);
-            /* Remove plus create wont work as it will modify the relative attribute ordering */
+            /* Remove plus create won't work as it will modify the relative attribute ordering */
             if(__xml_acl_check(new, name, xpf_acl_write)) {
                 crm_attr_dirty(prop);
             } else {
@@ -4275,6 +4327,7 @@ __xml_diff_object(xmlNode * old, xmlNode * new)
             if(p_old != p_new) {
                 crm_info("%s.%s moved from %d to %d - %d",
                          new_child->name, ID(new_child), p_old, p_new);
+                __xml_node_dirty(new);
                 p->flags |= xpf_moved;
 
                 if(p_old > p_new) {
@@ -4672,12 +4725,12 @@ add_xml_comment(xmlNode * parent, xmlNode * target, xmlNode * update)
 
     if (target == NULL) {
         target = find_xml_comment(parent, update);
-    } 
-    
+    }
+
     if (target == NULL) {
         add_node_copy(parent, update);
 
-    /* We wont reach here currently */
+    /* We won't reach here currently */
     } else if (safe_str_neq((const char *)target->content, (const char *)update->content)) {
         xmlFree(target->content);
         target->content = xmlStrdup(update->content);
@@ -5678,149 +5731,6 @@ update_validation(xmlNode ** xml_blob, int *best, int max, gboolean transform, g
     return rc;
 }
 
-/*
- * From xpath2.c
- *
- * All the elements returned by an XPath query are pointers to
- * elements from the tree *except* namespace nodes where the XPath
- * semantic is different from the implementation in libxml2 tree.
- * As a result when a returned node set is freed when
- * xmlXPathFreeObject() is called, that routine must check the
- * element type. But node from the returned set may have been removed
- * by xmlNodeSetContent() resulting in access to freed data.
- *
- * This can be exercised by running
- *       valgrind xpath2 test3.xml '//discarded' discarded
- *
- * There is 2 ways around it:
- *   - make a copy of the pointers to the nodes from the result set
- *     then call xmlXPathFreeObject() and then modify the nodes
- * or
- * - remove the references from the node set, if they are not
-       namespace nodes, before calling xmlXPathFreeObject().
- */
-void
-freeXpathObject(xmlXPathObjectPtr xpathObj)
-{
-    int lpc, max = numXpathResults(xpathObj);
-
-    if(xpathObj == NULL) {
-        return;
-    }
-
-    for(lpc = 0; lpc < max; lpc++) {
-        if (xpathObj->nodesetval->nodeTab[lpc] && xpathObj->nodesetval->nodeTab[lpc]->type != XML_NAMESPACE_DECL) {
-            xpathObj->nodesetval->nodeTab[lpc] = NULL;
-        }
-    }
-
-    /* _Now_ its safe to free it */
-    xmlXPathFreeObject(xpathObj);
-}
-
-xmlNode *
-getXpathResult(xmlXPathObjectPtr xpathObj, int index)
-{
-    xmlNode *match = NULL;
-    int max = numXpathResults(xpathObj);
-
-    CRM_CHECK(index >= 0, return NULL);
-    CRM_CHECK(xpathObj != NULL, return NULL);
-
-    if (index >= max) {
-        crm_err("Requested index %d of only %d items", index, max);
-        return NULL;
-
-    } else if(xpathObj->nodesetval->nodeTab[index] == NULL) {
-        /* Previously requested */
-        return NULL;
-    }
-
-    match = xpathObj->nodesetval->nodeTab[index];
-    CRM_CHECK(match != NULL, return NULL);
-
-    if (xpathObj->nodesetval->nodeTab[index]->type != XML_NAMESPACE_DECL) {
-        /* See the comment for freeXpathObject() */
-        xpathObj->nodesetval->nodeTab[index] = NULL;
-    }
-
-    if (match->type == XML_DOCUMENT_NODE) {
-        /* Will happen if section = '/' */
-        match = match->children;
-
-    } else if (match->type != XML_ELEMENT_NODE
-               && match->parent && match->parent->type == XML_ELEMENT_NODE) {
-        /* reurning the parent instead */
-        match = match->parent;
-
-    } else if (match->type != XML_ELEMENT_NODE) {
-        /* We only support searching nodes */
-        crm_err("We only support %d not %d", XML_ELEMENT_NODE, match->type);
-        match = NULL;
-    }
-    return match;
-}
-
-void
-dedupXpathResults(xmlXPathObjectPtr xpathObj)
-{
-    int lpc, max = numXpathResults(xpathObj);
-
-    if (xpathObj == NULL) {
-        return;
-    }
-
-    for (lpc = 0; lpc < max; lpc++) {
-        xmlNode *xml = NULL;
-        gboolean dedup = FALSE;
-
-        if (xpathObj->nodesetval->nodeTab[lpc] == NULL) {
-            continue;
-        }
-
-        xml = xpathObj->nodesetval->nodeTab[lpc]->parent;
-
-        for (; xml; xml = xml->parent) {
-            int lpc2 = 0;
-
-            for (lpc2 = 0; lpc2 < max; lpc2++) {
-                if (xpathObj->nodesetval->nodeTab[lpc2] == xml) {
-                    xpathObj->nodesetval->nodeTab[lpc] = NULL;
-                    dedup = TRUE;
-                    break;
-                }
-            }
-
-            if (dedup) {
-                break;
-            }
-        }
-    }
-}
-
-/* the caller needs to check if the result contains a xmlDocPtr or xmlNodePtr */
-xmlXPathObjectPtr
-xpath_search(xmlNode * xml_top, const char *path)
-{
-    xmlDocPtr doc = NULL;
-    xmlXPathObjectPtr xpathObj = NULL;
-    xmlXPathContextPtr xpathCtx = NULL;
-    const xmlChar *xpathExpr = (const xmlChar *)path;
-
-    CRM_CHECK(path != NULL, return NULL);
-    CRM_CHECK(xml_top != NULL, return NULL);
-    CRM_CHECK(strlen(path) > 0, return NULL);
-
-    doc = getDocPtr(xml_top);
-
-    xpathCtx = xmlXPathNewContext(doc);
-    CRM_ASSERT(xpathCtx != NULL);
-
-    xpathObj = xmlXPathEvalExpression(xpathExpr, xpathCtx);
-    xmlXPathFreeContext(xpathCtx);
-    return xpathObj;
-}
-
 gboolean
 cli_config_update(xmlNode ** xml, int *best_version, gboolean to_logs)
 {
@@ -5922,81 +5832,6 @@ expand_idref(xmlNode * input, xmlNode * top)
     }
 
     free(xpath_string);
-    return result;
-}
-
-xmlNode *
-get_xpath_object_relative(const char *xpath, xmlNode * xml_obj, int error_level)
-{
-    int len = 0;
-    xmlNode *result = NULL;
-    char *xpath_full = NULL;
-    char *xpath_prefix = NULL;
-
-    if (xml_obj == NULL || xpath == NULL) {
-        return NULL;
-    }
-
-    xpath_prefix = (char *)xmlGetNodePath(xml_obj);
-    len += strlen(xpath_prefix);
-    len += strlen(xpath);
-
-    xpath_full = strdup(xpath_prefix);
-    xpath_full = realloc_safe(xpath_full, len + 1);
-    strncat(xpath_full, xpath, len);
-
-    result = get_xpath_object(xpath_full, xml_obj, error_level);
-
-    free(xpath_prefix);
-    free(xpath_full);
-    return result;
-}
-
-xmlNode *
-get_xpath_object(const char *xpath, xmlNode * xml_obj, int error_level)
-{
-    int max;
-    xmlNode *result = NULL;
-    xmlXPathObjectPtr xpathObj = NULL;
-    char *nodePath = NULL;
-    char *matchNodePath = NULL;
-
-    if (xpath == NULL) {
-        return xml_obj;         /* or return NULL? */
-    }
-
-    xpathObj = xpath_search(xml_obj, xpath);
-    nodePath = (char *)xmlGetNodePath(xml_obj);
-    max = numXpathResults(xpathObj);
-
-    if (max < 1) {
-        do_crm_log(error_level, "No match for %s in %s", xpath, crm_str(nodePath));
-        crm_log_xml_explicit(xml_obj, "Unexpected Input");
-
-    } else if (max > 1) {
-        int lpc = 0;
-
-        do_crm_log(error_level, "Too many matches for %s in %s", xpath, crm_str(nodePath));
-
-        for (lpc = 0; lpc < max; lpc++) {
-            xmlNode *match = getXpathResult(xpathObj, lpc);
-
-            CRM_LOG_ASSERT(match != NULL);
-            if(match != NULL) {
-                matchNodePath = (char *)xmlGetNodePath(match);
-                do_crm_log(error_level, "%s[%d] = %s", xpath, lpc, crm_str(matchNodePath));
-                free(matchNodePath);
-            }
-        }
-        crm_log_xml_explicit(xml_obj, "Bad Input");
-
-    } else {
-        result = getXpathResult(xpathObj, 0);
-    }
-
-    freeXpathObject(xpathObj);
-    free(nodePath);
-
     return result;
 }
 

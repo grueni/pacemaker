@@ -1,3 +1,92 @@
+* Wed Dec 23 2015 Ken Gaillot <kgaillot@redhat.com> Pacemaker-1.1.14-rc4-1
+- Update source tarball to revision: 5f8a298
+- Changesets: 18
+- Diff:       27 files changed, 56 insertions(+), 53 deletions(-)
+
+- Changes since Pacemaker-1.1.14-rc3
+  + improved support for building on FreeBSD
+  + libcrmcommon: when caching attrd connection, cache connection flags too
+
+* Mon Dec 14 2015 Ken Gaillot <kgaillot@redhat.com> Pacemaker-1.1.14-rc3-1
+- Update source tarball to revision: 97ada31
+- Changesets: 7
+- Diff:       2 files changed, 7 insertions(+), 2 deletions(-)
+
+- Changes since Pacemaker-1.1.14-rc2
+  + stonithd: fix issue where deleting a fence device attribute can delete the device
+
+* Tue Dec 08 2015 Ken Gaillot <kgaillot@redhat.com> Pacemaker-1.1.14-rc2-1
+- Update source tarball to revision: ce830a7
+- Changesets: 1
+- Diff:       1 file changed, 2 insertions(+)
+
+- Changes since Pacemaker-1.1.14-rc1
+  + crmd: ensure compilation works with built-in notifications disabled
+
+* Tue Dec 08 2015 Ken Gaillot <kgaillot@redhat.com> Pacemaker-1.1.14-rc1-1
+- Update source tarball to revision: 7cd6dcf
+- Changesets: 656
+- Diff:       169 files changed, 13014 insertions(+), 7579 deletions(-)
+
+- Features added since Pacemaker-1.1.13
+  + crm_resource: Indicate common reasons why a resource may not start after a cleanup
+  + crm_resource: New --force-promote and --force-demote options for debugging
+  + fencing: Support targeting fencing topologies by node name pattern or node attribute
+  + fencing: Remap sequential topology reboots to all-off-then-all-on
+  + pengine: Allow guest remote nodes using containers/vms to be nested in a group resource
+  + pengine: Allow resources to start and stop as soon as their state is known on all nodes
+  + pengine: Include a list of all and available nodes with clone notifications
+  + pengine: Addition of the clone resource clone-min metadata option
+  + pengine: Support of multiple-active=block for resource groups
+  + remote: reconnect_interval option for remote nodes to delay reconnect after fence
+
+- Changes since Pacemaker-1.1.13
+  + fix multiple memory issues (leaks, use-after-free, double free, use-of-NULL) in components and tools
+  + cib: Do not terminate due to badly behaving clients
+  + cman: handle corosync-invented node names of the form Node{id} for peers not in its node list
+  + controld: replace bashism
+  + crm_node: Display node state with -l and quorum status with -q, if available
+  + crmd: resources would sometimes be restarted when only non-unique parameters changed
+  + crmd: fence remote node after connection failure only once
+  + crmd: handle resources named the same as cluster nodes
+  + crmd: Pre-emptively fail in-flight actions when lrmd connections fail
+  + crmd: Record actions in the CIB as failed if we cannot execute them
+  + crm_report: Enable password sanitizing by default
+  + crm_report: Allow log file discovery to be disabled
+  + crm_resource: Allow the resource configuration to be modified for --force-{check,start,..} calls
+  + crm_resource: Compensate for -C and -p being called with the child resource for clones
+  + crm_resource: Correctly clean up all children for anonymous cloned groups
+  + crm_resource: Correctly clean up failcounts for inactive anonymous clones
+  + crm_resource: Correctly observe --force when deleting and updating attributes
+  + crm_shadow: Fix "crm_shadow --diff"
+  + crm_simulate: Prevent segfault on arches with 64bit time_t
+  + fencing: ensure "required"/"automatic" only apply to "on" actions
+  + fencing: Return a provider for the internal fencing agent "#watchdog" instead of logging an error
+  + fencing: ignore stderr output of fence agents (often used for debug messages)
+  + libcib: potential user input overflow
+  + libcluster: overhaul peer cache management
+  + log: make syslog less noisy
+  + lrmd: cancel currently pending STONITH op if stonithd connection is lost
+  + lrmd: Finalize all pending and recurring operations when cleaning up a resource
+  + pengine: Bug cl#5247 - Imply resources running on a container are stopped when the container is stopped
+  + pengine: cl#5235 - Prevent graph loops that can be introduced by "load_stopped -> migrate_to" ordering
+  + pengine: Correctly bypass fencing for resources that do not require it
+  + pengine: do not timeout remote node recurring monitor op failure until after fencing
+  + pengine: Ensure recurring monitor operations are cancelled when clone instances are de-allocated
+  + pengine: fixes segfault in pengine when fencing remote node
+  + pengine: properly handle blocked clone actions
+  + pengine: ensure failed actions that occurred in node shutdown are displayed
+  + remote: Correctly display the usage of the ocf:pacemaker:remote resource agent
+  + remote: do not fail operations because of a migration
+  + remote: enable reloads for select remote connection options
+  + resources: allow for top output with or without percent sign in HealthCPU
+  + resources: Prevent an error message on stopping "Dummy" resource
+  + systemd: Prevent segfault when logging failed operations
+  + systemd: Reconnect to System DBus if the connection is closed
+  + systemd: set systemd resources' timeout values higher than systemd's own default
+  + tools: Do not send command lines to syslog
+  + upstart: Ensure pending structs are correctly unreferenced
+
 
 * Wed Jun 24 2015 Andrew Beekhof <andrew@beekhof.net> Pacemaker-1.1.13-1
 - Update source tarball to revision: 2a1847e
@@ -260,7 +349,7 @@
   + Bug cl#5219 - pengine: Allow unrelated resources with a common colocation target to remain promoted
   + Bug cl#5222 - cib: Repair rolling update capability
   + Bug cl#5222 - Enable legacy mode whenever a broadcast update is detected
-  + Bug rhbz#1036631 - Stop members of cloned groups when dependancies are stopped
+  + Bug rhbz#1036631 - Stop members of cloned groups when dependencies are stopped
   + Bug rhbz#1054307 - cname pattern match should be more restrictive in init script
   + Bug rhbz#1057697 - Use native DBus library for systemd/upstart support to avoid problematic use of threads
   + Bug rhbz#1097457 - Limit the scope of the previous fix and include a helpful comment
@@ -398,7 +487,7 @@
   + xml: Update xml validation to allow '<node type=remote />'
 
 
-* Thu Feb 13 2014 David Vossel <dvossel@redhat.com> Pacemaker-1.1.11-1
+* Thu Feb 13 2014 David Vossel <davidvossel@gmail.com> Pacemaker-1.1.11-1
 - Update source tarball to revision: 33f9d09
 - Changesets: 462
 - Diff:       147 files changed, 6810 insertions(+), 4057 deletions(-)
@@ -435,7 +524,7 @@
   + attrd: Give remote-nodes ability to set attributes with attrd
   + attrd: Prevent inflation of attribute dampen intervals
   + attrd: Support SI units for attribute dampening
-  + Bug cl#5171 - pengine: Don't prevent clones from running due to dependant resources
+  + Bug cl#5171 - pengine: Don't prevent clones from running due to dependent resources
   + Bug cl#5179 - Corosync: Attempt to retrieve a peer's node name if it is not already known
   + Bug cl#5181 - corosync: Ensure node IDs are written to the CIB as unsigned integers
   + Bug rhbz#902407 - crm_resource: Handle --ban for master/slave resources as advertised
@@ -820,7 +909,7 @@
   + mcp: Set the HA_quorum_type env variable consistently with our corosync plugin
   + mcp: Shut down if one of our child processes can/should not be respawned
   + pengine: Bug cl#5000 - Ensure ordering is preserved when depending on partial sets
-  + pengine: Bug cl#5028 - Unmanaged services should block shutdown unless in maintainence mode
+  + pengine: Bug cl#5028 - Unmanaged services should block shutdown unless in maintenance mode
   + pengine: Bug cl#5038 - Prevent restart of anonymous clones when clone-max decreases
   + pengine: Bug cl#5007 - Fixes use of colocation constraints with multi-state resources
   + pengine: Bug cl#5014 - Prevent asymmetrical order constraints from causing resource stops
@@ -830,7 +919,7 @@
   + pengine: Detect reloads of previously migrated resources
   + pengine: Ensure post-migration stop actions occur before node shutdown
   + pengine: Log as loudly as possible when we cannot shut down a cluster node
-  + pengine: Reload of a resource no longer causes a restart of dependant resources
+  + pengine: Reload of a resource no longer causes a restart of dependent resources
   + pengine: Support limiting the number of concurrent live migrations
   + pengine: Support referencing templates in constraints
   + pengine: Support of referencing resource templates in resource sets
@@ -891,7 +980,7 @@
   + pengine: Bug lf#2575 - Use uname for migration variables, id is a UUID on heartbeat
   + pengine: Bug lf#2581 - Avoid group restart when clone (re)starts on an unrelated node
   + pengine: Bug lf#2613, lf#2619 - Group migration after failures and non-default utilization policies
-  + pengine: Bug suse#707150 - Prevent services being active if dependancies on clones are not satisfied
+  + pengine: Bug suse#707150 - Prevent services being active if dependencies on clones are not satisfied
   + pengine: Correctly recognise which recurring operations are currently active
   + pengine: Demote from Master does not clear previous errors
   + pengine: Ensure restarts due to definition changes cause the start action to be re-issued not probes
@@ -1205,7 +1294,7 @@
 - Changes since 1.0.5-4
   + pengine: Bug 2213 - Ensure groups process location constraints so that clone-node-max works for cloned groups
   + pengine: Bug lf#2153 - non-clones should not restart when clones stop/start on other nodes
-  + pengine: Bug lf#2209 - Clone ordering should be able to prevent startup of dependant clones
+  + pengine: Bug lf#2209 - Clone ordering should be able to prevent startup of dependent clones
   + pengine: Bug lf#2216 - Correctly identify the state of anonymous clones when deciding when to probe
   + pengine: Bug lf#2225 - Operations that require fencing should wait for 'stonith_complete' not 'all_stopped'.
   + pengine: Bug lf#2225 - Prevent clone peers from stopping while another is instance is (potentially) being fenced
@@ -1332,7 +1421,7 @@
 - Use bzipped upstream tarball.
 
 * Wed Jul  29 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.5-0.6.c9120a53a6ae.hg
-- Add back missing build auto* dependancies
+- Add back missing build auto* dependencies
 - Minor cleanups to the install directive
 
 * Tue Jul  28 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.5-0.5.c9120a53a6ae.hg
@@ -1344,7 +1433,7 @@
 - Use the global directive instead of define for variables
 - Use the haclient/hacluster group/user instead of daemon
 - Use the _configure macro
-- Fix install dependancies
+- Fix install dependencies
 
 * Fri Jul  24 2009 Andrew Beekhof <andrew@beekhof.net> - 1.0.4-3
 - Initial Fedora checkin
@@ -1355,7 +1444,7 @@
 - Reference the new cluster-glue devel package name
 - Update the tarball from upstream to version c9120a53a6ae
   + pengine: Only prevent migration if the clone dependency is stopping/starting on the target node
-  + pengine: Bug 2160 - Dont shuffle clones due to colocation
+  + pengine: Bug 2160 - Don't shuffle clones due to colocation
   + pengine: New implementation of the resource migration (not stop/start) logic
   + Medium: Tools: crm_resource - Prevent use-of-NULL by requiring a resource name for the -A and -a options
   + Medium: pengine: Prevent use-of-NULL in find_first_action()
@@ -1867,7 +1956,7 @@
   + cib: Use single quotes so that the xpath queries for nvpairs will succeed
   + crmd: Always connect to stonithd when the TE starts and ensure we notice if it dies
   + crmd: Correctly handle a dead PE process
-  + crmd: Make sure async-failures cause the failcount to be incrimented
+  + crmd: Make sure async-failures cause the failcount to be incremented
   + pengine: Bug LF:1941 - Handle failed clone instance probes when clone-max < #nodes
   + pengine: Parse resource ordering sets correctly
   + pengine: Prevent use-of-NULL - order->rsc_rh will not always be non-NULL
@@ -1880,7 +1969,7 @@
   + Medium: ais: Spawn the PE from the ais plugin instead of the crmd
   + Medium: cib: By default, new configurations use the latest schema
   + Medium: cib: Clean up the CIB if it was already disconnected
-  + Medium: cib: Only incriment num_updates if something actually changed
+  + Medium: cib: Only increment num_updates if something actually changed
   + Medium: cib: Prevent use-after-free in client after abnormal termination of the CIB
   + Medium: Core: Fix memory leak in xpath searches
   + Medium: Core: Get more details regarding parser errors
@@ -2008,7 +2097,7 @@
   + Medium: pengine: Implement a global 'stop-all-resources' option
   + Medium: pengine: Implement cibpipe, a tool for performing/simulating config changes "offline"
   + Medium: pengine: We do not allow colocation with specific clone instances
-  + Medium: Tools: pingd - Implement a stack-independant version of pingd
+  + Medium: Tools: pingd - Implement a stack-independent version of pingd
   + Medium: xml: Ship an xslt for upgrading from 0.6 to 0.7
 
 * Thu Jun 19 2008 Andrew Beekhof <abeekhof@suse.de> - 0.6.5-1
@@ -2100,7 +2189,7 @@
   + Medium: pengine: Ensure implies_left ordering constraints are always effective
   + Medium: pengine: Indicate each resources 'promotion' score
   + Medium: pengine: Prevent a possible use-of-NULL
-  + Medium: pengine: Reprocess the current action if it changed (so that any prior dependancies are updated)
+  + Medium: pengine: Reprocess the current action if it changed (so that any prior dependencies are updated)
   + Medium: tengine: Bug LF-1859 - Wait for fail-count updates to complete before terminating the transition
   + Medium: tengine: Bug LF:1859 - Do not abort graphs due to our own failcount updates
   + Medium: tengine: Bug LF:1859 - Prevent the TE from interupting itself
@@ -2124,18 +2213,18 @@
 - Changes since Pacemaker-0.6.0
   + CIB: Ensure changes to top-level attributes (like admin_epoch) cause a disk write
   + CIB: Ensure the archived file hits the disk before returning
-  + CIB: Repair the ability to do 'atomic incriment' updates (value="value++")
+  + CIB: Repair the ability to do 'atomic increment' updates (value="value++")
   + crmd: Bug #7 - Connecting to the crmd immediately after startup causes use-of-NULL
   + Medium: CIB: Mask cib_diff_resync results from the caller - they do not need to know
   + Medium: crmd: Delay starting the IPC server until we are fully functional
   + Medium: CTS: Fix the startup patterns
   + Medium: pengine: Bug 1820 - Allow the first resource in a group to be migrated
-  + Medium: pengine: Bug 1820 - Check the colocation dependancies of resources to be migrated
+  + Medium: pengine: Bug 1820 - Check the colocation dependencies of resources to be migrated
 
 * Mon Jan 14 2008 Andrew Beekhof <abeekhof@suse.de> - 0.6.0-1
 - This is the first release of the Pacemaker Cluster Resource Manager formerly part of Heartbeat.
 - For those looking for the GUI, mgmtd, CIM or TSA components, they are now found in
-  the new pacemaker-pygui project.  Build dependancies prevent them from being
+  the new pacemaker-pygui project.  Build dependencies prevent them from being
   included in Heartbeat (since the built-in CRM is no longer supported) and,
   being non-core components, are not included with Pacemaker.
 - Update source tarball to revision: c94b92d550cf

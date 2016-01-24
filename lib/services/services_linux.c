@@ -589,7 +589,8 @@ action_synced_wait(svc_action_t * op, sigset_t mask)
 
 }
 
-/* Returns FALSE if 'op' should be free'd by the caller */
+/* For an asynchronous 'op', returns FALSE if 'op' should be free'd by the caller */
+/* For a synchronous 'op', returns FALSE if 'op' fails */
 gboolean
 services_os_action_execute(svc_action_t * op, gboolean synchronous)
 {
@@ -702,6 +703,8 @@ services_os_action_execute(svc_action_t * op, gboolean synchronous)
         op->opaque->stderr_gsource = mainloop_add_fd(op->id,
                                                      G_PRIORITY_LOW,
                                                      op->opaque->stderr_fd, op, &stderr_callbacks);
+
+        services_add_inflight_op(op);
     }
 
     return TRUE;

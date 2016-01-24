@@ -33,6 +33,7 @@
 #  include <crm/common/logging.h>
 #  include <crm/common/io.h>
 #  include <crm/common/ipcs.h>
+#  include <crm/common/procfs.h>
 
 /* Dynamic loading of libraries */
 void *find_library_function(void **handle, const char *lib, const char *fn, int fatal);
@@ -127,6 +128,7 @@ gboolean check_timer(const char *value);
 gboolean check_boolean(const char *value);
 gboolean check_number(const char *value);
 gboolean check_quorum(const char *value);
+gboolean check_script(const char *value);
 gboolean check_utilization(const char *value);
 
 /* Shared PE/crmd functionality */
@@ -152,7 +154,7 @@ crm_strlen_zero(const char *s)
 
 char *add_list_element(char *list, const char *value);
 
-int crm_pid_active(long pid);
+int crm_pid_active(long pid, const char *daemon);
 void crm_make_daemon(const char *name, gboolean daemonize, const char *pidfile);
 
 char *generate_op_key(const char *rsc_id, const char *op_type, int interval);
@@ -261,7 +263,7 @@ void strip_text_nodes(xmlNode * xml);
 void pcmk_panic(const char *origin);
 void sysrq_init(void);
 pid_t pcmk_locate_sbd(void);
-int crm_pidfile_inuse(const char *filename, long mypid);
+int crm_pidfile_inuse(const char *filename, long mypid, const char *daemon);
 int crm_read_pidfile(const char *filename);
 
 #  define crm_config_err(fmt...) { crm_config_error = TRUE; crm_err(fmt); }

@@ -100,8 +100,10 @@ pcmk_dbus_find_error(const char *method, DBusPendingCall* pending, DBusMessage *
         }
     }
 
-    if(ret && (error.name || error.message)) {
-        *ret = error;
+    if(error.name || error.message) {
+        if (ret) {
+            *ret = error;
+        }
         return TRUE;
     }
 
@@ -142,7 +144,7 @@ DBusMessage *pcmk_dbus_send_recv(DBusMessage *msg, DBusConnection *connection, D
         reply = dbus_pending_call_steal_reply(pending);
     }
 
-    pcmk_dbus_find_error(method, pending, reply, error);
+    (void)pcmk_dbus_find_error(method, pending, reply, error);
 
     if(pending) {
         /* free the pending message handle */
@@ -176,7 +178,7 @@ DBusPendingCall* pcmk_dbus_send(DBusMessage *msg, DBusConnection *connection,
         return NULL;
 
     } else if (pending == NULL) {
-        crm_err("No pending call found for %s", method);
+        crm_err("No pending call found for %s: Connection to System DBus may be closed", method);
         return NULL;
     }
 
@@ -287,6 +289,7 @@ pcmk_dbus_lookup_result(DBusMessage *reply, struct db_getall_data *data)
                             data->callback(name.str, value.str, data->userdata);
 
                         } else {
+                            free(output);
                             output = strdup(value.str);
                         }
 
@@ -322,12 +325,14 @@ static void
 pcmk_dbus_lookup_cb(DBusPendingCall *pending, void *user_data)
 {
     DBusMessage *reply = NULL;
+    char *value = NULL;
 
     if(pending) {
         reply = dbus_pending_call_steal_reply(pending);
     }
 
-    pcmk_dbus_lookup_result(reply, user_data);
+    value = pcmk_dbus_lookup_result(reply, user_data);
+    free(value);
 
     if(reply) {
         dbus_message_unref(reply);

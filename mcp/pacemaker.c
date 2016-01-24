@@ -35,6 +35,8 @@
 
 #include <dirent.h>
 #include <ctype.h>
+
+gboolean pcmk_quorate = FALSE;
 gboolean fatal_error = FALSE;
 GMainLoop *mainloop = NULL;
 
@@ -373,7 +375,7 @@ pcmk_shutdown_worker(gpointer user_data)
     int lpc = 0;
 
     if (phase == 0) {
-        crm_notice("Shuting down Pacemaker");
+        crm_notice("Shutting down Pacemaker");
         phase = max;
 
         /* Add a second, more frequent, check to speed up shutdown */
@@ -560,6 +562,10 @@ update_process_clients(crm_client_t *client)
     crm_node_t *node = NULL;
     xmlNode *update = create_xml_node(NULL, "nodes");
 
+    if (is_corosync_cluster()) {
+        crm_xml_add_int(update, "quorate", pcmk_quorate);
+    }
+
     g_hash_table_iter_init(&iter, crm_peer_cache);
     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & node)) {
         xmlNode *xml = create_xml_node(update, "node");
@@ -693,7 +699,7 @@ check_active_before_startup_processes(gpointer user_data)
                 continue;
             } else if (start_seq != pcmk_children[lpc].start_seq) {
                 continue;
-            } else if (crm_pid_active(pcmk_children[lpc].pid) != 1) {
+            } else if (crm_pid_active(pcmk_children[lpc].pid, pcmk_children[lpc].name) != 1) {
                 crm_notice("Process %s terminated (pid=%d)",
                            pcmk_children[lpc].name, pcmk_children[lpc].pid);
                 pcmk_process_exit(&(pcmk_children[lpc]));
@@ -713,8 +719,8 @@ find_and_track_existing_processes(void)
 {
     DIR *dp;
     struct dirent *entry;
-    struct stat statbuf;
     int start_tracker = 0;
+    char entry_name[64];
 
     dp = opendir("/proc");
     if (!dp) {
@@ -724,43 +730,13 @@ find_and_track_existing_processes(void)
     }
 
     while ((entry = readdir(dp)) != NULL) {
-        char procpath[128];
-        char value[64];
-        char key[16];
-        FILE *file;
         int pid;
         int max = SIZEOF(pcmk_children);
         int i;
 
-        strcpy(procpath, "/proc/");
-        /* strlen("/proc/") + strlen("/status") + 1 = 14
-         * 128 - 14 = 114 */
-        strncat(procpath, entry->d_name, 114);
-
-        if (lstat(procpath, &statbuf)) {
+        if (crm_procfs_process_info(entry, entry_name, &pid) < 0) {
             continue;
         }
-        if (!S_ISDIR(statbuf.st_mode) || !isdigit(entry->d_name[0])) {
-            continue;
-        }
-
-        strcat(procpath, "/status");
-
-        file = fopen(procpath, "r");
-        if (!file) {
-            continue;
-        }
-        if (fscanf(file, "%15s%63s", key, value) != 2) {
-            fclose(file);
-            continue;
-        }
-        fclose(file);
-
-        pid = atoi(entry->d_name);
-        if (pid <= 0) {
-            continue;
-        }
-
         for (i = 0; i < max; i++) {
             const char *name = pcmk_children[i].name;
 
@@ -770,14 +746,12 @@ find_and_track_existing_processes(void)
             if (pcmk_children[i].flag == crm_proc_stonith_ng) {
                 name = "stonithd";
             }
-            if (safe_str_eq(name, value)) {
-                if (crm_pid_active(pid) != 1) {
-                    continue;
-                }
-                crm_notice("Tracking existing %s process (pid=%d)", value, pid);
+            if (safe_str_eq(entry_name, name) && (crm_pid_active(pid, NULL) == 1)) {
+                crm_notice("Tracking existing %s process (pid=%d)", name, pid);
                 pcmk_children[i].pid = pid;
                 pcmk_children[i].active_before_startup = TRUE;
                 start_tracker = 1;
+                break;
             }
         }
     }
@@ -895,15 +869,30 @@ mcp_cpg_membership(cpg_handle_t handle,
 static gboolean
 mcp_quorum_callback(unsigned long long seq, gboolean quorate)
 {
-    /* Nothing to do */
+    pcmk_quorate = quorate;
     return TRUE;
 }
 
 static void
 mcp_quorum_destroy(gpointer user_data)
 {
+    crm_info("connection lost");
+}
+
+#if SUPPORT_CMAN
+static gboolean
+mcp_cman_dispatch(unsigned long long seq, gboolean quorate)
+{
+    pcmk_quorate = quorate;
+    return TRUE;
+}
+
+static void
+mcp_cman_destroy(gpointer user_data)
+{
     crm_info("connection closed");
 }
+#endif
 
 int
 main(int argc, char **argv)
@@ -951,7 +940,7 @@ main(int argc, char **argv)
                 shutdown = TRUE;
                 break;
             case 'F':
-                printf("Pacemaker %s (Build: %s)\n Supporting v%s: %s\n", VERSION, BUILD_VERSION,
+                printf("Pacemaker %s (Build: %s)\n Supporting v%s: %s\n", PACEMAKER_VERSION, BUILD_VERSION,
                        CRM_FEATURE_SET, CRM_FEATURES);
                 crm_exit(pcmk_ok);
             default:
@@ -1018,7 +1007,7 @@ main(int argc, char **argv)
         crm_exit(ENODATA);
     }
 
-    crm_notice("Starting Pacemaker %s (Build: %s): %s", VERSION, BUILD_VERSION, CRM_FEATURES);
+    crm_notice("Starting Pacemaker %s (Build: %s): %s", PACEMAKER_VERSION, BUILD_VERSION, CRM_FEATURES);
     mainloop = g_main_new(FALSE);
     sysrq_init();
 
@@ -1101,6 +1090,8 @@ main(int argc, char **argv)
     cluster.cpg.cpg_deliver_fn = mcp_cpg_deliver;
     cluster.cpg.cpg_confchg_fn = mcp_cpg_membership;
 
+    crm_set_autoreap(FALSE);
+
     if(cluster_connect_cpg(&cluster) == FALSE) {
         crm_err("Couldn't connect to Corosync's CPG service");
         rc = -ENOPROTOOPT;
@@ -1112,6 +1103,12 @@ main(int argc, char **argv)
             rc = -ENOTCONN;
         }
     }
+
+#if SUPPORT_CMAN
+    if (rc == pcmk_ok && is_cman_cluster()) {
+        init_cman_connection(mcp_cman_dispatch, mcp_cman_destroy);
+    }
+#endif
 
     if(rc == pcmk_ok) {
         local_name = get_local_node_name();

@@ -201,7 +201,7 @@ static struct corosync_exec_handler pcmk_exec_service[] = {
  */
 /* *INDENT-OFF* */
 struct corosync_service_engine pcmk_service_handler = {
-    .name			= (char *)"Pacemaker Cluster Manager "PACKAGE_VERSION,
+    .name			= (char *)"Pacemaker Cluster Manager "PACEMAKER_VERSION,
     .id				= PCMK_SERVICE_ID,
     .private_data_size		= 0,
     .flow_control		= COROSYNC_LIB_FLOW_CONTROL_NOT_REQUIRED,
@@ -1101,7 +1101,7 @@ pcmk_shutdown(void)
     }
 
     if (phase == 0) {
-        ais_notice("Shuting down Pacemaker");
+        ais_notice("Shutting down Pacemaker");
         phase = max;
     }
 
@@ -1486,7 +1486,7 @@ route_ais_message(const AIS_Message * msg, gboolean local_origin)
     }
 
     if (check_message_sanity(mutable, mutable->data) == FALSE) {
-        /* Dont send this message to anyone */
+        /* Don't send this message to anyone */
         rc = 1;
         goto bail;
     }

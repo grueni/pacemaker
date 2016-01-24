@@ -369,6 +369,7 @@ cib_server_process_diff(const char *op, int options, const char *section, xmlNod
     }
 
     rc = cib_process_diff(op, options, section, req, input, existing_cib, result_cib, answer);
+    crm_trace("result: %s (%d), %s", pcmk_strerror(rc), rc, cib_is_master?"master":"slave");
 
     if (rc == -pcmk_err_diff_resync && cib_is_master == FALSE) {
         free_xml(*result_cib);
@@ -380,6 +381,13 @@ cib_server_process_diff(const char *op, int options, const char *section, xmlNod
         if (options & cib_force_diff) {
             crm_warn("Not requesting full refresh in R/W mode");
         }
+
+    } else if(rc != pcmk_ok && cib_legacy_mode()) {
+        crm_warn("Something went wrong in compatibility mode, requesting full refresh");
+        xml_log_patchset(LOG_INFO, __FUNCTION__, input);
+        free_xml(*result_cib);
+        *result_cib = NULL;
+        send_sync_request(NULL);
     }
 
     return rc;
@@ -537,7 +545,7 @@ sync_our_cib(xmlNode * request, gboolean all)
     /* remove the "all == FALSE" condition
      *
      * sync_from was failing, the local client wasnt being notified
-     *    because it didnt know it was a reply
+     *    because it didn't know it was a reply
      * setting this does not prevent the other nodes from applying it
      *    if all == TRUE
      */

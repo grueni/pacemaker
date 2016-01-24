@@ -54,7 +54,7 @@
 
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
-Version:       1.1.13
+Version:       1.1.14
 Release:       %{pcmk_release}%{?dist}
 License:       GPLv2+ and LGPLv2+
 Url:           http://www.clusterlabs.org
@@ -229,6 +229,9 @@ Summary:       Test framework for cluster-related technologies like Pacemaker
 Group:         System Environment/Daemons
 Requires:      python
 Requires:      %{name}-libs = %{version}-%{release}
+%if %{defined systemd_requires}
+Requires:      systemd-python
+%endif
 
 %description   cts
 Test framework for cluster-related technologies like Pacemaker
@@ -301,7 +304,7 @@ find %{buildroot} -name '*.xsl' -type f -print0 | xargs -0 chmod a-x
 find %{buildroot} -name '*.rng' -type f -print0 | xargs -0 chmod a-x
 find %{buildroot} -name '*.dtd' -type f -print0 | xargs -0 chmod a-x
 
-# Dont package static libs
+# Don't package static libs
 find %{buildroot} -name '*.a' -type f -print0 | xargs -0 rm -f
 find %{buildroot} -name '*.la' -type f -print0 | xargs -0 rm -f
 

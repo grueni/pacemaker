@@ -42,8 +42,10 @@ int
 
 gboolean is_redhat_agent(const char *agent);
 
-xmlNode *create_level_registration_xml(const char *node, int level,
-                                       stonith_key_value_t * device_list);
+xmlNode *create_level_registration_xml(const char *node, const char *pattern,
+                                       const char *attr, const char *value,
+                                       int level,
+                                       stonith_key_value_t *device_list);
 
 xmlNode *create_device_registration_xml(const char *id, const char *namespace, const char *agent,
                                         stonith_key_value_t * params, const char *rsc_provides);
@@ -89,7 +91,6 @@ xmlNode *create_device_registration_xml(const char *id, const char *namespace, c
 #  define F_STONITH_HISTORY_LIST  "st_history"
 #  define F_STONITH_DATE          "st_date"
 #  define F_STONITH_STATE         "st_state"
-#  define F_STONITH_LEVEL         "st_level"
 #  define F_STONITH_ACTIVE        "st_active"
 
 #  define F_STONITH_DEVICE        "st_device_id"

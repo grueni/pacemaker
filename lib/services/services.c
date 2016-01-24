@@ -150,7 +150,6 @@ resources_action_create(const char *name, const char *standard, const char *prov
 
     op = calloc(1, sizeof(svc_action_t));
     op->opaque = calloc(1, sizeof(svc_action_private_t));
-    op->opaque->pending = NULL;
     op->rsc = strdup(name);
     op->action = strdup(action);
     op->interval = interval;
@@ -337,7 +336,6 @@ services_action_create_generic(const char *exec, const char *args[])
 
     op->opaque->exec = strdup(exec);
     op->opaque->args[0] = strdup(exec);
-    op->opaque->pending = NULL;
 
     for (cur_arg = 1; args && args[cur_arg - 1]; cur_arg++) {
         op->opaque->args[cur_arg] = strdup(args[cur_arg - 1]);
@@ -366,15 +364,15 @@ services_set_op_pending(svc_action_t *op, DBusPendingCall *pending)
         if (pending) {
             crm_info("Lost pending %s DBus call (%p)", op->id, op->opaque->pending);
         } else {
-            crm_info("Done with pending %s DBus call (%p)", op->id, op->opaque->pending);
+            crm_trace("Done with pending %s DBus call (%p)", op->id, op->opaque->pending);
         }
         dbus_pending_call_unref(op->opaque->pending);
     }
     op->opaque->pending = pending;
     if (pending) {
-        crm_info("Updated pending %s DBus call (%p)", op->id, pending);
+        crm_trace("Updated pending %s DBus call (%p)", op->id, pending);
     } else {
-        crm_info("Cleared pending %s DBus call", op->id);
+        crm_trace("Cleared pending %s DBus call", op->id);
     }
 }
 #endif
@@ -582,27 +580,38 @@ handle_duplicate_recurring(svc_action_t * op, void (*action_callback) (svc_actio
 }
 
 static gboolean
-action_async_helper(svc_action_t * op) {
-    gboolean res = FALSE;
-
+action_async_helper(svc_action_t * op)
+{
     if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
 #if SUPPORT_UPSTART
-        res = upstart_job_exec(op, FALSE);
+        return upstart_job_exec(op, FALSE);
 #endif
     } else if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
 #if SUPPORT_SYSTEMD
-        res =  systemd_unit_exec(op);
+        return systemd_unit_exec(op);
 #endif
     } else {
-        res = services_os_action_execute(op, FALSE);
+        return services_os_action_execute(op, FALSE);
     }
+    /* The 'op' has probably been freed if the execution functions return TRUE. */
+    /* Avoid using the 'op' in here. */
+
+    return FALSE;
+}
+
+void
+services_add_inflight_op(svc_action_t * op)
+{
+    if (op == NULL) {
+        return;
+    }
+
+    CRM_ASSERT(op->synchronous == FALSE);
 
     /* keep track of ops that are in-flight to avoid collisions in the same namespace */
-    if (res) {
+    if (op->rsc) {
         inflight_ops = g_list_append(inflight_ops, op);
     }
-
-    return res;
 }
 
 gboolean
@@ -622,7 +631,7 @@ services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *
         g_hash_table_replace(recurring_actions, op->id, op);
     }
 
-    if (is_op_blocked(op->rsc)) {
+    if (op->rsc && is_op_blocked(op->rsc)) {
         blocked_ops = g_list_append(blocked_ops, op);
         return TRUE;
     }

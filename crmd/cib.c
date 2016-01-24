@@ -113,7 +113,7 @@ revision_check_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, vo
     cmp = compare_version(revision, CRM_FEATURE_SET);
 
     if (cmp > 0) {
-        crm_err("This build (%s) does not support the current resource configuration", VERSION);
+        crm_err("This build (%s) does not support the current resource configuration", PACEMAKER_VERSION);
         crm_err("We can only support up to CRM feature set %s (current=%s)",
                 CRM_FEATURE_SET, revision);
         crm_err("Shutting down the CRM");
@@ -136,8 +136,7 @@ do_cib_replaced(const char *event, xmlNode * msg)
     }
 
     /* start the join process again so we get everyone's LRM status */
-    populate_cib_nodes(node_update_quick | node_update_cluster | node_update_peer | node_update_join
-                       | node_update_expected, __FUNCTION__);
+    populate_cib_nodes(node_update_quick|node_update_all, __FUNCTION__);
     register_fsa_input(C_FSA_INTERNAL, I_ELECTION, NULL);
 }
 
@@ -239,4 +238,21 @@ do_cib_control(long long action,
             cib_retries = 0;
         }
     }
+}
+
+/*!
+ * \internal
+ * \brief Get CIB call options to use local scope if master unavailable
+ *
+ * \return CIB call options
+ */
+int crmd_cib_smart_opt()
+{
+    int call_opt = cib_quorum_override;
+
+    if (fsa_state == S_ELECTION || fsa_state == S_PENDING) {
+        crm_info("Sending update to local CIB in state: %s", fsa_state2string(fsa_state));
+        call_opt |= cib_scope_local;
+    }
+    return call_opt;
 }
