@@ -111,6 +111,7 @@ get_meta_attributes(GHashTable * meta_hash, resource_t * rsc,
                     node_t * node, pe_working_set_t * data_set)
 {
     GHashTable *node_hash = NULL;
+    const char *version = crm_element_value(data_set->input, XML_ATTR_CRM_VERSION);
 
     if (node) {
         node_hash = node->details->attrs;
@@ -130,11 +131,13 @@ get_meta_attributes(GHashTable * meta_hash, resource_t * rsc,
     unpack_instance_attributes(data_set->input, rsc->xml, XML_TAG_META_SETS, node_hash,
                                meta_hash, NULL, FALSE, data_set->now);
 
-    /* populate from the regular attributes until the GUI can create
-     * meta attributes
-     */
-    unpack_instance_attributes(data_set->input, rsc->xml, XML_TAG_ATTR_SETS, node_hash,
-                               meta_hash, NULL, FALSE, data_set->now);
+    if(version == NULL || compare_version(version, "3.0.9") < 0) {
+        /* populate from the regular attributes until the GUI can create
+         * meta attributes
+         */
+        unpack_instance_attributes(data_set->input, rsc->xml, XML_TAG_ATTR_SETS, node_hash,
+                                   meta_hash, NULL, FALSE, data_set->now);
+    }
 
     /* set anything else based on the parent */
     if (rsc->parent != NULL) {
@@ -158,10 +161,6 @@ get_rsc_attributes(GHashTable * meta_hash, resource_t * rsc,
 
     unpack_instance_attributes(data_set->input, rsc->xml, XML_TAG_ATTR_SETS, node_hash,
                                meta_hash, NULL, FALSE, data_set->now);
-
-    if (rsc->container) {
-        g_hash_table_replace(meta_hash, strdup(CRM_META"_"XML_RSC_ATTR_CONTAINER), strdup(rsc->container->id));
-    }
 
     /* set anything else based on the parent */
     if (rsc->parent != NULL) {
@@ -248,7 +247,7 @@ unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * d
     template_ops = find_xml_node(new_xml, "operations", FALSE);
 
     for (child_xml = __xml_first_child(xml_obj); child_xml != NULL;
-         child_xml = __xml_next(child_xml)) {
+         child_xml = __xml_next_element(child_xml)) {
         xmlNode *new_child = NULL;
 
         new_child = add_node_copy(new_xml, child_xml);
@@ -263,13 +262,13 @@ unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * d
         GHashTable *rsc_ops_hash =
             g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, NULL);
 
-        for (op = __xml_first_child(rsc_ops); op != NULL; op = __xml_next(op)) {
+        for (op = __xml_first_child(rsc_ops); op != NULL; op = __xml_next_element(op)) {
             char *key = template_op_key(op);
 
             g_hash_table_insert(rsc_ops_hash, key, op);
         }
 
-        for (op = __xml_first_child(template_ops); op != NULL; op = __xml_next(op)) {
+        for (op = __xml_first_child(template_ops); op != NULL; op = __xml_next_element(op)) {
             char *key = template_op_key(op);
 
             if (g_hash_table_lookup(rsc_ops_hash, key) == NULL) {
@@ -332,6 +331,50 @@ add_template_rsc(xmlNode * xml_obj, pe_working_set_t * data_set)
     }
 
     return TRUE;
+}
+
+static void
+handle_rsc_isolation(resource_t *rsc)
+{
+    resource_t *top = uber_parent(rsc);
+    resource_t *iso = rsc;
+    const char *wrapper = NULL;
+    const char *value;
+
+    /* check for isolation wrapper mapping if the parent doesn't have one set
+     * isolation mapping is enabled by default. For safety, we are allowing isolation
+     * to be disabled by setting the meta attr, isolation=false. */
+    value = g_hash_table_lookup(rsc->meta, XML_RSC_ATTR_ISOLATION);
+    if (top->isolation_wrapper == NULL && (value == NULL || crm_is_true(value))) {
+        if (g_hash_table_lookup(rsc->parameters, "pcmk_docker_image")) {
+            wrapper = "docker-wrapper";
+        }
+        /* add more isolation technologies here as we expand */
+    } else if (top->isolation_wrapper) {
+        goto set_rsc_opts;
+    }
+
+    if (wrapper == NULL) {
+        return;
+    }
+
+    /* if this is a cloned primitive/group, go head and set the isolation wrapper at
+     * at the clone level. this is really the only sane thing to do in this situation.
+     * This allows someone to clone an isolated resource without having to shuffle
+     * around the isolation attributes to the clone parent */
+    if (top == rsc->parent && top->variant >= pe_clone) {
+        iso = top;
+    }
+
+    iso->isolation_wrapper = wrapper;
+    set_bit(top->flags, pe_rsc_unique);
+
+set_rsc_opts:
+    clear_bit(rsc->flags, pe_rsc_allow_migrate);
+    set_bit(rsc->flags, pe_rsc_unique);
+    if (top->variant >= pe_clone) {
+        add_hash_param(rsc->meta, XML_RSC_ATTR_UNIQUE, XML_BOOLEAN_TRUE);
+    }
 }
 
 gboolean
@@ -414,6 +457,7 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
     pe_rsc_trace((*rsc), "Unpacking resource...");
 
     get_meta_attributes((*rsc)->meta, *rsc, NULL, data_set);
+    get_rsc_attributes((*rsc)->parameters, *rsc, NULL, data_set);
 
     (*rsc)->flags = 0;
     set_bit((*rsc)->flags, pe_rsc_runnable);
@@ -492,9 +536,11 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
     }
 
     pe_rsc_trace((*rsc), "Options for %s", (*rsc)->id);
-    value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_UNIQUE);
+
+    handle_rsc_isolation(*rsc);
 
     top = uber_parent(*rsc);
+    value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_UNIQUE);
     if (crm_is_true(value) || top->variant < pe_clone) {
         set_bit((*rsc)->flags, pe_rsc_unique);
     }
@@ -637,11 +683,22 @@ common_unpack(xmlNode * xml_obj, resource_t ** rsc,
     }
 
     pe_rsc_trace((*rsc), "\tRequired to start: %s%s", value, isdefault?" (default)":"");
-
     value = g_hash_table_lookup((*rsc)->meta, XML_RSC_ATTR_FAIL_TIMEOUT);
     if (value != NULL) {
         /* call crm_get_msec() and convert back to seconds */
         (*rsc)->failure_timeout = (crm_get_msec(value) / 1000);
+    }
+
+    if (baremetal_remote_node) {
+        value = g_hash_table_lookup((*rsc)->parameters, XML_REMOTE_ATTR_RECONNECT_INTERVAL);
+        if (value) {
+            /* reconnect delay works by setting failure_timeout and preventing the
+             * connection from starting until the failure is cleared. */
+            (*rsc)->remote_reconnect_interval = (crm_get_msec(value) / 1000);
+            /* we want to override any default failure_timeout in use when remote
+             * reconnect_interval is in use. */ 
+            (*rsc)->failure_timeout = (*rsc)->remote_reconnect_interval;
+        }
     }
 
     get_target_role(*rsc, &((*rsc)->next_role));

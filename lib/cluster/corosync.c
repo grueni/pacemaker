@@ -91,10 +91,10 @@ corosync_node_name(uint64_t /*cmap_handle_t */ cmap_handle, uint32_t nodeid)
         uint32_t id = 0;
         char *key = NULL;
 
-        key = g_strdup_printf("nodelist.node.%d.nodeid", lpc);
+        key = crm_strdup_printf("nodelist.node.%d.nodeid", lpc);
         rc = cmap_get_uint32(cmap_handle, key, &id);
         crm_trace("Checking %u vs %u from %s", nodeid, id, key);
-        g_free(key);
+        free(key);
 
         if (rc != CS_OK) {
             break;
@@ -103,7 +103,7 @@ corosync_node_name(uint64_t /*cmap_handle_t */ cmap_handle, uint32_t nodeid)
         if (nodeid == id) {
             crm_trace("Searching for node name for %u in nodelist.node.%d %s", nodeid, lpc, name);
             if (name == NULL) {
-                key = g_strdup_printf("nodelist.node.%d.ring0_addr", lpc);
+                key = crm_strdup_printf("nodelist.node.%d.ring0_addr", lpc);
                 cmap_get_string(cmap_handle, key, &name);
                 crm_trace("%s = %s", key, name);
 
@@ -111,14 +111,14 @@ corosync_node_name(uint64_t /*cmap_handle_t */ cmap_handle, uint32_t nodeid)
                     free(name);
                     name = NULL;
                 }
-                g_free(key);
+                free(key);
             }
 
             if (name == NULL) {
-                key = g_strdup_printf("nodelist.node.%d.name", lpc);
+                key = crm_strdup_printf("nodelist.node.%d.name", lpc);
                 cmap_get_string(cmap_handle, key, &name);
                 crm_trace("%s = %s %d", key, name, rc);
-                g_free(key);
+                free(key);
             }
             break;
         }
@@ -198,37 +198,35 @@ pcmk_quorum_notification(quorum_handle_t handle,
 
     init_phase = FALSE;
 
+    /* Reset last_seen for all cached nodes so we can tell which ones aren't
+     * in the view list */
     g_hash_table_iter_init(&iter, crm_peer_cache);
     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) &node)) {
         node->last_seen = 0;
     }
 
+    /* Update the peer cache for each node in view list */
     for (i = 0; i < view_list_entries; i++) {
         uint32_t id = view_list[i];
-        char *name = NULL;
 
         crm_debug("Member[%d] %u ", i, id);
 
+        /* Get this node's peer cache entry (adding one if not already there) */
         node = crm_get_peer(id, NULL);
         if (node->uname == NULL) {
+            char *name = corosync_node_name(0, id);
+
             crm_info("Obtaining name for new node %u", id);
-            name = corosync_node_name(0, id);
             node = crm_get_peer(id, name);
+            free(name);
         }
 
+        /* Update the node state (including updating last_seen to ring_id) */
         crm_update_peer_state(__FUNCTION__, node, CRM_NODE_MEMBER, ring_id);
-        free(name);
     }
 
-    crm_trace("Reaping unseen nodes...");
-    g_hash_table_iter_init(&iter, crm_peer_cache);
-    while (g_hash_table_iter_next(&iter, NULL, (gpointer *) &node)) {
-        if (node->last_seen != ring_id && node->state) {
-            crm_update_peer_state(__FUNCTION__, node, CRM_NODE_LOST, 0);
-        } else if (node->last_seen != ring_id) {
-            crm_info("State of node %s[%u] is still unknown", node->uname, node->id);
-        }
-    }
+    /* Remove any peer cache entries we didn't update */
+    crm_reap_unseen_nodes(ring_id);
 
     if (quorum_app_callback) {
         quorum_app_callback(ring_id, quorate);
@@ -504,9 +502,9 @@ corosync_initialize_nodelist(void *cluster, gboolean force_member, xmlNode * xml
         char *name = NULL;
         char *key = NULL;
 
-        key = g_strdup_printf("nodelist.node.%d.nodeid", lpc);
+        key = crm_strdup_printf("nodelist.node.%d.nodeid", lpc);
         rc = cmap_get_uint32(cmap_handle, key, &nodeid);
-        g_free(key);
+        free(key);
 
         if (rc != CS_OK) {
             break;

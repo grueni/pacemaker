@@ -31,6 +31,7 @@
 
 #  include <crm/lrmd.h>
 #  include <crm/common/logging.h>
+#  include <crm/common/io.h>
 #  include <crm/common/ipcs.h>
 
 /* Dynamic loading of libraries */
@@ -130,12 +131,11 @@ gboolean check_utilization(const char *value);
 
 /* Shared PE/crmd functionality */
 void filter_action_parameters(xmlNode * param_set, const char *version);
-void filter_reload_parameters(xmlNode * param_set, const char *restart_string);
 
 /* Resource operation updates */
 xmlNode *create_operation_update(xmlNode * parent, lrmd_event_data_t * event,
-                                 const char *caller_version, int target_rc, const char *origin,
-                                 int level);
+                                 const char * caller_version, int target_rc, const char * node,
+                                 const char * origin, int level);
 
 /* char2score */
 extern int node_score_red;
@@ -151,15 +151,9 @@ crm_strlen_zero(const char *s)
 }
 
 char *add_list_element(char *list, const char *value);
-char *generate_series_filename(const char *directory, const char *series, int sequence,
-                               gboolean bzip);
-int get_last_sequence(const char *directory, const char *series);
-void write_last_sequence(const char *directory, const char *series, int sequence, int max);
 
 int crm_pid_active(long pid);
 void crm_make_daemon(const char *name, gboolean daemonize, const char *pidfile);
-gboolean crm_is_writable(const char *dir, const char *file, const char *user, const char *group,
-                         gboolean need_both);
 
 char *generate_op_key(const char *rsc_id, const char *op_type, int interval);
 char *generate_notify_key(const char *rsc_id, const char *notify_type, const char *op_type);
@@ -281,6 +275,7 @@ int crm_read_pidfile(const char *filename);
 #  define F_ATTRD_VALUE		"attr_value"
 #  define F_ATTRD_SET		"attr_set"
 #  define F_ATTRD_IS_REMOTE	"attr_is_remote"
+#  define F_ATTRD_IS_PRIVATE     "attr_is_private"
 #  define F_ATTRD_SECTION	"attr_section"
 #  define F_ATTRD_DAMPEN	"attr_dampening"
 #  define F_ATTRD_IGNORE_LOCALLY "attr_ignore_locally"
@@ -289,6 +284,15 @@ int crm_read_pidfile(const char *filename);
 #  define F_ATTRD_USER		"attr_user"
 #  define F_ATTRD_WRITER	"attr_writer"
 #  define F_ATTRD_VERSION	"attr_version"
+
+/* attrd operations */
+#  define ATTRD_OP_PEER_REMOVE   "peer-remove"
+#  define ATTRD_OP_UPDATE        "update"
+#  define ATTRD_OP_QUERY         "query"
+#  define ATTRD_OP_REFRESH       "refresh"
+#  define ATTRD_OP_FLUSH         "flush"
+#  define ATTRD_OP_SYNC          "sync"
+#  define ATTRD_OP_SYNC_RESPONSE "sync-response"
 
 #  if SUPPORT_COROSYNC
 #    if CS_USES_LIBQB
@@ -340,5 +344,43 @@ void cib_ipc_servers_init(qb_ipcs_service_t **ipcs_ro,
 void cib_ipc_servers_destroy(qb_ipcs_service_t *ipcs_ro,
         qb_ipcs_service_t *ipcs_rw,
         qb_ipcs_service_t *ipcs_shm);
+
+static inline void *realloc_safe(void *ptr, size_t size)
+{
+    void *ret = realloc(ptr, size);
+
+    if(ret == NULL) {
+        abort();
+    }
+
+    return ret;
+}
+
+const char *crm_xml_add_last_written(xmlNode *xml_node);
+void crm_xml_dump(xmlNode * data, int options, char **buffer, int *offset, int *max, int depth);
+void crm_buffer_add_char(char **buffer, int *offset, int *max, char c);
+
+gboolean crm_digest_verify(xmlNode *input, const char *expected);
+
+/* cross-platform compatibility functions */
+char *crm_compat_realpath(const char *path);
+
+/* IPC Proxy Backend Shared Functions */
+typedef struct remote_proxy_s {
+    char *node_name;
+    char *session_id;
+
+    gboolean is_local;
+
+    crm_ipc_t *ipc;
+    mainloop_io_t *source;
+    uint32_t last_request_id;
+
+} remote_proxy_t;
+void remote_proxy_notify_destroy(lrmd_t *lrmd, const char *session_id);
+void remote_proxy_relay_event(lrmd_t *lrmd, const char *session_id, xmlNode *msg);
+void remote_proxy_relay_response(lrmd_t *lrmd, const char *session_id, xmlNode *msg, int msg_id);
+void remote_proxy_end_session(const char *session);
+void remote_proxy_free(gpointer data);
 
 #endif                          /* CRM_INTERNAL__H */

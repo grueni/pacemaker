@@ -110,6 +110,15 @@ join_make_offer(gpointer key, gpointer value, gpointer user_data)
     if (crm_is_peer_active(member) == FALSE) {
         crm_info("Not making an offer to %s: not active (%s)", member->uname, member->state);
         if(member->expected == NULL && safe_str_eq(member->state, CRM_NODE_LOST)) {
+            /* You would think this unsafe, but in fact this plus an
+             * active resource is what causes it to be fenced.
+             *
+             * Yes, this does mean that any node that dies at the same
+             * time as the old DC and is not running resource (still)
+             * won't be fenced.
+             *
+             * I'm not happy about this either.
+             */
             crm_update_peer_expected(__FUNCTION__, member, CRMD_JOINSTATE_DOWN);
         }
         return;
@@ -443,8 +452,6 @@ finalize_sync_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, voi
         crm_debug("No longer the DC in S_FINALIZE_JOIN: %s/%s",
                   AM_I_DC ? "DC" : "CRMd", fsa_state2string(fsa_state));
     }
-
-    free(user_data);
 }
 
 static void

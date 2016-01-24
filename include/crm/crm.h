@@ -35,7 +35,7 @@
 
 #  include <libxml/tree.h>
 
-#  define CRM_FEATURE_SET		"3.0.9"
+#  define CRM_FEATURE_SET		"3.0.10"
 
 #  define EOS		'\0'
 #  define DIMOF(a)	((int) (sizeof(a)/sizeof(a[0])) )
@@ -133,6 +133,7 @@ extern char *crm_system_name;
 #  define CRM_OP_REPROBE		"probe_again"
 #  define CRM_OP_CLEAR_FAILCOUNT  "clear_failcount"
 #  define CRM_OP_RELAXED_SET  "one-or-more"
+#  define CRM_OP_RELAXED_CLONE  "clone-one-or-more"
 #  define CRM_OP_RM_NODE_CACHE "rm_node_cache"
 
 #  define CRMD_JOINSTATE_DOWN           "down"

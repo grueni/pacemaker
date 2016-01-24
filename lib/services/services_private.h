@@ -23,9 +23,10 @@
 #  include <dbus/dbus.h>
 #endif
 
+#define MAX_ARGC        255
 struct svc_action_private_s {
     char *exec;
-    char *args[255];
+    char *args[MAX_ARGC];
 
     guint repeat_timer;
     void (*callback) (svc_action_t * op);
@@ -57,5 +58,13 @@ gboolean cancel_recurring_action(svc_action_t * op);
 
 gboolean recurring_action_timer(gpointer data);
 gboolean operation_finalize(svc_action_t * op);
+
+void handle_blocked_ops(void);
+
+gboolean is_op_blocked(const char *rsc);
+
+#if SUPPORT_DBUS
+void services_set_op_pending(svc_action_t *op, DBusPendingCall *pending);
+#endif
 
 #endif                          /* __MH_SERVICES_PRIVATE_H__ */

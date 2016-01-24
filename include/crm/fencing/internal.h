@@ -63,11 +63,17 @@ xmlNode *create_device_registration_xml(const char *id, const char *namespace, c
 #  define F_STONITH_TOLERANCE     "st_tolerance"
 /*! Action specific timeout period returned in query of fencing devices. */
 #  define F_STONITH_ACTION_TIMEOUT       "st_action_timeout"
+/*! Host in query result is not allowed to run this action */
+#  define F_STONITH_ACTION_DISALLOWED     "st_action_disallowed"
+/*! Maximum of random fencing delay for a device */
+#  define F_STONITH_DELAY_MAX            "st_delay_max"
 /*! Has this device been verified using a monitor type
  *  operation (monitor, list, status) */
 #  define F_STONITH_DEVICE_VERIFIED   "st_monitor_verified"
 /*! device is required for this action */
 #  define F_STONITH_DEVICE_REQUIRED   "st_required"
+/*! number of available devices in query result */
+#  define F_STONITH_AVAILABLE_DEVICES "st-available-devices"
 #  define F_STONITH_CALLBACK_TOKEN    "st_async_id"
 #  define F_STONITH_CLIENTNAME        "st_clientname"
 #  define F_STONITH_CLIENTNODE        "st_clientnode"
@@ -103,6 +109,7 @@ xmlNode *create_device_registration_xml(const char *id, const char *namespace, c
 #  define STONITH_ATTR_HOSTMAP   "pcmk_host_map"
 #  define STONITH_ATTR_HOSTLIST  "pcmk_host_list"
 #  define STONITH_ATTR_HOSTCHECK "pcmk_host_check"
+#  define STONITH_ATTR_DELAY_MAX "pcmk_delay_max"
 
 #  define STONITH_ATTR_ACTION_OP   "action"
 

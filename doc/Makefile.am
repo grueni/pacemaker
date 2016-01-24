@@ -25,6 +25,9 @@ ascii		= crm_fencing.txt acls.txt
 docbook		= Pacemaker_Explained Clusters_from_Scratch Pacemaker_Remote
 doc_DATA	= README.hb2openais $(ascii) $(generated_docs)
 
+# rsync destination for www targets
+RSYNC_DEST      = root@www.clusterlabs.org:/var/www/html/doc/
+
 publican_docs   =
 generated_docs	=
 generated_mans	=
@@ -71,24 +74,37 @@ EXTRA_DIST	= $(docbook:%=%.xml)
 	$(AM_V_ASCII)$(ASCIIDOC) --unsafe --backend=xhtml11 $<
 
 
+SHARED_TXT=$(wildcard shared/en-US/*.txt)
+SHARED_XML=$(SHARED_TXT:%.txt=%.xml)
+
+
+CFS_SHARED_TXT=$(addprefix shared/en-US/,pacemaker-intro.txt)
+CFS_SHARED_XML=$(CFS_SHARED_TXT:%.txt=%.xml)
 CFS_TXT=$(wildcard Clusters_from_Scratch/en-US/*.txt)
 CFS_XML=$(CFS_TXT:%.txt=%.xml)
 
+$(CFS_XML): $(CFS_SHARED_XML)
+
 # We have to hardcode the book name
 # With '%' the test for 'newness' fails
-Clusters_from_Scratch.build: $(PNGS) $(wildcard Clusters_from_Scratch/en-US/*.xml) $(CFS_XML)
+Clusters_from_Scratch.build: $(PNGS) $(wildcard Clusters_from_Scratch/en-US/*.xml) $(CFS_XML) $(CFS_SHARED_XML)
 	$(PCMK_V) @echo Building $(@:%.build=%) because of $?
 	rm -rf $(@:%.build=%)/publish/*
 	$(AM_V_PUB)cd $(@:%.build=%) && RPM_BUILD_DIR="" $(PUBLICAN) build --publish --langs=$(DOCBOOK_LANGS) --formats=$(DOCBOOK_FORMATS) $(PCMK_quiet)
 	rm -rf $(@:%.build=%)/tmp
 	touch $@
 
+
+PE_SHARED_TXT=$(addprefix shared/en-US/,pacemaker-intro.txt)
+PE_SHARED_XML=$(PE_SHARED_TXT:%.txt=%.xml)
 PE_TXT=$(wildcard Pacemaker_Explained/en-US/*.txt)
 PE_XML=$(PE_TXT:%.txt=%.xml)
 
+$(PE_XML): $(PE_SHARED_XML)
+
 # We have to hardcode the book name
 # With '%' the test for 'newness' fails
-Pacemaker_Explained.build: $(PNGS) $(wildcard Pacemaker_Explained/en-US/*.xml) $(PE_XML)
+Pacemaker_Explained.build: $(PNGS) $(wildcard Pacemaker_Explained/en-US/*.xml) $(PE_XML) $(PE_SHARED_XML)
 	$(PCMK_V) @echo Building $(@:%.build=%) because of $?
 	rm -rf $(@:%.build=%)/publish/*
 	$(AM_V_PUB)cd $(@:%.build=%) && RPM_BUILD_DIR="" $(PUBLICAN) build --publish --langs=$(DOCBOOK_LANGS) --formats=$(DOCBOOK_FORMATS) $(PCMK_quiet)
@@ -127,7 +143,6 @@ docbook_build = $(docbook:%=%.build)
 
 all-local: $(docbook_build) */publican.cfg
 
-#install-data-local: all-local
 install-data-local: all-local
 	for book in $(docbook); do 							\
 	    filelist=`find $$book/publish/* -print`;					\
@@ -154,16 +169,11 @@ brand:  $(BRAND_PNGS) $(wildcard publican-clusterlabs/en-US/*.xml)
 pdf:
 	make DOCBOOK_FORMATS="pdf" ASCIIDOC_CLI_TYPE=$(ASCIIDOC_CLI_TYPE) all-local
 
-# Make sure www-(pcs|crmsh) happen in serial
 www: clean-local $(generated_docs) $(ascii)
 	make www-cli
-	rsync -rtz --progress $(generated_docs) $(ascii) $(asciiman) root@www.clusterlabs.org:/var/www/html/doc/
+	rsync -rtz --progress $(generated_docs) $(ascii) $(asciiman) $(RSYNC_DEST)
 
-www-crmsh:
-	make ASCIIDOC_CLI_TYPE=crmsh clean-local www-cli
-
-www-pcs:
-	make ASCIIDOC_CLI_TYPE=pcs www-cli
+www-pcs: www-cli
 
 www-cli:
 	for book in $(docbook); do 										\
@@ -180,14 +190,12 @@ if BUILD_DOCBOOK
 			mv $$book/publish/$$lang/Pacemaker/$(PACKAGE_SERIES)-$(ASCIIDOC_CLI_TYPE)/epub/$$book/Pacemaker-1.1{-$(ASCIIDOC_CLI_TYPE),}-$$book-$$lang.epub;	\
 			mv $$book/publish/$$lang/Pacemaker/$(PACKAGE_SERIES)-$(ASCIIDOC_CLI_TYPE)/pdf/$$book/Pacemaker-1.1{-$(ASCIIDOC_CLI_TYPE),}-$$book-$$lang.pdf;	\
 		done;											\
-		rsync -rtz --progress $$book/publish/* root@www.clusterlabs.org:/var/www/html/doc/;	\
+		rsync -rtz --progress $$book/publish/* $(RSYNC_DEST);					\
 		sed -i.sed 's@version:.*@version: $(PACKAGE_SERIES)@' $$book/publican.cfg;		\
 	done
 endif
 
 clean-local:
-	-rm -rf $(generated_docs) $(generated_mans) $(docbook_build) $(CFS_XML) $(PE_XML) $(PR_XML)
+	-rm -rf $(generated_docs) $(generated_mans) $(docbook_build)
+	-rm -rf $(SHARED_XML) $(CFS_XML) $(PE_XML) $(PR_XML)
 	for book in $(docbook); do rm -rf $$book/tmp $$book/publish; done
-
-foo:
-	rm -f $(CFS_XML)

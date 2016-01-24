@@ -5,8 +5,7 @@ Author: Andrew Beekhof <abeekhof@suse.de>
 Copyright (C) 2008 Andrew Beekhof
 '''
 
-from UserDict import UserDict
-import sys, time, types, syslog, os, struct, string, signal, traceback, warnings, socket
+import os, string, warnings
 
 from cts.CTSvars import *
 from cts.CTS     import ClusterManager
@@ -106,7 +105,7 @@ class CIB11(ConfigBase):
             if not name:
                 name = "r%s%d" % (self.CM.Env["IPagent"], self.counter)
                 self.counter = self.counter + 1
-	    r = Resource(self.Factory, name, self.CM.Env["IPagent"], standard)
+            r = Resource(self.Factory, name, self.CM.Env["IPagent"], standard)
 
         r.add_op("monitor", "5s")
         return r
@@ -261,6 +260,7 @@ class CIB11(ConfigBase):
         # Migrator
         # Make this slightly sticky (since we have no other location constraints) to avoid relocation during Reattach
         m = Resource(self.Factory, "migrator","Dummy",  "ocf", "pacemaker")
+        m["passwd"] = "whatever"
         m.add_meta("resource-stickiness","1")
         m.add_meta("allow-migrate", "1")
         m.add_op("monitor", "P10S")
@@ -298,7 +298,32 @@ class CIB11(ConfigBase):
         # Group Resource
         g = Group(self.Factory, "group-1")
         g.add_child(self.NewIP())
-        g.add_child(self.NewIP())
+
+        if self.CM.Env["have_systemd"]:
+            # It would be better to put the python in a separate file, so we
+            # could loop "while True" rather than sleep for 24 hours. We can't
+            # put a loop in a single-line python command; only simple commands
+            # may be separated by semicolon in python.
+            dummy_service_file = """
+[Unit]
+Description=Dummy resource that takes a while to start
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python -c 'import time, systemd.daemon; time.sleep(10); systemd.daemon.notify("READY=1"); time.sleep(86400)'
+ExecStop=/bin/sleep 10
+ExecStop=/bin/kill -s KILL \$MAINPID
+"""
+
+            os.system("cat <<-END >/tmp/DummySD.service\n%s\nEND" % (dummy_service_file))
+
+            self.CM.install_helper("DummySD.service", destdir="/usr/lib/systemd/system/", sourcedir="/tmp")
+            sysd = Resource(self.Factory, "petulant", "DummySD",  "service")
+            sysd.add_op("monitor", "P10S")
+            g.add_child(sysd)
+        else:
+            g.add_child(self.NewIP())
+
         g.add_child(self.NewIP())
 
         # Group with the master
@@ -362,7 +387,7 @@ class ConfigFactory:
         """register a constructor"""
         _args = [constructor]
         _args.extend(args)
-        setattr(self, methodName, apply(ConfigFactoryItem,_args, kargs))
+        setattr(self, methodName, ConfigFactoryItem(*_args, **kargs))
 
     def unregister(self, methodName):
         """unregister a constructor"""
@@ -390,7 +415,6 @@ class ConfigFactory:
 
 class ConfigFactoryItem:
     def __init__(self, function, *args, **kargs):
-        assert callable(function), "function should be a callable obj"
         self._function = function
         self._args = args
         self._kargs = kargs
@@ -401,7 +425,7 @@ class ConfigFactoryItem:
         _args.extend(args)
         _kargs = self._kargs.copy()
         _kargs.update(kargs)
-        return apply(self._function,_args,_kargs)
+        return self._function(*_args,**_kargs)
 
 # Basic Sanity Testing
 if __name__ == '__main__':
@@ -424,4 +448,4 @@ if __name__ == '__main__':
 
     CibFactory = ConfigFactory(manager)
     cib = CibFactory.createConfig("pacemaker-1.1")
-    print cib.contents()
+    print(cib.contents())

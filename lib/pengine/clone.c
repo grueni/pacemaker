@@ -208,7 +208,7 @@ clone_unpack(resource_t * rsc, pe_working_set_t * data_set)
 
     if (clone_data->xml_obj_child == NULL) {
         clone_data->xml_obj_child = find_xml_node(xml_obj, XML_CIB_TAG_RESOURCE, TRUE);
-        for (a_child = __xml_first_child(xml_obj); a_child != NULL; a_child = __xml_next(a_child)) {
+        for (a_child = __xml_first_child(xml_obj); a_child != NULL; a_child = __xml_next_element(a_child)) {
             if (crm_str_eq((const char *)a_child->name, XML_CIB_TAG_RESOURCE, TRUE)) {
                 num_xml_children++;
             }
@@ -220,7 +220,7 @@ clone_unpack(resource_t * rsc, pe_working_set_t * data_set)
         return FALSE;
     }
 
-    for (a_child = __xml_first_child(xml_obj); a_child != NULL; a_child = __xml_next(a_child)) {
+    for (a_child = __xml_first_child(xml_obj); a_child != NULL; a_child = __xml_next_element(a_child)) {
         if (crm_str_eq((const char *)a_child->name, type, TRUE)) {
             num_xml_children++;
         }
@@ -426,7 +426,8 @@ clone_print(resource_t * rsc, const char *pre_text, long options, void *print_da
 
             } else if (is_set(rsc->flags, pe_rsc_unique)) {
                 print_full = TRUE;
-            } else {
+
+            } else if (is_not_set(options, pe_print_clone_active)) {
                 stopped_list = add_list_element(stopped_list, child_rsc->id);
             }
 
@@ -438,6 +439,10 @@ clone_print(resource_t * rsc, const char *pre_text, long options, void *print_da
             /* Unique, unmanaged or failed clone */
             print_full = TRUE;
 
+        } else if (is_set(options, pe_print_pending) && child_rsc->pending_task != NULL) {
+            /* In a pending state */
+            print_full = TRUE;
+
         } else if (child_rsc->fns->active(child_rsc, TRUE)) {
             /* Fully active anonymous clone */
             node_t *location = child_rsc->fns->location(child_rsc, NULL, TRUE);
@@ -445,7 +450,10 @@ clone_print(resource_t * rsc, const char *pre_text, long options, void *print_da
             if (location) {
                 enum rsc_role_e a_role = child_rsc->fns->state(child_rsc, TRUE);
 
-                if (a_role > RSC_ROLE_SLAVE) {
+                if (location->details->online == FALSE && location->details->unclean) {
+                    print_full = TRUE;
+
+                } else if (a_role > RSC_ROLE_SLAVE) {
                     /* And active on a single node as master */
                     master_list = g_list_append(master_list, location);
 
@@ -504,36 +512,37 @@ clone_print(resource_t * rsc, const char *pre_text, long options, void *print_da
     free(list_text);
     list_text = NULL;
 
-    /* Stopped */
-    if(is_not_set(rsc->flags, pe_rsc_unique) 
-	&& (clone_data->clone_max > active_instances)) {
+    if (is_not_set(options, pe_print_clone_active)) {
+        /* Stopped */
+        if (is_not_set(rsc->flags, pe_rsc_unique)
+        && (clone_data->clone_max > active_instances)) {
 
-        GListPtr nIter;
-        GListPtr list = g_hash_table_get_values(rsc->allowed_nodes);
+            GListPtr nIter;
+            GListPtr list = g_hash_table_get_values(rsc->allowed_nodes);
 
-        /* Custom stopped list for non-unique clones */
-        free(stopped_list); stopped_list = NULL;
+            /* Custom stopped list for non-unique clones */
+            free(stopped_list); stopped_list = NULL;
 
-        if(g_list_length(list) == 0) {
-            /* Clusters with symmetrical=false haven't calculated allowed_nodes yet
-             * If we've not probed for them yet, the Stopped list will be empty
-             */
-            list = g_hash_table_get_values(rsc->known_on);
-        }
-
-        list = g_list_sort(list, sort_node_uname);
-        for (nIter = list; nIter != NULL; nIter = nIter->next) {
-            node_t *node = (node_t *)nIter->data;
-
-            if(pe_find_node(rsc->running_on, node->details->uname) == NULL) {
-                stopped_list = add_list_element(stopped_list, node->details->uname);
+            if (g_list_length(list) == 0) {
+                /* Clusters with symmetrical=false haven't calculated allowed_nodes yet
+                 * If we've not probed for them yet, the Stopped list will be empty
+                 */
+                list = g_hash_table_get_values(rsc->known_on);
             }
-        }
-        g_list_free(list);
-    }
 
-    short_print(stopped_list, child_text, "Stopped", options, print_data);
-    free(stopped_list);
+            list = g_list_sort(list, sort_node_uname);
+            for (nIter = list; nIter != NULL; nIter = nIter->next) {
+                node_t *node = (node_t *)nIter->data;
+
+                if (pe_find_node(rsc->running_on, node->details->uname) == NULL) {
+                    stopped_list = add_list_element(stopped_list, node->details->uname);
+                }
+            }
+            g_list_free(list);
+        }
+        short_print(stopped_list, child_text, "Stopped", options, print_data);
+        free(stopped_list);
+    }
 
     if (options & pe_print_html) {
         status_print("</ul>\n");

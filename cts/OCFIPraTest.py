@@ -23,18 +23,18 @@ Licensed under the GNU GPL.
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA.
 
-import string,sys,struct,os,random,time,syslog
+import string, sys, struct, os, random, time, syslog
 from cts.CTSvars import *
 
 
 def usage():
-    print "usage: " + sys.argv[0]  \
+    print("usage: " + sys.argv[0]  \
     +  " [-2]"\
     +  " [--ipbase|-i first-test-ip]"\
     +  " [--ipnum|-n test-ip-num]"\
     +  " [--help|-h]"\
     +  " [--perform|-p op]"\
-    +  " [number-of-iterations]"
+    +  " [number-of-iterations]")
     sys.exit(1)
 
 
@@ -71,7 +71,7 @@ def log(towrite):
     t = time.strftime("%Y/%m/%d_%H:%M:%S\t", time.localtime(time.time()))  
     logstr = t + " "+str(towrite)
     syslog.syslog(logstr)
-    print logstr
+    print(logstr)
 
 if __name__ == '__main__': 
     ra = "IPaddr"

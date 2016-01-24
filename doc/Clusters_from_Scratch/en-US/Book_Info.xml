@@ -8,8 +8,14 @@
 	<subtitle>Creating Active/Passive and Active/Active Clusters on Fedora</subtitle>
 	<productname>Pacemaker</productname>
 	<productnumber>1.1</productnumber>
-	<edition>5</edition>
-	<pubsnumber>0</pubsnumber>
+	<!--
+		EDITION-PUBSNUMBER should match REVNUMBER in Revision_History.xml.
+		Increment EDITION when the syntax of the documented software
+		changes (Fedora, pacemaker, corosync, pcs), and PUBSNUMBER for
+		simple textual changes (corrections, translations, etc.).
+	-->
+	<edition>8</edition>
+	<pubsnumber>1</pubsnumber>
 	<abstract>
 		<para>
 			The purpose of this document is to provide a start-to-finish guide to building an example active/passive cluster with Pacemaker and show how it can be converted to an active/active one.

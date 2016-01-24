@@ -185,11 +185,16 @@
 
 #  define XML_CIB_TAG_RSC_TEMPLATE	"template"
 
+#  define XML_RSC_ATTR_ISOLATION_INSTANCE	"isolation-instance"
+#  define XML_RSC_ATTR_ISOLATION_WRAPPER    "isolation-wrapper"
+#  define XML_RSC_ATTR_ISOLATION_HOST   "isolation-host"
+#  define XML_RSC_ATTR_ISOLATION    	"isolation"
 #  define XML_RSC_ATTR_RESTART	  	"restart-type"
 #  define XML_RSC_ATTR_ORDERED		"ordered"
 #  define XML_RSC_ATTR_INTERLEAVE	"interleave"
 #  define XML_RSC_ATTR_INCARNATION	"clone"
 #  define XML_RSC_ATTR_INCARNATION_MAX	"clone-max"
+#  define XML_RSC_ATTR_INCARNATION_MIN	"clone-min"
 #  define XML_RSC_ATTR_INCARNATION_NODEMAX	"clone-node-max"
 #  define XML_RSC_ATTR_MASTER_MAX	"master-max"
 #  define XML_RSC_ATTR_MASTER_NODEMAX	"master-node-max"
@@ -209,6 +214,8 @@
 #  define XML_RSC_ATTR_INTERNAL_RSC	"internal_rsc"
 #  define XML_RSC_ATTR_MAINTENANCE	"maintenance"
 #  define XML_RSC_ATTR_REMOTE_NODE  	"remote-node"
+
+#  define XML_REMOTE_ATTR_RECONNECT_INTERVAL "reconnect_interval"
 
 #  define XML_OP_ATTR_ON_FAIL		"on-fail"
 #  define XML_OP_ATTR_START_DELAY	"start-delay"
@@ -241,6 +248,7 @@
 #  define XML_NODE_IN_CLUSTER        	"in_ccm"
 #  define XML_NODE_IS_PEER    	"crmd"
 #  define XML_NODE_IS_REMOTE    	"remote_node"
+#  define XML_NODE_IS_FENCED		"node_fenced"
 
 #  define XML_CIB_ATTR_SHUTDOWN       	"shutdown"
 #  define XML_CIB_ATTR_STONITH	    	"stonith"
@@ -262,8 +270,10 @@
 #  define XML_LRM_ATTR_CALLID		"call-id"
 #  define XML_LRM_ATTR_OP_DIGEST	"op-digest"
 #  define XML_LRM_ATTR_OP_RESTART	"op-force-restart"
+#  define XML_LRM_ATTR_OP_SECURE	"op-secure-params"
 #  define XML_LRM_ATTR_RESTART_DIGEST	"op-restart-digest"
-#  define XML_LRM_ATTR_EXIT_REASON		"exit-reason"
+#  define XML_LRM_ATTR_SECURE_DIGEST	"op-secure-digest"
+#  define XML_LRM_ATTR_EXIT_REASON	"exit-reason"
 
 #  define XML_RSC_OP_LAST_CHANGE        "last-rc-change"
 #  define XML_RSC_OP_LAST_RUN           "last-run"
@@ -338,7 +348,6 @@
 
 #  define XML_ATTR_TE_NOWAIT		"op_no_wait"
 #  define XML_ATTR_TE_TARGET_RC		"op_target_rc"
-#  define XML_ATTR_TE_ALLOWFAIL		"op_allow_fail"
 #  define XML_ATTR_LRM_PROBE		"lrm-is-probe"
 #  define XML_TAG_TRANSIENT_NODEATTRS	"transient_attributes"
 
@@ -374,6 +383,7 @@
 #  define XML_TAG_FENCING_LEVEL         "fencing-level"
 #  define XML_ATTR_STONITH_INDEX        "index"
 #  define XML_ATTR_STONITH_TARGET       "target"
+#  define XML_ATTR_STONITH_TARGET_PATTERN       "target-pattern"
 #  define XML_ATTR_STONITH_DEVICES      "devices"
 
 #  define XML_TAG_DIFF                  "diff"
@@ -387,6 +397,9 @@
 #  define XML_DIFF_OP                   "operation"
 #  define XML_DIFF_PATH                 "path"
 #  define XML_DIFF_POSITION             "position"
+
+/* Defined for backward API compatibility but no longer used by Pacemaker */
+#  define XML_ATTR_TE_ALLOWFAIL         "op_allow_fail"
 
 #  include <crm/common/xml.h>
 

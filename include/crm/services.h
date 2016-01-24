@@ -78,7 +78,11 @@ enum lsb_status_exitcode {
     PCMK_LSB_STATUS_VAR_PID        = 1,
     PCMK_LSB_STATUS_VAR_LOCK       = 2,
     PCMK_LSB_STATUS_NOT_RUNNING    = 3,
-    PCMK_LSB_STATUS_NOT_INSTALLED  = 4,
+    PCMK_LSB_STATUS_UNKNOWN        = 4,
+
+    /* custom codes should be in the 150-199 range reserved for application use */
+    PCMK_LSB_STATUS_NOT_INSTALLED      = 150,
+    PCMK_LSB_STATUS_INSUFFICIENT_PRIV  = 151,
 };
 
 /* Uniform exit codes
@@ -98,6 +102,11 @@ enum ocf_exitcode {
 
 
     /* 150-199	reserved for application use */
+    PCMK_OCF_CONNECTION_DIED = 189, /* Operation failure implied by disconnection of the LRM API to a local or remote node */
+
+    PCMK_OCF_DEGRADED        = 190, /* Active reasource that is no longer 100% functional */
+    PCMK_OCF_DEGRADED_MASTER = 191, /* Promoted reasource that is no longer 100% functional */
+
     PCMK_OCF_EXEC_ERROR    = 192, /* Generic problem invoking the agent */
     PCMK_OCF_UNKNOWN       = 193, /* State of the service is unknown - used for recording in-flight operations */
     PCMK_OCF_SIGNAL        = 194,
@@ -130,6 +139,12 @@ enum nagios_exitcode {
     NAGIOS_INSUFFICIENT_PRIV = 100,
     NAGIOS_NOT_INSTALLED     = 101,
 };
+
+enum svc_action_flags {
+    /* On timeout, only kill pid, do not kill entire pid group */
+    SVC_ACTION_LEAVE_GROUP = 0x01,
+};
+
 /* *INDENT-ON* */
 
     typedef struct svc_action_private_s svc_action_private_t;
@@ -153,6 +168,7 @@ enum nagios_exitcode {
         int sequence;
         int expected_rc;
         int synchronous;
+        enum svc_action_flags flags;
 
         char *stderr_data;
         char *stdout_data;
@@ -170,13 +186,14 @@ enum nagios_exitcode {
     } svc_action_t;
 
 /**
- * Get a list of files or directories in a given path
+ * \brief Get a list of files or directories in a given path
  *
- * \param[in] root full path to a directory to read
- * \param[in] files true to get a list of files, false for a list of directories
+ * \param[in] root       full path to a directory to read
+ * \param[in] files      return list of files if TRUE or directories if FALSE
+ * \param[in] executable if TRUE and files is TRUE, only return executable files
  *
- * \return a list of what was found.  The list items are gchar *.  This list _must_
- *         be destroyed using g_list_free_full(list, free).
+ * \return a list of what was found.  The list items are char *.
+ * \note It is the caller's responsibility to free the result with g_list_free_full(list, free).
  */
     GList *get_directory_list(const char *root, gboolean files, gboolean executable);
 
@@ -189,23 +206,23 @@ enum nagios_exitcode {
     GList *services_list(void);
 
 /**
- * Get a list of providers
+ * \brief Get a list of providers
  *
- * \param[in] the standard for providers to check for (such as "ocf")
+ * \param[in] standard  list providers of this standard (e.g. ocf, lsb, etc.)
  *
- * \return a list of providers.  The list items are gchar *.  This list _must_
- *         be destroyed using g_list_free_full(list, free).
+ * \return a list of providers as char * list items (or NULL if standard does not support providers)
+ * \note The caller is responsible for freeing the result using g_list_free_full(list, free).
  */
     GList *resources_list_providers(const char *standard);
 
 /**
- * Get a list of resource agents
+ * \brief Get a list of resource agents
  *
- * \param[in] the standard for research agents to check for
- *            (such as "ocf", "lsb", or "windows")
+ * \param[in] standard  list agents using this standard (e.g. ocf, lsb, etc.) (or NULL for all)
+ * \param[in] provider  list agents from this provider (or NULL for all)
  *
- * \return a list of resource agents.  The list items are gchar *.  This list _must_
- *         be destroyed using g_list_free_full(list, free).
+ * \return a list of resource agents.  The list items are char *.
+ * \note The caller is responsible for freeing the result using g_list_free_full(list, free).
  */
     GList *resources_list_agents(const char *standard, const char *provider);
 
@@ -221,18 +238,28 @@ enum nagios_exitcode {
                                          int interval /* ms */ , int timeout /* ms */ );
 
 /**
- * Create a resources action.
+ * \brief Create a new resource action
  *
- * \param[in] timeout the timeout in milliseconds
- * \param[in] interval how often to repeat this action, in milliseconds.
- *            If this value is 0, only execute this action one time.
+ * \param[in] name     name of resource
+ * \param[in] standard resource agent standard (ocf, lsb, etc.)
+ * \param[in] provider resource agent provider
+ * \param[in] agent    resource agent name
+ * \param[in] action   action (start, stop, monitor, etc.)
+ * \param[in] interval how often to repeat this action, in milliseconds (if 0, execute only once)
+ * \param[in] timeout  consider action failed if it does not complete in this many milliseconds
+ * \param[in] params   action parameters
+ *
+ * \return newly allocated action instance
  *
  * \post After the call, 'params' is owned, and later free'd by the svc_action_t result
+ * \note The caller is responsible for freeing the return value using
+ *       services_action_free().
  */
     svc_action_t *resources_action_create(const char *name, const char *standard,
                                           const char *provider, const char *agent,
                                           const char *action, int interval /* ms */ ,
-                                          int timeout /* ms */ , GHashTable * params);
+                                          int timeout /* ms */ , GHashTable * params,
+                                          enum svc_action_flags flags);
 
 /**
  * Kick a recurring action so it is scheduled immediately for re-execution
@@ -292,7 +319,10 @@ enum nagios_exitcode {
                 case PCMK_LRM_OP_ERROR:return "Error";
                 case PCMK_LRM_OP_NOT_INSTALLED:return "Not installed";
                 default:return "UNKNOWN!";
-    }} static inline const char *services_ocf_exitcode_str(enum ocf_exitcode code) {
+        }
+    }
+
+    static inline const char *services_ocf_exitcode_str(enum ocf_exitcode code) {
         switch (code) {
             case PCMK_OCF_OK:
                 return "ok";
@@ -326,36 +356,48 @@ enum nagios_exitcode {
                 return "OCF_TIMEOUT";
             case PCMK_OCF_OTHER_ERROR:
                 return "OCF_OTHER_ERROR";
+            case PCMK_OCF_DEGRADED:
+                return "OCF_DEGRADED";
+            case PCMK_OCF_DEGRADED_MASTER:
+                return "OCF_DEGRADED_MASTER";
             default:
                 return "unknown";
         }
     }
 
+    /**
+     * \brief Get OCF equivalent of LSB exit code
+     *
+     * \param[in] action        LSB action that produced exit code
+     * \param[in] lsb_exitcode  Exit code of LSB action
+     *
+     * \return PCMK_OCF_* constant that corresponds to LSB exit code
+     */
     static inline enum ocf_exitcode
-     services_get_ocf_exitcode(char *action, int lsb_exitcode) {
-        if (action != NULL && strcmp("status", action) == 0) {
-            switch (lsb_exitcode) {
-                case PCMK_LSB_STATUS_OK:
-                    return PCMK_OCF_OK;
-                case PCMK_LSB_STATUS_VAR_PID:
-                    return PCMK_OCF_NOT_RUNNING;
-                case PCMK_LSB_STATUS_VAR_LOCK:
-                    return PCMK_OCF_NOT_RUNNING;
-                case PCMK_LSB_STATUS_NOT_RUNNING:
-                    return PCMK_OCF_NOT_RUNNING;
-                case PCMK_LSB_STATUS_NOT_INSTALLED:
-                    return PCMK_OCF_UNKNOWN_ERROR;
-                default:
-                    return PCMK_OCF_UNKNOWN_ERROR;
+    services_get_ocf_exitcode(const char *action, int lsb_exitcode)
+    {
+        /* For non-status actions, LSB and OCF share error code meaning <= 7 */
+        if (action && strcmp(action, "status") && strcmp(action, "monitor")) {
+            if ((lsb_exitcode < 0) || (lsb_exitcode > PCMK_LSB_NOT_RUNNING)) {
+                return PCMK_OCF_UNKNOWN_ERROR;
             }
-
-        } else if (lsb_exitcode > PCMK_LSB_NOT_RUNNING) {
-            return PCMK_OCF_UNKNOWN_ERROR;
+            return (enum ocf_exitcode)lsb_exitcode;
         }
 
-        /* For non-status operations, the PCMK_LSB and PCMK_OCF share error code meaning
-         * for rc <= 7 */
-        return (enum ocf_exitcode)lsb_exitcode;
+        /* status has different return codes */
+        switch (lsb_exitcode) {
+            case PCMK_LSB_STATUS_OK:
+                return PCMK_OCF_OK;
+            case PCMK_LSB_STATUS_NOT_INSTALLED:
+                return PCMK_OCF_NOT_INSTALLED;
+            case PCMK_LSB_STATUS_INSUFFICIENT_PRIV:
+                return PCMK_OCF_INSUFFICIENT_PRIV;
+            case PCMK_LSB_STATUS_VAR_PID:
+            case PCMK_LSB_STATUS_VAR_LOCK:
+            case PCMK_LSB_STATUS_NOT_RUNNING:
+                return PCMK_OCF_NOT_RUNNING;
+        }
+        return PCMK_OCF_UNKNOWN_ERROR;
     }
 
 #  ifdef __cplusplus

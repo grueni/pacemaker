@@ -182,14 +182,14 @@ print_synapse(unsigned int log_level, crm_graph_t * graph, synapse_t * synapse)
         crm_action_t *action = (crm_action_t *) lpc->data;
         const char *key = crm_element_value(action->xml, XML_LRM_ATTR_TASK_KEY);
         const char *host = crm_element_value(action->xml, XML_LRM_ATTR_TARGET);
-        char *desc = g_strdup_printf("%s %s op %s", state, actiontype2text(action->type), key);
+        char *desc = crm_strdup_printf("%s %s op %s", state, actiontype2text(action->type), key);
 
         do_crm_log(log_level,
                    "[Action %4d]: %-50s on %s (priority: %d, waiting: %s)",
                    action->id, desc, host ? host : "N/A",
                    synapse->priority, pending ? pending : "none");
 
-        g_free(desc);
+        free(desc);
     }
 
     if (synapse->executed == FALSE) {
@@ -200,10 +200,10 @@ print_synapse(unsigned int log_level, crm_graph_t * graph, synapse_t * synapse)
 
             if (find_action(graph, input->id) == NULL) {
                 if (host == NULL) {
-                    do_crm_log(log_level, " * [Input %2d]: Unresolved dependancy %s op %s",
+                    do_crm_log(log_level, " * [Input %2d]: Unresolved dependency %s op %s",
                                input->id, actiontype2text(input->type), key);
                 } else {
-                    do_crm_log(log_level, " * [Input %2d]: Unresolved dependancy %s op %s on %s",
+                    do_crm_log(log_level, " * [Input %2d]: Unresolved dependency %s op %s on %s",
                                input->id, actiontype2text(input->type), key, host);
                 }
             }

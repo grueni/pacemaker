@@ -52,6 +52,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
+#define MAX_TLS_RECV_WAIT 10000
+
 CRM_TRACE_INIT_DATA(lrmd);
 
 static int lrmd_api_disconnect(lrmd_t * lrmd);
@@ -589,8 +591,8 @@ lrmd_tls_recv_reply(lrmd_t * lrmd, int total_timeout, int expected_reply_id, int
 
     /* A timeout of 0 here makes no sense.  We have to wait a period of time
      * for the response to come back.  If -1 or 0, default to 10 seconds. */
-    if (total_timeout <= 0) {
-        total_timeout = 10000;
+    if (total_timeout <= 0 || total_timeout > MAX_TLS_RECV_WAIT) {
+        total_timeout = MAX_TLS_RECV_WAIT;
     }
 
     while (!xml) {
@@ -604,12 +606,18 @@ lrmd_tls_recv_reply(lrmd_t * lrmd, int total_timeout, int expected_reply_id, int
                 remaining_timeout = total_timeout;
             }
             if (remaining_timeout <= 0) {
+                crm_err("Never received the expected reply during the timeout period, disconnecting.");
+                *disconnected = TRUE;
                 return NULL;
             }
 
             crm_remote_recv(native->remote, remaining_timeout, disconnected);
             xml = crm_remote_parse_buffer(native->remote);
-            if (!xml || *disconnected) {
+            if (!xml) {
+                crm_err("Unable to receive expected reply, disconnecting.");
+                *disconnected = TRUE;
+                return NULL;
+            } else if (*disconnected) {
                 return NULL;
             }
         }
@@ -862,13 +870,14 @@ static int
 lrmd_api_poke_connection(lrmd_t * lrmd)
 {
     int rc;
+    lrmd_private_t *native = lrmd->private;
     xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);
 
     crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);
-    rc = lrmd_send_command(lrmd, LRMD_OP_POKE, data, NULL, 0, 0, FALSE);
+    rc = lrmd_send_command(lrmd, LRMD_OP_POKE, data, NULL, 0, 0, native->type == CRM_CLIENT_IPC ? TRUE : FALSE);
     free_xml(data);
 
-    return rc;
+    return rc < 0 ? rc : pcmk_ok;
 }
 
 static int
@@ -951,6 +960,7 @@ lrmd_ipc_connect(lrmd_t * lrmd, int *fd)
         if (native->ipc && crm_ipc_connect(native->ipc)) {
             *fd = crm_ipc_get_fd(native->ipc);
         } else if (native->ipc) {
+            crm_perror(LOG_ERR, "Connection to local resource manager failed");
             rc = -ENOTCONN;
         }
     } else {
@@ -1359,7 +1369,7 @@ lrmd_api_disconnect(lrmd_t * lrmd)
 {
     lrmd_private_t *native = lrmd->private;
 
-    crm_info("Disconnecting from lrmd service");
+    crm_info("Disconnecting from %d lrmd service", native->type);
     switch (native->type) {
         case CRM_CLIENT_IPC:
             lrmd_ipc_disconnect(lrmd);
@@ -1463,7 +1473,7 @@ lrmd_api_get_rsc_info(lrmd_t * lrmd, const char *rsc_id, enum lrmd_call_options 
 
     crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);
     crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);
-    lrmd_send_command(lrmd, LRMD_OP_RSC_INFO, data, &output, 30000, options, TRUE);
+    lrmd_send_command(lrmd, LRMD_OP_RSC_INFO, data, &output, 0, options, TRUE);
     free_xml(data);
 
     if (!output) {
@@ -1593,24 +1603,27 @@ stonith_get_metadata(const char *provider, const char *type, char **output)
 #define SHORT_DSCR  "# Short-Description:"
 #define DESCRIPTION "# Description:"
 
-#define lsb_meta_helper_free_value(m)   \
-    if ((m) != NULL) {                  \
-        xmlFree(m);                     \
-        (m) = NULL;                     \
-    }
+#define lsb_meta_helper_free_value(m)           \
+    do {                                        \
+        if ((m) != NULL) {                      \
+            xmlFree(m);                         \
+            (m) = NULL;                         \
+        }                                       \
+    } while(0)
 
 #define lsb_meta_helper_get_value(buffer, ptr, keyword)                 \
-    if (!ptr && !strncasecmp(buffer, keyword, strlen(keyword))) {       \
-        (ptr) = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST buffer+strlen(keyword)); \
-        continue;                                                       \
-    }
+    do {                                                                \
+        if (!ptr && !strncasecmp(buffer, keyword, strlen(keyword))) {   \
+            (ptr) = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST buffer+strlen(keyword)); \
+            continue;                                                   \
+        }                                                               \
+    } while(0)
 
 static int
 lsb_get_metadata(const char *type, char **output)
 {
     char ra_pathname[PATH_MAX] = { 0, };
     FILE *fp;
-    GString *meta_data = NULL;
     char buffer[1024];
     char *provides = NULL;
     char *req_start = NULL;
@@ -1621,7 +1634,9 @@ lsb_get_metadata(const char *type, char **output)
     char *dflt_stop = NULL;
     char *s_dscrpt = NULL;
     char *xml_l_dscrpt = NULL;
-    GString *l_dscrpt = NULL;
+    int offset = 0;
+    int max = 2048;
+    char description[max];
 
     if(type[0] == '/') {
         snprintf(ra_pathname, sizeof(ra_pathname), "%s", type);
@@ -1636,25 +1651,29 @@ lsb_get_metadata(const char *type, char **output)
 
     /* Enter into the lsb-compliant comment block */
     while (fgets(buffer, sizeof(buffer), fp)) {
-        /* Now suppose each of the following eight arguments contain only one line */
-        lsb_meta_helper_get_value(buffer, provides, PROVIDES)
-            lsb_meta_helper_get_value(buffer, req_start, REQ_START)
-            lsb_meta_helper_get_value(buffer, req_stop, REQ_STOP)
-            lsb_meta_helper_get_value(buffer, shld_start, SHLD_START)
-            lsb_meta_helper_get_value(buffer, shld_stop, SHLD_STOP)
-            lsb_meta_helper_get_value(buffer, dflt_start, DFLT_START)
-            lsb_meta_helper_get_value(buffer, dflt_stop, DFLT_STOP)
-            lsb_meta_helper_get_value(buffer, s_dscrpt, SHORT_DSCR)
 
-            /* Long description may cross multiple lines */
-            if ((l_dscrpt == NULL) && (0 == strncasecmp(buffer, DESCRIPTION, strlen(DESCRIPTION)))) {
-            l_dscrpt = g_string_new(buffer + strlen(DESCRIPTION));
-            /* Between # and keyword, more than one space, or a tab character,
-             * indicates the continuation line.     Extracted from LSB init script standard */
+        /* Now suppose each of the following eight arguments contain only one line */
+        lsb_meta_helper_get_value(buffer, provides, PROVIDES);
+        lsb_meta_helper_get_value(buffer, req_start, REQ_START);
+        lsb_meta_helper_get_value(buffer, req_stop, REQ_STOP);
+        lsb_meta_helper_get_value(buffer, shld_start, SHLD_START);
+        lsb_meta_helper_get_value(buffer, shld_stop, SHLD_STOP);
+        lsb_meta_helper_get_value(buffer, dflt_start, DFLT_START);
+        lsb_meta_helper_get_value(buffer, dflt_stop, DFLT_STOP);
+        lsb_meta_helper_get_value(buffer, s_dscrpt, SHORT_DSCR);
+
+        /* Long description may cross multiple lines */
+        if (offset == 0 && (0 == strncasecmp(buffer, DESCRIPTION, strlen(DESCRIPTION)))) {
+            /* Between # and keyword, more than one space, or a tab
+             * character, indicates the continuation line.
+             *
+             * Extracted from LSB init script standard
+             */
             while (fgets(buffer, sizeof(buffer), fp)) {
                 if (!strncmp(buffer, "#  ", 3) || !strncmp(buffer, "#\t", 2)) {
                     buffer[0] = ' ';
-                    l_dscrpt = g_string_append(l_dscrpt, buffer);
+                    offset += snprintf(description+offset, max-offset, "%s", buffer);
+
                 } else {
                     fputs(buffer, fp);
                     break;      /* Long description ends */
@@ -1662,9 +1681,11 @@ lsb_get_metadata(const char *type, char **output)
             }
             continue;
         }
-        if (l_dscrpt) {
-            xml_l_dscrpt = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST(l_dscrpt->str));
+
+        if (xml_l_dscrpt == NULL && offset > 0) {
+            xml_l_dscrpt = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST(description));
         }
+
         if (!strncasecmp(buffer, LSB_INITSCRIPT_INFOEND_TAG, strlen(LSB_INITSCRIPT_INFOEND_TAG))) {
             /* Get to the out border of LSB comment block */
             break;
@@ -1675,13 +1696,12 @@ lsb_get_metadata(const char *type, char **output)
     }
     fclose(fp);
 
-    meta_data = g_string_new("");
-    g_string_sprintf(meta_data, lsb_metadata_template, type,
-                     (xml_l_dscrpt == NULL) ? type : xml_l_dscrpt,
-                     (s_dscrpt == NULL) ? type : s_dscrpt, (provides == NULL) ? "" : provides,
-                     (req_start == NULL) ? "" : req_start, (req_stop == NULL) ? "" : req_stop,
-                     (shld_start == NULL) ? "" : shld_start, (shld_stop == NULL) ? "" : shld_stop,
-                     (dflt_start == NULL) ? "" : dflt_start, (dflt_stop == NULL) ? "" : dflt_stop);
+    *output = crm_strdup_printf(lsb_metadata_template, type,
+                                (xml_l_dscrpt == NULL) ? type : xml_l_dscrpt,
+                                (s_dscrpt == NULL) ? type : s_dscrpt, (provides == NULL) ? "" : provides,
+                                (req_start == NULL) ? "" : req_start, (req_stop == NULL) ? "" : req_stop,
+                                (shld_start == NULL) ? "" : shld_start, (shld_stop == NULL) ? "" : shld_stop,
+                                (dflt_start == NULL) ? "" : dflt_start, (dflt_stop == NULL) ? "" : dflt_stop);
 
     lsb_meta_helper_free_value(xml_l_dscrpt);
     lsb_meta_helper_free_value(s_dscrpt);
@@ -1692,13 +1712,6 @@ lsb_get_metadata(const char *type, char **output)
     lsb_meta_helper_free_value(shld_stop);
     lsb_meta_helper_free_value(dflt_start);
     lsb_meta_helper_free_value(dflt_stop);
-
-    if (l_dscrpt) {
-        g_string_free(l_dscrpt, TRUE);
-    }
-
-    *output = strdup(meta_data->str);
-    g_string_free(meta_data, TRUE);
 
     crm_trace("Created fake metadata: %d", strlen(*output));
     return pcmk_ok;
@@ -1760,6 +1773,93 @@ nagios_get_metadata(const char *type, char **output)
 }
 #endif
 
+#if SUPPORT_HEARTBEAT
+/* strictly speaking, support for class=heartbeat style scripts
+ * does not require "heartbeat support" to be enabled.
+ * But since those scripts are part of the "heartbeat" package usually,
+ * and are very unlikely to be present in any other deployment,
+ * I leave it inside this ifdef.
+ *
+ * Yes, I know, these are legacy and should die,
+ * or at least be rewritten to be a proper OCF style agent.
+ * But they exist, and custom scripts following these rules do, too.
+ *
+ * Taken from the old "glue" lrmd, see
+ * http://hg.linux-ha.org/glue/file/0a7add1d9996/lib/plugins/lrm/raexechb.c#l49
+ * http://hg.linux-ha.org/glue/file/0a7add1d9996/lib/plugins/lrm/raexechb.c#l393
+ */
+
+static const char hb_metadata_template[] =
+"<?xml version='1.0'?>\n"
+"<!DOCTYPE resource-agent SYSTEM 'ra-api-1.dtd'>\n"
+"<resource-agent name='%s' version='0.1'>\n"
+"<version>1.0</version>\n"
+"<longdesc lang='en'>\n"
+"%s"
+"</longdesc>\n"
+"<shortdesc lang='en'>%s</shortdesc>\n"
+"<parameters>\n"
+"<parameter name='1' unique='1' required='0'>\n"
+"<longdesc lang='en'>\n"
+"This argument will be passed as the first argument to the "
+"heartbeat resource agent (assuming it supports one)\n"
+"</longdesc>\n"
+"<shortdesc lang='en'>argv[1]</shortdesc>\n"
+"<content type='string' default=' ' />\n"
+"</parameter>\n"
+"<parameter name='2' unique='1' required='0'>\n"
+"<longdesc lang='en'>\n"
+"This argument will be passed as the second argument to the "
+"heartbeat resource agent (assuming it supports one)\n"
+"</longdesc>\n"
+"<shortdesc lang='en'>argv[2]</shortdesc>\n"
+"<content type='string' default=' ' />\n"
+"</parameter>\n"
+"<parameter name='3' unique='1' required='0'>\n"
+"<longdesc lang='en'>\n"
+"This argument will be passed as the third argument to the "
+"heartbeat resource agent (assuming it supports one)\n"
+"</longdesc>\n"
+"<shortdesc lang='en'>argv[3]</shortdesc>\n"
+"<content type='string' default=' ' />\n"
+"</parameter>\n"
+"<parameter name='4' unique='1' required='0'>\n"
+"<longdesc lang='en'>\n"
+"This argument will be passed as the fourth argument to the "
+"heartbeat resource agent (assuming it supports one)\n"
+"</longdesc>\n"
+"<shortdesc lang='en'>argv[4]</shortdesc>\n"
+"<content type='string' default=' ' />\n"
+"</parameter>\n"
+"<parameter name='5' unique='1' required='0'>\n"
+"<longdesc lang='en'>\n"
+"This argument will be passed as the fifth argument to the "
+"heartbeat resource agent (assuming it supports one)\n"
+"</longdesc>\n"
+"<shortdesc lang='en'>argv[5]</shortdesc>\n"
+"<content type='string' default=' ' />\n"
+"</parameter>\n"
+"</parameters>\n"
+"<actions>\n"
+"<action name='start'   timeout='15' />\n"
+"<action name='stop'    timeout='15' />\n"
+"<action name='status'  timeout='15' />\n"
+"<action name='monitor' timeout='15' interval='15' start-delay='15' />\n"
+"<action name='meta-data'  timeout='5' />\n"
+"</actions>\n"
+"<special tag='heartbeat'>\n"
+"</special>\n"
+"</resource-agent>\n";
+
+static int
+heartbeat_get_metadata(const char *type, char **output)
+{
+	*output = crm_strdup_printf(hb_metadata_template, type, type, type);
+	crm_trace("Created fake metadata: %d", strlen(*output));
+	return pcmk_ok;
+}
+#endif
+
 static int
 generic_get_metadata(const char *standard, const char *provider, const char *type, char **output)
 {
@@ -1770,7 +1870,8 @@ generic_get_metadata(const char *standard, const char *provider, const char *typ
                                                    "meta-data",
                                                    0,
                                                    30000,
-                                                   NULL);
+                                                   NULL,
+                                                   0);
 
     if (!(services_action_sync(action))) {
         crm_err("Failed to retrieve meta-data for %s:%s:%s", standard, provider, type);
@@ -1812,6 +1913,10 @@ lrmd_api_get_metadata(lrmd_t * lrmd,
     } else if (safe_str_eq(class, "nagios")) {
         return nagios_get_metadata(type, output);
 #endif
+#if SUPPORT_HEARTBEAT
+    } else if (safe_str_eq(class, "heartbeat")) {
+	return heartbeat_get_metadata(type, output);
+#endif
     }
     return generic_get_metadata(class, provider, type, output);
 }
@@ -1836,7 +1941,7 @@ lrmd_api_exec(lrmd_t * lrmd, const char *rsc_id, const char *action, const char 
     crm_xml_add_int(data, F_LRMD_RSC_START_DELAY, start_delay);
 
     for (tmp = params; tmp; tmp = tmp->next) {
-        hash2field((gpointer) tmp->key, (gpointer) tmp->value, args);
+        hash2smartfield((gpointer) tmp->key, (gpointer) tmp->value, args);
     }
 
     rc = lrmd_send_command(lrmd, LRMD_OP_RSC_EXEC, data, NULL, timeout, options, TRUE);

@@ -107,7 +107,7 @@ systemd_service_name(const char *name)
         return strdup(name);
     }
 
-    return g_strdup_printf("%s.service", name);
+    return crm_strdup_printf("%s.service", name);
 }
 
 static void
@@ -138,7 +138,7 @@ systemd_daemon_reload_complete(DBusPendingCall *pending, void *user_data)
 }
 
 static bool
-systemd_daemon_reload(void)
+systemd_daemon_reload(int timeout)
 {
     static unsigned int reload_count = 0;
     const char *method = "Reload";
@@ -149,7 +149,7 @@ systemd_daemon_reload(void)
         DBusMessage *msg = systemd_new_method(BUS_NAME".Manager", method);
 
         CRM_ASSERT(msg != NULL);
-        pcmk_dbus_send(msg, systemd_proxy, systemd_daemon_reload_complete, GUINT_TO_POINTER(reload_count));
+        pcmk_dbus_send(msg, systemd_proxy, systemd_daemon_reload_complete, GUINT_TO_POINTER(reload_count), timeout);
         dbus_message_unref(msg);
     }
     return TRUE;
@@ -189,16 +189,13 @@ systemd_loadunit_cb(DBusPendingCall *pending, void *user_data)
         reply = dbus_pending_call_steal_reply(pending);
     }
 
-    if(op) {
-        crm_trace("Got result: %p for %p for %s, %s", reply, pending, op->rsc, op->action);
-    } else {
-        crm_trace("Got result: %p for %p", reply, pending);
-    }
+    crm_trace("Got result: %p for %p / %p for %s", reply, pending, op->opaque->pending, op->id);
+
+    CRM_LOG_ASSERT(pending == op->opaque->pending);
+    services_set_op_pending(op, NULL);
+
     systemd_loadunit_result(reply, user_data);
 
-    if(pending) {
-        dbus_pending_call_unref(pending);
-    }
     if(reply) {
         dbus_message_unref(reply);
     }
@@ -209,6 +206,7 @@ systemd_unit_by_name(const gchar * arg_name, svc_action_t *op)
 {
     DBusMessage *msg;
     DBusMessage *reply = NULL;
+    DBusPendingCall* pending = NULL;
     char *name = NULL;
 
 /*
@@ -236,7 +234,7 @@ systemd_unit_by_name(const gchar * arg_name, svc_action_t *op)
         DBusError error;
 
         dbus_error_init(&error);
-        reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error);
+        reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error, op? op->timeout : DBUS_TIMEOUT_USE_DEFAULT);
         dbus_message_unref(msg);
 
         unit = systemd_loadunit_result(reply, op);
@@ -249,7 +247,11 @@ systemd_unit_by_name(const gchar * arg_name, svc_action_t *op)
         return munit;
     }
 
-    pcmk_dbus_send(msg, systemd_proxy, systemd_loadunit_cb, op);
+    pending = pcmk_dbus_send(msg, systemd_proxy, systemd_loadunit_cb, op, op->timeout);
+    if(pending) {
+        services_set_op_pending(op, pending);
+    }
+
     dbus_message_unref(msg);
     return NULL;
 }
@@ -281,7 +283,7 @@ systemd_unit_listall(void)
     msg = systemd_new_method(BUS_NAME".Manager", method);
     CRM_ASSERT(msg != NULL);
 
-    reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error);
+    reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error, DBUS_TIMEOUT_USE_DEFAULT);
     dbus_message_unref(msg);
 
     if(error.name) {
@@ -355,7 +357,7 @@ systemd_unit_exists(const char *name)
 }
 
 static char *
-systemd_unit_metadata(const char *name)
+systemd_unit_metadata(const char *name, int timeout)
 {
     char *meta = NULL;
     char *desc = NULL;
@@ -363,12 +365,12 @@ systemd_unit_metadata(const char *name)
 
     if (path) {
         /* TODO: Worth a making blocking call for? Probably not. Possibly if cached. */
-        desc = pcmk_dbus_get_property(systemd_proxy, BUS_NAME, path, BUS_NAME ".Unit", "Description", NULL, NULL);
+        desc = pcmk_dbus_get_property(systemd_proxy, BUS_NAME, path, BUS_NAME ".Unit", "Description", NULL, NULL, NULL, timeout);
     } else {
-        desc = g_strdup_printf("Systemd unit file for %s", name);
+        desc = crm_strdup_printf("Systemd unit file for %s", name);
     }
 
-    meta = g_strdup_printf("<?xml version=\"1.0\"?>\n"
+    meta = crm_strdup_printf("<?xml version=\"1.0\"?>\n"
                            "<!DOCTYPE resource-agent SYSTEM \"ra-api-1.dtd\">\n"
                            "<resource-agent name=\"%s\" version=\"0.1\">\n"
                            "  <version>1.0</version>\n"
@@ -459,17 +461,12 @@ systemd_async_dispatch(DBusPendingCall *pending, void *user_data)
         reply = dbus_pending_call_steal_reply(pending);
     }
 
-    if(op) {
-        crm_trace("Got result: %p for %p for %s, %s", reply, pending, op->rsc, op->action);
-        op->opaque->pending = NULL;
-    } else {
-        crm_trace("Got result: %p for %p", reply, pending);
-    }
+    crm_trace("Got result: %p for %p for %s, %s", reply, pending, op->rsc, op->action);
+
+    CRM_LOG_ASSERT(pending == op->opaque->pending);
+    services_set_op_pending(op, NULL);
     systemd_exec_result(reply, op);
 
-    if(pending) {
-        dbus_pending_call_unref(pending);
-    }
     if(reply) {
         dbus_message_unref(reply);
     }
@@ -491,12 +488,14 @@ systemd_unit_check(const char *name, const char *state, void *userdata)
         op->rc = PCMK_OCF_OK;
     } else if (g_strcmp0(state, "activating") == 0) {
         op->rc = PCMK_OCF_PENDING;
+    } else if (g_strcmp0(state, "deactivating") == 0) {
+        op->rc = PCMK_OCF_PENDING;
     } else {
         op->rc = PCMK_OCF_NOT_RUNNING;
     }
 
     if (op->synchronous == FALSE) {
-        op->opaque->pending = NULL;
+        services_set_op_pending(op, NULL);
         operation_finalize(op);
     }
 }
@@ -508,8 +507,6 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
     DBusMessage *msg = NULL;
     DBusMessage *reply = NULL;
 
-    CRM_ASSERT(unit);
-
     if (unit == NULL) {
         crm_debug("Could not obtain unit named '%s'", op->agent);
         op->rc = PCMK_OCF_NOT_INSTALLED;
@@ -518,26 +515,47 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
     }
 
     if (safe_str_eq(op->action, "monitor") || safe_str_eq(method, "status")) {
-        char *state = pcmk_dbus_get_property(systemd_proxy, BUS_NAME, unit, BUS_NAME ".Unit", "ActiveState",
-                                             op->synchronous?NULL:systemd_unit_check, op);
+        DBusPendingCall *pending = NULL;
+        char *state;
+
+        state = pcmk_dbus_get_property(systemd_proxy, BUS_NAME, unit,
+                                       BUS_NAME ".Unit", "ActiveState",
+                                       op->synchronous?NULL:systemd_unit_check,
+                                       op, op->synchronous?NULL:&pending, op->timeout);
         if (op->synchronous) {
             systemd_unit_check("ActiveState", state, op);
             free(state);
             return op->rc == PCMK_OCF_OK;
+        } else if (pending) {
+            services_set_op_pending(op, pending);
+            return TRUE;
         }
-        return TRUE;
+
+        return FALSE;
 
     } else if (g_strcmp0(method, "start") == 0) {
         FILE *file_strm = NULL;
-        char *override_dir = g_strdup_printf("%s/%s", SYSTEMD_OVERRIDE_ROOT, unit);
-        char *override_file = g_strdup_printf("%s/%s/50-pacemaker.conf", SYSTEMD_OVERRIDE_ROOT, unit);
+        char *override_dir = crm_strdup_printf("%s/%s.service.d", SYSTEMD_OVERRIDE_ROOT, op->agent);
+        char *override_file = crm_strdup_printf("%s/%s.service.d/50-pacemaker.conf", SYSTEMD_OVERRIDE_ROOT, op->agent);
 
         method = "StartUnit";
         crm_build_path(override_dir, 0755);
 
         file_strm = fopen(override_file, "w");
         if (file_strm != NULL) {
-            int rc = fprintf(file_strm, "[Service]\nRestart=no");
+            /* TODO: Insert the start timeout in too */
+            char *override = crm_strdup_printf(
+                "[Unit]\n"
+                "Description=Cluster Controlled %s\n"
+                "Before=pacemaker.service\n"
+                "\n"
+                "[Service]\n"
+                "Restart=no\n",
+                op->agent);
+
+            int rc = fprintf(file_strm, "%s\n", override);
+
+            free(override);
             if (rc < 0) {
                 crm_perror(LOG_ERR, "Cannot write to systemd override file %s", override_file);
             }
@@ -550,17 +568,17 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
             fflush(file_strm);
             fclose(file_strm);
         }
-        systemd_daemon_reload();
+        systemd_daemon_reload(op->timeout);
         free(override_file);
         free(override_dir);
 
     } else if (g_strcmp0(method, "stop") == 0) {
-        char *override_file = g_strdup_printf("%s/%s/50-pacemaker.conf", SYSTEMD_OVERRIDE_ROOT, unit);
+        char *override_file = crm_strdup_printf("%s/%s.service.d/50-pacemaker.conf", SYSTEMD_OVERRIDE_ROOT, op->agent);
 
         method = "StopUnit";
         unlink(override_file);
         free(override_file);
-        systemd_daemon_reload();
+        systemd_daemon_reload(op->timeout);
 
     } else if (g_strcmp0(method, "restart") == 0) {
         method = "RestartUnit";
@@ -587,12 +605,11 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
     }
 
     if (op->synchronous == FALSE) {
-        DBusPendingCall* pending = pcmk_dbus_send(msg, systemd_proxy, systemd_async_dispatch, op);
+        DBusPendingCall* pending = pcmk_dbus_send(msg, systemd_proxy, systemd_async_dispatch, op, op->timeout);
 
         dbus_message_unref(msg);
         if(pending) {
-            dbus_pending_call_ref(pending);
-            op->opaque->pending = pending;
+            services_set_op_pending(op, pending);
             return TRUE;
         }
         return FALSE;
@@ -600,7 +617,7 @@ systemd_unit_exec_with_unit(svc_action_t * op, const char *unit)
     } else {
         DBusError error;
 
-        reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error);
+        reply = pcmk_dbus_send_recv(msg, systemd_proxy, &error, op->timeout);
         dbus_message_unref(msg);
         systemd_exec_result(reply, op);
 
@@ -644,7 +661,7 @@ systemd_unit_exec(svc_action_t * op)
 
     if (safe_str_eq(op->action, "meta-data")) {
         /* TODO: See if we can teach the lrmd not to make these calls synchronously */
-        op->stdout_data = systemd_unit_metadata(op->agent);
+        op->stdout_data = systemd_unit_metadata(op->agent, op->timeout);
         op->rc = PCMK_OCF_OK;
 
         if (op->synchronous == FALSE) {

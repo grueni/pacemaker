@@ -106,8 +106,9 @@ EOF
 	    chmod +x $cts_root/crm_report
 
 	    cp $cts_root/LSBDummy.in $cts_root/LSBDummy
+	    cp $cts_root/HBDummy.in $cts_root/HBDummy
 	    chmod +x $local_root/fencing/fence_*
-	    sed -i.sed s:@OCF_ROOT_DIR@:/usr/lib/ocf: $cts_root/LSBDummy
+	    sed -i.sed s:@OCF_ROOT_DIR@:/usr/lib/ocf: $cts_root/LSBDummy $cts_root/HBDummy
 	    
 	    echo "Make sure you add $cts_root to your PATH and set a value for \$cluster_name in .bashrc"
 	    exit 0
@@ -226,20 +227,21 @@ if [ $install = 1 ]; then
     cluster-helper -g $cluster_name -- yum install -y pacemaker pacemaker-debuginfo pacemaker-cts libqb libqb-debuginfo
 fi
 
-if [ $boot = 1 ]; then
+if [ $setup = 1 ]; then
+    cluster-init -g $cluster_name $target -u --test
+    exit 0
+
+elif [ $boot = 1 ]; then
     $cts_root/CTSlab.py -r -c -g $cluster_name --boot
     rc=$?
     if [ $rc = 0 ]; then
 	echo "The cluster is ready..."
     fi
     exit $rc
+
 elif [ $run = 1 ]; then
     $cts_root/CTSlab.py -r -c -g $cluster_name 500 $*
     exit $?
-
-elif [ $setup = 1 ]; then
-    cluster-init -g $cluster_name $target -u --test
-    exit 0
 
 elif [ $clean = 1 ]; then
     exit 0

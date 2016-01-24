@@ -21,6 +21,7 @@
 #include <crm/msg_xml.h>
 #include <allocate.h>
 #include <utils.h>
+#include <allocate.h>
 
 #define VARIANT_CLONE 1
 #include <lib/pengine/variant.h>
@@ -1264,6 +1265,7 @@ clone_update_actions_interleave(action_t * first, action_t * then, node_t * node
             if (type & (pe_order_runnable_left | pe_order_implies_then) /* Mandatory */ ) {
                 pe_rsc_info(then->rsc, "Inhibiting %s from being active", then_child->id);
                 assign_node(then_child, NULL, TRUE);
+                /* TODO - set changed correctly? */
             }
 
         } else {
@@ -1337,6 +1339,8 @@ clone_update_actions(action_t * first, action_t * then, node_t * node, enum pe_a
         changed |= native_update_actions(first, then, node, flags, filter, type);
 
         for (; gIter != NULL; gIter = gIter->next) {
+            enum pe_graph_flags child_changed = pe_graph_none;
+            GListPtr lpc = NULL;
             resource_t *child = (resource_t *) gIter->data;
             action_t *child_action = find_first_action(child->actions, NULL, then->task, node);
 
@@ -1344,8 +1348,16 @@ clone_update_actions(action_t * first, action_t * then, node_t * node, enum pe_a
                 enum pe_action_flags child_flags = child->cmds->action_flags(child_action, node);
 
                 if (is_set(child_flags, pe_action_runnable)) {
-                    changed |=
+                                     
+                    child_changed |=
                         child->cmds->update_actions(first, child_action, node, flags, filter, type);
+                }
+                changed |= child_changed;
+                if (child_changed & pe_graph_updated_then) {
+                   for (lpc = child_action->actions_after; lpc != NULL; lpc = lpc->next) {
+                        action_wrapper_t *other = (action_wrapper_t *) lpc->data;
+                        update_action(other->action);
+                    }
                 }
             }
         }
@@ -1387,25 +1399,25 @@ clone_expand(resource_t * rsc, pe_working_set_t * data_set)
 
     if (clone_data->start_notify) {
         collect_notification_data(rsc, TRUE, TRUE, clone_data->start_notify);
-        expand_notification_data(clone_data->start_notify);
+        expand_notification_data(clone_data->start_notify, data_set);
         create_notifications(rsc, clone_data->start_notify, data_set);
     }
 
     if (clone_data->stop_notify) {
         collect_notification_data(rsc, TRUE, TRUE, clone_data->stop_notify);
-        expand_notification_data(clone_data->stop_notify);
+        expand_notification_data(clone_data->stop_notify, data_set);
         create_notifications(rsc, clone_data->stop_notify, data_set);
     }
 
     if (clone_data->promote_notify) {
         collect_notification_data(rsc, TRUE, TRUE, clone_data->promote_notify);
-        expand_notification_data(clone_data->promote_notify);
+        expand_notification_data(clone_data->promote_notify, data_set);
         create_notifications(rsc, clone_data->promote_notify, data_set);
     }
 
     if (clone_data->demote_notify) {
         collect_notification_data(rsc, TRUE, TRUE, clone_data->demote_notify);
-        expand_notification_data(clone_data->demote_notify);
+        expand_notification_data(clone_data->demote_notify, data_set);
         create_notifications(rsc, clone_data->demote_notify, data_set);
     }
 
@@ -1515,6 +1527,23 @@ clone_create_probe(resource_t * rsc, node_t * node, action_t * complete,
     if (rsc->children == NULL) {
         pe_warn("Clone %s has no children", rsc->id);
         return FALSE;
+    }
+
+    if (rsc->exclusive_discover) {
+        node_t *allowed = g_hash_table_lookup(rsc->allowed_nodes, node->details->id);
+        if (allowed && allowed->rsc_discover_mode != discover_exclusive) {
+            /* exclusive discover is enabled and this node is not marked
+             * as a node this resource should be discovered on
+             *
+             * remove the node from allowed_nodes so that the
+             * notification contains only nodes that we might ever run
+             * on
+             */
+            g_hash_table_remove(rsc->allowed_nodes, node->details->id);
+
+            /* Bit of a shortcut - might as well take it */
+            return FALSE;
+        }
     }
 
     if (is_not_set(rsc->flags, pe_rsc_unique)

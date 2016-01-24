@@ -453,7 +453,6 @@ case "$host_os" in
 		;;
 *linux*)
 		AC_DEFINE_UNQUOTED(ON_LINUX, 1, Compiling for Linux platform)
-  		CFLAGS="$CFLAGS -I${prefix}/include"
  		;;
 darwin*)
 		AC_DEFINE_UNQUOTED(ON_DARWIN, 1, Compiling for Darwin platform)
@@ -463,7 +462,9 @@ darwin*)
 esac
 
 dnl Eventually remove this
-CFLAGS="$CFLAGS -I${prefix}/include/heartbeat"
+if test "$cross_compiling" != "yes"; then
+   CFLAGS="$CFLAGS -I${prefix}/include/heartbeat"
+fi
 
 AC_SUBST(INIT_EXT)
 AC_MSG_NOTICE(Host CPU: $host_cpu)
@@ -528,6 +529,7 @@ AC_PATH_PROGS(ASCIIDOC, asciidoc)
 AC_PATH_PROGS(PUBLICAN, publican)
 AC_PATH_PROGS(INKSCAPE, inkscape)
 AC_PATH_PROGS(XSLTPROC, xsltproc)
+AC_PATH_PROGS(XMLCATALOG, xmlcatalog)
 AC_PATH_PROGS(FOP, fop)
 AC_PATH_PROGS(SSH, ssh, /usr/bin/ssh)
 AC_PATH_PROGS(SCP, scp, /usr/bin/scp)
@@ -559,15 +561,23 @@ fi
 MANPAGE_XSLT=""
 if test x"${XSLTPROC}" != x""; then
   AC_MSG_CHECKING(docbook to manpage transform)
-  XSLT=`find ${datadir} -name docbook.xsl`
-  for xsl in $XSLT; do
-    dname=`dirname $xsl`
-    bname=`basename $dname`
-    if test "$bname" = "manpages"; then
-       MANPAGE_XSLT="$xsl"
-       break
-    fi
-  done
+  # first try to figure out correct template using xmlcatalog query,
+  # resort to extensive (semi-deterministic) file search if that fails
+  DOCBOOK_XSL_URI='http://docbook.sourceforge.net/release/xsl/current'
+  DOCBOOK_XSL_PATH='manpages/docbook.xsl'
+  MANPAGE_XSLT=$(${XMLCATALOG} "" ${DOCBOOK_XSL_URI}/${DOCBOOK_XSL_PATH} \
+                 | sed -n 's|^file://||p;q')
+  if test x"${MANPAGE_XSLT}" = x""; then
+    DIRS=$(find "${datadir}" -name $(basename $(dirname ${DOCBOOK_XSL_PATH})) \
+           -type d | LC_ALL=C sort)
+    XSLT=$(basename ${DOCBOOK_XSL_PATH})
+    for d in ${DIRS}; do
+      if test -f "${d}/${XSLT}"; then
+         MANPAGE_XSLT="${d}/${XSLT}"
+         break
+      fi
+    done
+  fi
 fi
 AC_MSG_RESULT($MANPAGE_XSLT)
 AC_SUBST(MANPAGE_XSLT)
@@ -899,14 +909,16 @@ dnl Although n-library is preferred, only look for it if the n-header was found.
 CURSESLIBS=''
 if test "$ac_cv_header_ncurses_h" = "yes"; then
   AC_CHECK_LIB(ncurses, printw,
-    [CURSESLIBS='-lncurses'; AC_DEFINE(HAVE_LIBNCURSES,1, have ncurses library)]
+    [AC_DEFINE(HAVE_LIBNCURSES,1, have ncurses library)]
   )
+  CURSESLIBS=`$PKGCONFIG --libs ncurses` || CURSESLIBS='-lncurses'
 fi
 
 if test "$ac_cv_header_ncurses_ncurses_h" = "yes"; then
   AC_CHECK_LIB(ncurses, printw,
-    [CURSESLIBS='-lncurses'; AC_DEFINE(HAVE_LIBNCURSES,1, have ncurses library)]
+    [AC_DEFINE(HAVE_LIBNCURSES,1, have ncurses library)]
   )
+  CURSESLIBS=`$PKGCONFIG --libs ncurses` || CURSESLIBS='-lncurses'
 fi
 
 dnl Only look for non-n-library if there was no n-library.
@@ -1823,6 +1835,7 @@ coverage.sh							\
 cts/Makefile					        	\
 	cts/CTSvars.py						\
 	cts/LSBDummy						\
+	cts/HBDummy						\
 	cts/benchmark/Makefile					\
 	cts/benchmark/clubench					\
 	cts/lxc_autogen.sh					\
@@ -1873,13 +1886,13 @@ lrmd/Makefile                                                   \
         lrmd/pacemaker_remote					\
 extra/Makefile							\
 	extra/resources/Makefile				\
-	extra/rgmanager/Makefile				\
 	extra/logrotate/Makefile				\
 	extra/logrotate/pacemaker				\
 tools/Makefile							\
 	tools/crm_report					\
         tools/report.common                                     \
 	tools/cibsecret						\
+	tools/crm_mon.service					\
 	tools/crm_mon.upstart					\
 xml/Makefile							\
 lib/gnu/Makefile						\

@@ -51,6 +51,17 @@ typedef struct stonith_device_s {
     gboolean api_registered;
 } stonith_device_t;
 
+/* These values are used to index certain arrays by "phase". Usually an
+ * operation has only one "phase", so phase is always zero. However, some
+ * reboots are remapped to "off" then "on", in which case "reboot" will be
+ * phase 0, "off" will be phase 1 and "on" will be phase 2.
+ */
+enum st_remap_phase {
+    st_phase_requested = 0,
+    st_phase_off = 1,
+    st_phase_on = 2
+};
+
 typedef struct remote_fencing_op_s {
     /* The unique id associated with this operation */
     char *id;
@@ -97,7 +108,7 @@ typedef struct remote_fencing_op_s {
     long long call_options;
 
     /*! The current state of the remote operation. This indicates
-     * what phase the op is in, query, exec, done, duplicate, failed. */
+     * what stage the op is in, query, exec, done, duplicate, failed. */
     enum op_state state;
     /*! The node that owns the remote operation */
     char *originator;
@@ -114,10 +125,17 @@ typedef struct remote_fencing_op_s {
 
     /*! The current topology level being executed */
     guint level;
+    /*! The current operation phase being executed */
+    enum st_remap_phase phase;
 
-    /*! List of required devices the topology must execute regardless of what
-     * topology level they exist at. */
-    GListPtr required_list;
+    /* For phase 0 or 1 (requested action or a remapped "off"), required devices
+     * will be executed regardless of what topology level is being executed
+     * currently. For phase 1 (remapped "on"), required devices will not be
+     * attempted, because the cluster will execute them automatically when the
+     * node next joins the cluster.
+     */
+    /*! Lists of devices marked as required for each phase */
+    GListPtr required_list[3];
     /*! The device list of all the devices at the current executing topology level. */
     GListPtr devices_list;
     /*! Current entry in the topology device list */
@@ -129,6 +147,20 @@ typedef struct remote_fencing_op_s {
 
 } remote_fencing_op_t;
 
+/*
+ * Complex fencing requirements are specified via fencing topologies.
+ * A topology consists of levels; each level is a list of fencing devices.
+ * Topologies are stored in a hash table by node name. When a node needs to be
+ * fenced, if it has an entry in the topology table, the levels are tried
+ * sequentially, and the devices in each level are tried sequentially.
+ * Fencing is considered successful as soon as any level succeeds;
+ * a level is considered successful if all its devices succeed.
+ * Essentially, all devices at a given level are "and-ed" and the
+ * levels are "or-ed".
+ *
+ * This structure is used for the topology table entries.
+ * Topology levels start from 1, so levels[0] is unused and always NULL.
+ */
 typedef struct stonith_topology_s {
     char *node;
     GListPtr levels[ST_LEVEL_MAX];
@@ -147,6 +179,8 @@ extern int stonith_device_remove(const char *id, gboolean from_cib);
 extern int stonith_level_register(xmlNode * msg, char **desc);
 
 extern int stonith_level_remove(xmlNode * msg, char **desc);
+
+extern stonith_topology_t *find_topology_for_host(const char *host);
 
 extern void do_local_reply(xmlNode * notify_src, const char *client_id, gboolean sync_reply,
                            gboolean from_peer);

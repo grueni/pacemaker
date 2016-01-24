@@ -47,6 +47,9 @@
 #  include "crm/common/cib_secrets.h"
 #endif
 
+/* ops currently active (in-flight) */
+extern GList *inflight_ops;
+
 static inline void
 set_fd_opts(int fd, int opts)
 {
@@ -92,9 +95,9 @@ svc_read_output(int fd, svc_action_t * op, bool is_stderr)
     do {
         rc = read(fd, buf, buf_read_len);
         if (rc > 0) {
-            crm_trace("Got %d characters starting with %.20s", rc, buf);
+            crm_trace("Got %d chars: %.80s", rc, buf);
             buf[rc] = 0;
-            data = realloc(data, len + rc + 1);
+            data = realloc_safe(data, len + rc + 1);
             len += sprintf(data + len, "%s", buf);
 
         } else if (errno != EINTR) {
@@ -220,7 +223,7 @@ recurring_action_timer(gpointer data)
 {
     svc_action_t *op = data;
 
-    crm_debug("Scheduling another invokation of %s", op->id);
+    crm_debug("Scheduling another invocation of %s", op->id);
 
     /* Clean out the old result */
     free(op->stdout_data);
@@ -256,7 +259,11 @@ operation_finalize(svc_action_t * op)
 
     op->pid = 0;
 
-    if (!recurring) {
+    inflight_ops = g_list_remove(inflight_ops, op);
+
+    handle_blocked_ops();
+
+    if (!recurring && op->synchronous == FALSE) {
         /*
          * If this is a recurring action, do not free explicitly.
          * It will get freed whenever the action gets cancelled.
@@ -273,7 +280,7 @@ static void
 operation_finished(mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode)
 {
     svc_action_t *op = mainloop_child_userdata(p);
-    char *prefix = g_strdup_printf("%s:%d", op->id, op->pid);
+    char *prefix = crm_strdup_printf("%s:%d", op->id, op->pid);
 
     mainloop_clear_child_userdata(p);
     op->status = PCMK_LRM_OP_DONE;
@@ -320,62 +327,68 @@ operation_finished(mainloop_child_t * p, pid_t pid, int core, int signo, int exi
         crm_debug("%s - exited with rc=%d", prefix, exitcode);
     }
 
-    g_free(prefix);
-    prefix = g_strdup_printf("%s:%d:stderr", op->id, op->pid);
+    free(prefix);
+    prefix = crm_strdup_printf("%s:%d:stderr", op->id, op->pid);
     crm_log_output(LOG_NOTICE, prefix, op->stderr_data);
 
-    g_free(prefix);
-    prefix = g_strdup_printf("%s:%d:stdout", op->id, op->pid);
+    free(prefix);
+    prefix = crm_strdup_printf("%s:%d:stdout", op->id, op->pid);
     crm_log_output(LOG_DEBUG, prefix, op->stdout_data);
 
-    g_free(prefix);
+    free(prefix);
     operation_finalize(op);
 }
 
+/*!
+ * \internal
+ * \brief Set operation rc and status per errno from stat(), fork() or execvp()
+ *
+ * \param[in,out] op     Operation to set rc and status for
+ * \param[in]     error  Value of errno after system call
+ *
+ * \return void
+ */
 static void
 services_handle_exec_error(svc_action_t * op, int error)
 {
-    op->rc = PCMK_OCF_EXEC_ERROR;
-    op->status = PCMK_LRM_OP_ERROR;
+    int rc_not_installed, rc_insufficient_priv, rc_exec_error;
 
-    /* Need to mimic the return codes for each standard as thats what we'll convert back from in get_uniform_rc() */
+    /* Mimic the return codes for each standard as that's what we'll convert back from in get_uniform_rc() */
     if (safe_str_eq(op->standard, "lsb") && safe_str_eq(op->action, "status")) {
-        switch (error) {    /* see execve(2) */
-            case ENOENT:   /* No such file or directory */
-            case EISDIR:   /* Is a directory */
-                op->rc = PCMK_LSB_STATUS_NOT_INSTALLED;
-                op->status = PCMK_LRM_OP_NOT_INSTALLED;
-                break;
-            case EACCES:   /* permission denied (various errors) */
-                /* LSB status ops don't support 'not installed' */
-                break;
-        }
+        rc_not_installed = PCMK_LSB_STATUS_NOT_INSTALLED;
+        rc_insufficient_priv = PCMK_LSB_STATUS_INSUFFICIENT_PRIV;
+        rc_exec_error = PCMK_LSB_STATUS_UNKNOWN;
 
 #if SUPPORT_NAGIOS
     } else if (safe_str_eq(op->standard, "nagios")) {
-        switch (error) {
-            case ENOENT:   /* No such file or directory */
-            case EISDIR:   /* Is a directory */
-                op->rc = NAGIOS_NOT_INSTALLED;
-                op->status = PCMK_LRM_OP_NOT_INSTALLED;
-                break;
-            case EACCES:   /* permission denied (various errors) */
-                op->rc = NAGIOS_INSUFFICIENT_PRIV;
-                break;
-        }
+        rc_not_installed = NAGIOS_NOT_INSTALLED;
+        rc_insufficient_priv = NAGIOS_INSUFFICIENT_PRIV;
+        rc_exec_error = PCMK_OCF_EXEC_ERROR;
 #endif
 
     } else {
-        switch (error) {
-            case ENOENT:   /* No such file or directory */
-            case EISDIR:   /* Is a directory */
-                op->rc = PCMK_OCF_NOT_INSTALLED; /* Valid for LSB */
-                op->status = PCMK_LRM_OP_NOT_INSTALLED;
-                break;
-            case EACCES:   /* permission denied (various errors) */
-                op->rc = PCMK_OCF_INSUFFICIENT_PRIV; /* Valid for LSB */
-                break;
-        }
+        rc_not_installed = PCMK_OCF_NOT_INSTALLED;
+        rc_insufficient_priv = PCMK_OCF_INSUFFICIENT_PRIV;
+        rc_exec_error = PCMK_OCF_EXEC_ERROR;
+    }
+
+    switch (error) {   /* see execve(2), stat(2) and fork(2) */
+        case ENOENT:   /* No such file or directory */
+        case EISDIR:   /* Is a directory */
+        case ENOTDIR:  /* Path component is not a directory */
+        case EINVAL:   /* Invalid executable format */
+        case ENOEXEC:  /* Invalid executable format */
+            op->rc = rc_not_installed;
+            op->status = PCMK_LRM_OP_NOT_INSTALLED;
+            break;
+        case EACCES:   /* permission denied (various errors) */
+        case EPERM:    /* permission denied (various errors) */
+            op->rc = rc_insufficient_priv;
+            op->status = PCMK_LRM_OP_ERROR;
+            break;
+        default:
+            op->rc = rc_exec_error;
+            op->status = PCMK_LRM_OP_ERROR;
     }
 }
 
@@ -674,7 +687,13 @@ services_os_action_execute(svc_action_t * op, gboolean synchronous)
     } else {
 
         crm_trace("Async waiting for %d - %s", op->pid, op->opaque->exec);
-        mainloop_child_add(op->pid, op->timeout, op->id, op, operation_finished);
+        mainloop_child_add_with_flags(op->pid,
+                                      op->timeout,
+                                      op->id,
+                                      op,
+                                      (op->flags & SVC_ACTION_LEAVE_GROUP) ? mainloop_leave_pid_group : 0,
+                                      operation_finished);
+
 
         op->opaque->stdout_gsource = mainloop_add_fd(op->id,
                                                      G_PRIORITY_LOW,
@@ -795,14 +814,14 @@ resources_os_list_nagios_agents(void)
     /* Make sure both the plugin and its metadata exist */
     for (gIter = plugin_list; gIter != NULL; gIter = gIter->next) {
         const char *plugin = gIter->data;
-        char *metadata = g_strdup_printf(NAGIOS_METADATA_DIR "/%s.xml", plugin);
+        char *metadata = crm_strdup_printf(NAGIOS_METADATA_DIR "/%s.xml", plugin);
         struct stat st;
 
         if (stat(metadata, &st) == 0) {
             result = g_list_append(result, strdup(plugin));
         }
 
-        g_free(metadata);
+        free(metadata);
     }
     g_list_free_full(plugin_list, free);
     return result;

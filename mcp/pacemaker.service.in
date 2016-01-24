@@ -1,13 +1,17 @@
 [Unit]
 Description=Pacemaker High Availability Cluster Manager
 
+After=dbus.service
 After=basic.target
+After=syslog.service
 After=network.target
 After=corosync.service
 
+Requires=dbus.service
 Requires=basic.target
-Requires=network.target
 Requires=corosync.service
+# if you use crm_mon, uncomment the line below.
+# Wants=crm_mon.service
 
 [Install]
 WantedBy=multi-user.target
@@ -52,3 +56,10 @@ TimeoutStartSec=60s
 
 # Restart options include: no, on-success, on-failure, on-abort or always
 Restart=on-failure
+
+# crm_perror() writes directly to stderr, so ignore it here
+# to avoid double-logging with the wrong format
+StandardError=null
+
+# if you use crm_mon, uncomment the line below.
+# ExecStopPost=/bin/sh -c 'systemctl status crm_mon >/dev/null && systemctl stop crm_mon'

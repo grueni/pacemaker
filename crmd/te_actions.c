@@ -87,6 +87,15 @@ send_stonith_update(crm_action_t * action, const char *target, const char *uuid)
                            node_update_cluster | node_update_peer | node_update_join |
                            node_update_expected, NULL, __FUNCTION__);
 
+
+    /* we have to mark whether or not remote nodes have already been fenced */
+    if (peer->flags & crm_remote_node) {
+        time_t now = time(NULL);
+        char *now_s = crm_itoa(now);
+        crm_xml_add(node_state, XML_NODE_IS_FENCED, now_s);
+        free(now_s);
+    }
+
     /* Force our known ID */
     crm_xml_add(node_state, XML_ATTR_UUID, uuid);
 
@@ -328,8 +337,7 @@ cib_action_update(crm_action_t * action, int status, int op_rc)
     op->call_id = -1;
     op->user_data = generate_transition_key(transition_graph->id, action->id, target_rc, te_uuid);
 
-    xml_op = create_operation_update(rsc, op, CRM_FEATURE_SET, target_rc, __FUNCTION__, LOG_INFO);
-    crm_xml_add(xml_op, XML_LRM_ATTR_TARGET, target); /* For context during triage */
+    xml_op = create_operation_update(rsc, op, CRM_FEATURE_SET, target_rc, target, __FUNCTION__, LOG_INFO);
     lrmd_free_event(op);
 
     crm_trace("Updating CIB with \"%s\" (%s): %s %s on %s",

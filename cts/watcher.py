@@ -22,10 +22,7 @@ Licensed under the GNU GPL.
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA.
 
-import types, string, select, sys, time, re, os, struct, signal
-import time, syslog, random, traceback, base64, pickle, binascii, fcntl
-import threading
-
+import time, re, os, threading
 
 from cts.remote import *
 from cts.logging import *
@@ -76,7 +73,7 @@ for i in range(0, len(args)):
         skipthis=1
 
 if not os.access(filename, os.R_OK):
-    print prefix + 'Last read: %d, limit=%d, count=%d - unreadable' % (0, limit, 0)
+    print(prefix + 'Last read: %d, limit=%d, count=%d - unreadable' % (0, limit, 0))
     sys.exit(1)
 
 logfile=open(filename, 'r')
@@ -88,7 +85,7 @@ if offset != 'EOF':
     if newsize >= offset:
         logfile.seek(offset)
     else:
-        print prefix + ('File truncated from %d to %d' % (offset, newsize))
+        print(prefix + ('File truncated from %d to %d' % (offset, newsize)))
         if (newsize*1.05) < offset:
             logfile.seek(0)
         # else: we probably just lost a few logs after a fencing op
@@ -106,10 +103,10 @@ while True:
     line = logfile.readline()
     if not line: break
 
-    print line.strip()
+    print(line.strip())
     count += 1
 
-print prefix + 'Last read: %d, limit=%d, count=%d' % (logfile.tell(), limit, count)
+print(prefix + 'Last read: %d, limit=%d, count=%d' % (logfile.tell(), limit, count))
 logfile.close()
 """
 
@@ -160,22 +157,23 @@ class FileObj(SearchObj):
         global has_log_watcher
         SearchObj.__init__(self, filename, host, name)
 
-        if not has_log_watcher.has_key(host):
+        if host is not None:
+            if not host in has_log_watcher:
 
-            global log_watcher
-            global log_watcher_bin
+                global log_watcher
+                global log_watcher_bin
 
-            self.debug("Installing %s on %s" % (log_watcher_file, host))
+                self.debug("Installing %s on %s" % (log_watcher_file, host))
 
-            os.system("cat << END >> %s\n%s\nEND" %(log_watcher_file, log_watcher))
-            os.system("chmod 755 %s" %(log_watcher_file))
+                os.system("cat << END >> %s\n%s\nEND" %(log_watcher_file, log_watcher))
+                os.system("chmod 755 %s" %(log_watcher_file))
 
-            self.rsh.cp(log_watcher_file, "root@%s:%s" % (host, log_watcher_bin))
-            has_log_watcher[host] = 1
+                self.rsh.cp(log_watcher_file, "root@%s:%s" % (host, log_watcher_bin))
+                has_log_watcher[host] = 1
 
-            os.system("rm -f %s" %(log_watcher_file))
+                os.system("rm -f %s" %(log_watcher_file))
 
-        self.harvest()
+            self.harvest()
 
     def async_complete(self, pid, returncode, outLines, errLines):
         for line in outLines:
@@ -207,7 +205,7 @@ class FileObj(SearchObj):
 
         global log_watcher_bin
         return self.rsh.call_async(self.host,
-                                   "python %s -t %s -p CTSwatcher: -l 200 -f %s -o %s -t %s" % (log_watcher_bin, self.name, self.filename, self.offset, self.name),
+                                   "python %s -t %s -p CTSwatcher: -l 200 -f %s -o %s" % (log_watcher_bin, self.name, self.filename, self.offset),
                 completionDelegate=self)
 
     def setend(self):
@@ -216,7 +214,7 @@ class FileObj(SearchObj):
 
         global log_watcher_bin
         (rc, lines) = self.rsh(self.host,
-                               "python %s -t %s -p CTSwatcher: -l 2 -f %s -o %s -t %s" % (log_watcher_bin, self.name, self.filename, "EOF", self.name),
+                               "python %s -t %s -p CTSwatcher: -l 2 -f %s -o %s" % (log_watcher_bin, self.name, self.filename, "EOF"),
                  None, silent=True)
 
         for line in lines:
@@ -292,10 +290,12 @@ class JournalObj(SearchObj):
         self.hitLimit = False
         (rc, lines) = self.rsh(self.host, "date +'%Y-%m-%d %H:%M:%S'", stdout=None, silent=True)
 
-        for line in lines:
-            self.limit = line.strip()
+        if (rc == 0) and (len(lines) == 1):
+            self.limit = lines[0].strip()
             self.debug("Set limit to: %s" % self.limit)
-
+        else:
+            self.debug("Unable to set limit for %s because date returned %d lines with status %d" % (self.host,
+                len(lines), rc))
 
         return
 
@@ -381,7 +381,7 @@ class LogWatcher(RemoteExec):
         else:
             self.file_list.append(FileObj(self.filename))
 
-        # print "%s now has %d files" % (self.name, len(self.file_list))
+        # print("%s now has %d files" % (self.name, len(self.file_list)))
 
     def __del__(self):
         if self.debug_level > 1: self.debug("Destroy")
@@ -406,7 +406,7 @@ class LogWatcher(RemoteExec):
             raise ValueError("No sources to read from")
 
         pending = []
-        #print "%s waiting for %d operations" % (self.name, self.pending)
+        #print("%s waiting for %d operations" % (self.name, self.pending))
         for f in self.file_list:
             t = f.harvest_async(self)
             if t:
@@ -418,7 +418,7 @@ class LogWatcher(RemoteExec):
                 self.logger.log("%s: Aborting after 20s waiting for %s logging commands" % (self.name, repr(t)))
                 return
 
-        #print "Got %d lines" % len(self.line_cache)
+        #print("Got %d lines" % len(self.line_cache))
 
     def end(self):
         for f in self.file_list:
@@ -469,6 +469,7 @@ class LogWatcher(RemoteExec):
                 for regex in self.regexes:
                     which=which+1
                     if self.debug_level > 3: self.debug("Comparing line to: "+ regex)
+                    #import string
                     #matchobj = re.search(string.lower(regex), string.lower(line))
                     matchobj = re.search(regex, line)
                     if matchobj:

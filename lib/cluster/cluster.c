@@ -301,8 +301,17 @@ char *
 get_node_name(uint32_t nodeid)
 {
     char *name = NULL;
-    enum cluster_type_e stack = get_cluster_type();
+    const char *isolation_host = NULL;
+    enum cluster_type_e stack;
 
+    if (nodeid == 0) {
+        isolation_host = getenv("OCF_RESKEY_"CRM_META"_isolation_host");
+        if (isolation_host) {
+            return strdup(isolation_host);
+        }
+    }
+
+    stack = get_cluster_type();
     switch (stack) {
         case pcmk_cluster_heartbeat:
             break;
@@ -352,7 +361,6 @@ get_node_name(uint32_t nodeid)
     return name;
 }
 
-/* Only used by update_failcount() in te_utils.c */
 const char *
 crm_peer_uname(const char *uuid)
 {
@@ -381,8 +389,11 @@ crm_peer_uname(const char *uuid)
     if (is_openais_cluster()) {
         if (uname_is_uuid() == FALSE && is_corosync_cluster()) {
             uint32_t id = crm_int_helper(uuid, NULL);
-
-            node = crm_find_peer(id, NULL);
+            if(id != 0) {
+                node = crm_find_peer(id, NULL);
+            } else {
+                crm_err("Invalid node id: %s", uuid);
+            }
 
         } else {
             node = crm_find_peer(0, uuid);
@@ -572,7 +583,7 @@ get_cluster_type(void)
 
   done:
     if (cluster_type == pcmk_cluster_unknown) {
-        crm_notice("Could not determin the current cluster type");
+        crm_notice("Could not determine the current cluster type");
 
     } else if (cluster_type == pcmk_cluster_invalid) {
         crm_notice("This installation does not support the '%s' cluster infrastructure: terminating.",

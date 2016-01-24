@@ -252,7 +252,7 @@ delete_fsa_input(fsa_data_t * fsa_data)
 
             case fsa_dt_none:
                 if (fsa_data->data != NULL) {
-                    crm_err("Dont know how to free %s data from %s",
+                    crm_err("Don't know how to free %s data from %s",
                             fsa_cause2string(fsa_data->fsa_cause), fsa_data->origin);
                     crmd_exit(pcmk_err_generic);
                 }
@@ -665,6 +665,16 @@ handle_request(xmlNode * stored_msg, enum crmd_fsa_cause cause)
     if (op == NULL) {
         crm_log_xml_err(stored_msg, "Bad message");
         return I_NULL;
+    }
+
+    if (strcmp(op, CRM_OP_SHUTDOWN_REQ) == 0) {
+        const char *from = crm_element_value(stored_msg, F_CRM_HOST_FROM);
+        crm_node_t *node = crm_find_peer(0, from);
+
+        crm_update_peer_expected(__FUNCTION__, node, CRMD_JOINSTATE_DOWN);
+        if(AM_I_DC == FALSE) {
+            return I_NULL; /* Done */
+        }
     }
 
     /*========== DC-Only Actions ==========*/

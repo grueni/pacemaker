@@ -77,8 +77,6 @@ save_cib_contents(xmlNode * msg, int call_id, int rc, xmlNode * output, void *us
 
         free(filename);
     }
-
-    free(id);
 }
 
 static void
@@ -263,13 +261,29 @@ force_local_option(xmlNode *xml, const char *attr_name, const char *attr_value)
 
     if(max == 0) {
         char *attr_id = crm_concat(CIB_OPTIONS_FIRST, attr_name, '-');
+        xmlNode *configuration = NULL;
+        xmlNode *crm_config = NULL;
+        xmlNode *cluster_property_set = NULL;
 
         crm_trace("Creating %s/%s = %s", attr_id, attr_name, attr_value);
-        xml = create_xml_node(xml, XML_CIB_TAG_CRMCONFIG);
-        xml = create_xml_node(xml, XML_CIB_TAG_PROPSET);
-        crm_xml_add(xml, XML_ATTR_ID, CIB_OPTIONS_FIRST);
 
-        xml = create_xml_node(xml, XML_CIB_TAG_NVPAIR);
+        configuration = find_entity(xml, XML_CIB_TAG_CONFIGURATION, NULL);
+        if (configuration == NULL) {
+            configuration = create_xml_node(xml, XML_CIB_TAG_CONFIGURATION);
+        }
+
+        crm_config = find_entity(configuration, XML_CIB_TAG_CRMCONFIG, NULL);
+        if (crm_config == NULL) {
+            crm_config = create_xml_node(configuration, XML_CIB_TAG_CRMCONFIG);
+        }
+
+        cluster_property_set = find_entity(crm_config, XML_CIB_TAG_PROPSET, NULL);
+        if (cluster_property_set == NULL) {
+            cluster_property_set = create_xml_node(crm_config, XML_CIB_TAG_PROPSET);
+            crm_xml_add(cluster_property_set, XML_ATTR_ID, CIB_OPTIONS_FIRST);
+        }
+
+        xml = create_xml_node(cluster_property_set, XML_CIB_TAG_NVPAIR);
 
         crm_xml_add(xml, XML_ATTR_ID, attr_id);
         crm_xml_add(xml, XML_NVPAIR_ATTR_NAME, attr_name);
@@ -277,6 +291,7 @@ force_local_option(xmlNode *xml, const char *attr_name, const char *attr_value)
 
         free(attr_id);
     }
+    freeXpathObject(xpathObj);
 }
 
 void
@@ -284,6 +299,7 @@ do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
 {
     int sent;
     xmlNode *cmd = NULL;
+    const char *watchdog = NULL;
 
     if (rc != pcmk_ok) {
         crm_err("Cant retrieve the CIB: %s (call %d)", pcmk_strerror(rc), call_id);
@@ -302,9 +318,10 @@ do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
         crm_debug("Discarding PE request in state: %s", fsa_state2string(fsa_state));
         return;
 
-    } else if (last_peer_update != 0) {
-        crm_debug("Re-asking for the CIB: peer update %d still pending", last_peer_update);
-
+    /* this callback counts as 1 */
+    } else if (num_cib_op_callbacks() > 1) {
+        crm_debug("Re-asking for the CIB: %d other peer updates still pending",
+                  (num_cib_op_callbacks() - 1));
         sleep(1);
         register_fsa_action(A_PE_INVOKE);
         return;
@@ -321,7 +338,11 @@ do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
 
     crm_xml_add(output, XML_ATTR_DC_UUID, fsa_our_uuid);
     crm_xml_add_int(output, XML_ATTR_HAVE_QUORUM, fsa_has_quorum);
-    force_local_option(output, XML_ATTR_HAVE_WATCHDOG, daemon_option("watchdog"));
+
+    watchdog = daemon_option("watchdog");
+    if (watchdog) {
+        force_local_option(output, XML_ATTR_HAVE_WATCHDOG, watchdog);
+    }
 
     if (ever_had_quorum && crm_have_quorum == FALSE) {
         crm_xml_add_int(output, XML_ATTR_QUORUM_PANIC, 1);

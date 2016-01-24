@@ -38,7 +38,7 @@ Add RecourceRecover testcase Zhao Kai <zhaokai@cn.ibm.com>
 #                Thank you.
 #
 
-import time, os, re, types, string, tempfile, sys
+import time, os, re, string, tempfile
 from stat import *
 from cts import CTS
 from cts.CTSaudits import *
@@ -97,13 +97,18 @@ class CTSTest:
         self.logger.debug(args)
 
     def has_key(self, key):
-        return self.Stats.has_key(key)
+        return key in self.Stats
 
     def __setitem__(self, key, value):
         self.Stats[key] = value
 
     def __getitem__(self, key):
-        return self.Stats[key]
+        if str(key) == "0":
+            raise ValueError("Bad call to 'foo in X', should reference 'foo in X.Stats' instead")
+
+        if key in self.Stats:
+            return self.Stats[key]
+        return None
 
     def log_mark(self, msg):
         self.debug("MARK: test %s %s %d" % (self.name,msg,time.time()))
@@ -128,7 +133,7 @@ class CTSTest:
 
     def incr(self, name):
         '''Increment (or initialize) the value associated with the given name'''
-        if not self.Stats.has_key(name):
+        if not name in self.Stats:
             self.Stats[name] = 0
         self.Stats[name] = self.Stats[name]+1
 
@@ -495,8 +500,8 @@ class StonithdTest(CTSTest):
             self.logger.log("Fencing command on %s failed to fence %s (rc=%d)" % (origin, node, rc))
 
         elif origin == node and rc != 255:
-            # 255 == broken pipe, ie. the node was fenced as epxected
-            self.logger.log("Logcally originated fencing returned %d" % rc)
+            # 255 == broken pipe, ie. the node was fenced as expected
+            self.logger.log("Locally originated fencing returned %d" % rc)
 
         self.set_timer("fence")
         matched = watch.lookforall()
@@ -526,15 +531,15 @@ class StonithdTest(CTSTest):
         return [
             self.templates["Pat:Fencing_start"] % ".*",
             self.templates["Pat:Fencing_ok"] % ".*",
-            "error: native_create_actions: Resource .*stonith::.* is active on 2 nodes attempting recovery",
-            "error: remote_op_done: Operation reboot of .*by .* for stonith_admin.*: Timer expired",
-            ]
+            r"error.*: Resource .*stonith::.* is active on 2 nodes attempting recovery",
+            r"error.*: Operation reboot of .*by .* for stonith_admin.*: Timer expired",
+        ]
 
     def is_applicable(self):
         if not self.is_applicable_common():
             return 0
 
-        if self.Env.has_key("DoFencing"):
+        if "DoFencing" in self.Env.keys():
             return self.Env["DoFencing"]
 
         return 1
@@ -745,7 +750,9 @@ class PartialStart(CTSTest):
         '''Return list of errors which should be ignored'''
 
         # We might do some fencing in the 2-node case if we make it up far enough
-        return [ """Executing reboot fencing operation""" ]
+        return [
+            """Executing reboot fencing operation""",
+        ]
 
 #     Register StopOnebyOne as a good test to run
 AllTestClasses.append(PartialStart)
@@ -788,7 +795,7 @@ class StandbyTest(CTSTest):
         rsc_on_node = self.CM.active_resources(node)
 
         watchpats = []
-        watchpats.append("do_state_transition:.*-> S_POLICY_ENGINE")
+        watchpats.append(r"State transition .* -> S_POLICY_ENGINE")
         watch = self.create_watch(watchpats, self.Env["DeadTime"]+10)
         watch.setwatch()
 
@@ -918,7 +925,11 @@ class ValgrindTest(CTSTest):
 
     def errorstoignore(self):
         '''Return list of errors which should be ignored'''
-        return [ """cib:.*readCibXmlFile:""", """HA_VALGRIND_ENABLED""" ]
+        return [
+            r"cib.*: \*\*\*\*\*\*\*\*\*\*\*\*\*",
+            r"cib.*: .* avoid confusing Valgrind",
+            r"HA_VALGRIND_ENABLED",
+        ]
 
 
 class StandbyLoopTest(ValgrindTest):
@@ -1042,7 +1053,7 @@ class BandwidthTest(CTSTest):
                 T1 = linesplit[0]
                 timesplit = string.split(T1,":")
                 time2split = string.split(timesplit[2],".")
-                time1 = (long(timesplit[0])*60+long(timesplit[1]))*60+long(time2split[0])+long(time2split[1])*0.000001
+                time1 = (int(timesplit[0])*60+int(timesplit[1]))*60+int(time2split[0])+int(time2split[1])*0.000001
                 break
 
         while count < 100:
@@ -1064,7 +1075,7 @@ class BandwidthTest(CTSTest):
         T2 = linessplit[0]
         timesplit = string.split(T2,":")
         time2split = string.split(timesplit[2],".")
-        time2 = (long(timesplit[0])*60+long(timesplit[1]))*60+long(time2split[0])+long(time2split[1])*0.000001
+        time2 = (int(timesplit[0])*60+int(timesplit[1]))*60+int(time2split[0])+int(time2split[1])*0.000001
         time = time2-time1
         if (time <= 0):
             return 0
@@ -1099,7 +1110,7 @@ class MaintenanceMode(CTSTest):
         # fail the resource right after turning Maintenance mode on
         # verify it is not recovered until maintenance mode is turned off
         if action == "On":
-            pats.append("Updating failcount for %s on .* after .* %s" % (self.rid, self.action))
+            pats.append(r"pengine.*:\s+warning:.*Processing failed op %s for %s on" % (self.action, self.rid))
         else:
             pats.append(self.templates["Pat:RscOpOK"] % (self.rid, "stop_0"))
             pats.append(self.templates["Pat:RscOpOK"] % (self.rid, "start_0"))
@@ -1246,13 +1257,14 @@ class MaintenanceMode(CTSTest):
 
     def errorstoignore(self):
         '''Return list of errors which should be ignored'''
-        return [ """Updating failcount for %s""" % self.rid,
-                 """LogActions: Recover %s""" % self.rid,
-                 """Unknown operation: fail""",
-                 """(ERROR|error): sending stonithRA op to stonithd failed.""",
-                 self.templates["Pat:RscOpOK"] % (self.rid, ("%s_%d" % (self.action, self.interval))),
-                 """(ERROR|error): process_graph_event: Action %s_%s_%d .* initiated outside of a transition""" % (self.rid, self.action, self.interval),
-                ]
+        return [
+            r"Updating failcount for %s" % self.rid,
+            r"pengine.*: Recover %s\s*\(.*\)" % self.rid,
+            r"Unknown operation: fail",
+            r"(ERROR|error): sending stonithRA op to stonithd failed.",
+            self.templates["Pat:RscOpOK"] % (self.rid, ("%s_%d" % (self.action, self.interval))),
+            r"(ERROR|error).*: Action %s_%s_%d .* initiated outside of a transition" % (self.rid, self.action, self.interval),
+        ]
 
 AllTestClasses.append(MaintenanceMode)
 
@@ -1307,8 +1319,8 @@ class ResourceRecover(CTSTest):
         self.debug("Shooting %s aka. %s" % (rsc.clone_id, rsc.id))
 
         pats = []
-        pats.append("Updating failcount for %s on .* after .* %s"
-                    % (self.rid, self.action))
+        pats.append(r"pengine.*:\s+warning:.*Processing failed op %s for (%s|%s) on" % (self.action,
+            rsc.id, rsc.clone_id))
 
         if rsc.managed():
             pats.append(self.templates["Pat:RscOpOK"] % (self.rid, "stop_0"))
@@ -1346,14 +1358,14 @@ class ResourceRecover(CTSTest):
 
     def errorstoignore(self):
         '''Return list of errors which should be ignored'''
-        return [ """Updating failcount for %s""" % self.rid,
-                 """LogActions: Recover %s""" % self.rid,
-                 """LogActions: Recover %s""" % self.rid_alt,
-                 """Unknown operation: fail""",
-                 """(ERROR|error): sending stonithRA op to stonithd failed.""",
-                 self.templates["Pat:RscOpOK"] % (self.rid, ("%s_%d" % (self.action, self.interval))),
-                 """(ERROR|error): process_graph_event: Action %s_%s_%d .* initiated outside of a transition""" % (self.rid, self.action, self.interval),
-                 ]
+        return [
+            r"Updating failcount for %s" % self.rid,
+            r"pengine.*: Recover (%s|%s)\s*\(.*\)" % (self.rid, self.rid_alt),
+            r"Unknown operation: fail",
+            r"(ERROR|error): sending stonithRA op to stonithd failed.",
+            self.templates["Pat:RscOpOK"] % (self.rid, ("%s_%d" % (self.action, self.interval))),
+            r"(ERROR|error).*: Action %s_%s_%d .* initiated outside of a transition" % (self.rid, self.action, self.interval),
+        ]
 
 AllTestClasses.append(ResourceRecover)
 
@@ -1431,7 +1443,7 @@ class ComponentFail(CTSTest):
                 if re.search("^Resource", line):
                     r = AuditResource(self.CM, line)
                     if r.rclass == "stonith":
-                        self.okerrpatterns.append(self.templates["LogActions: Recover.*%s"] % r.id)
+                        self.okerrpatterns.append(self.templates["Pat:Fencing_recover"] % r.id)
 
         # supply a copy so self.patterns doesnt end up empty
         tmpPats = []
@@ -1567,7 +1579,7 @@ class SplitBrainTest(CTSTest):
             p_max = len(self.Env["nodes"])
             for node in self.Env["nodes"]:
                 p = self.Env.RandomGen.randint(1, p_max)
-                if not partitions.has_key(p):
+                if not p in partitions:
                     partitions[p] = []
                 partitions[p].append(node)
             p_max = len(partitions.keys())
@@ -1576,13 +1588,13 @@ class SplitBrainTest(CTSTest):
             # else, try again
 
         self.debug("Created %d partitions" % p_max)
-        for key in partitions.keys():
+        for key in list(partitions.keys()):
             self.debug("Partition["+str(key)+"]:\t"+repr(partitions[key]))
 
         # Disabling STONITH to reduce test complexity for now
         self.rsh(node, "crm_attribute -V -n stonith-enabled -v false")
 
-        for key in partitions.keys():
+        for key in list(partitions.keys()):
             self.isolate_partition(partitions[key])
 
         count = 30
@@ -1605,7 +1617,7 @@ class SplitBrainTest(CTSTest):
         self.CM.partitions_expected = 1
 
         # And heal them again
-        for key in partitions.keys():
+        for key in list(partitions.keys()):
             self.heal_partition(partitions[key])
 
         # Wait for a single partition to form
@@ -1657,11 +1669,11 @@ class SplitBrainTest(CTSTest):
     def errorstoignore(self):
         '''Return list of errors which are 'normal' and should be ignored'''
         return [
-            "Another DC detected:",
-            "(ERROR|error): attrd_cib_callback: .*Application of an update diff failed",
-            "crmd_ha_msg_callback:.*not in our membership list",
-            "CRIT:.*node.*returning after partition",
-            ]
+            r"Another DC detected:",
+            r"(ERROR|error).*: .*Application of an update diff failed",
+            r"crmd.*:.*not in our membership list",
+            r"CRIT:.*node.*returning after partition",
+        ]
 
     def is_applicable(self):
         if not self.is_applicable_common():
@@ -1805,11 +1817,8 @@ class Reattach(CTSTest):
     def errorstoignore(self):
         '''Return list of errors which should be ignored'''
         return [
-            "resources were active at shutdown",
-            "pingd: .*(ERROR|error): send_ipc_message:",
-            "pingd: .*(ERROR|error): send_update:",
-            "lrmd: .*(ERROR|error): notify_client:",
-            ]
+            r"resources were active at shutdown",
+        ]
 
     def is_applicable(self):
         if self.Env["Name"] == "crm-lha":
@@ -1856,11 +1865,10 @@ class SpecialTest1(CTSTest):
         '''Return list of errors which should be ignored'''
         # Errors that occur as a result of the CIB being wiped
         return [
-            """warning: retrieveCib: Cluster configuration not found:""",
-            """error: cib_perform_op: v1 patchset error, patch failed to apply: Application of an update diff failed""",
-            """error: unpack_resources: Resource start-up disabled since no STONITH resources have been defined""",
-            """error: unpack_resources: Either configure some or disable STONITH with the stonith-enabled option""",
-            """error: unpack_resources: NOTE: Clusters with shared data need STONITH to ensure data integrity""",
+            r"error.*: v1 patchset error, patch failed to apply: Application of an update diff failed",
+            r"error.*: Resource start-up disabled since no STONITH resources have been defined",
+            r"error.*: Either configure some or disable STONITH with the stonith-enabled option",
+            r"error.*: NOTE: Clusters with shared data need STONITH to ensure data integrity",
         ]
 
 AllTestClasses.append(SpecialTest1)
@@ -2244,11 +2252,11 @@ class RollingUpgradeTest(CTSTest):
         if not self.is_applicable_common():
             return None
 
-        if not self.Env.has_key("rpm-dir"):
+        if not "rpm-dir" in self.Env.keys():
             return None
-        if not self.Env.has_key("current-version"):
+        if not "current-version" in self.Env.keys():
             return None
-        if not self.Env.has_key("previous-version"):
+        if not "previous-version" in self.Env.keys():
             return None
 
         return 1
@@ -2302,7 +2310,7 @@ class BSC_AddResource(CTSTest):
         if ":" in ip:
             fields = ip.rpartition(":")
             fields[2] = str(hex(int(fields[2], 16)+1))
-            print str(hex(int(f[2], 16)+1))
+            print(str(hex(int(f[2], 16)+1)))
         else:
             fields = ip.rpartition('.')
             fields[2] = str(int(fields[2])+1)
@@ -2612,23 +2620,19 @@ class RemoteLXC(CTSTest):
 
     def errorstoignore(self):
         '''Return list of errors which should be ignored'''
-        return [ """Updating failcount for ping""",
-                 """LogActions: Recover ping""",
-                 """LogActions: Recover lxc-ms""",
-                 """LogActions: Recover container""",
-                 # The orphaned lxc-ms resource causes an expected transition error
-                 # that is a result of the pengine not having knowledge that the 
-                 # ms resource used to be a clone.  As a result it looks like that 
-                 # resource is running in multiple locations when it shouldn't... But in
-                 # this instance we know why this error is occurring and that it is expected.
-                 """Calculated Transition .* /var/lib/pacemaker/pengine/pe-error""",
-                 """Resource lxc-ms .* is active on 2 nodes attempting recovery""",
-                 """Unknown operation: fail""",
-                 """notice: operation_finished: ping-""",
-                 """notice: operation_finished: container""",
-                 """notice: operation_finished: .*_monitor_0:.*:stderr""",
-                 """(ERROR|error): sending stonithRA op to stonithd failed.""",
-                ]
+        return [
+            r"Updating failcount for ping",
+            r"pengine.*: Recover (ping|lxc-ms|container)\s*\(.*\)",
+            # The orphaned lxc-ms resource causes an expected transition error
+            # that is a result of the pengine not having knowledge that the 
+            # ms resource used to be a clone.  As a result it looks like that 
+            # resource is running in multiple locations when it shouldn't... But in
+            # this instance we know why this error is occurring and that it is expected.
+            r"Calculated Transition .* /var/lib/pacemaker/pengine/pe-error",
+            r"Resource lxc-ms .* is active on 2 nodes attempting recovery",
+            r"Unknown operation: fail",
+            r"(ERROR|error): sending stonithRA op to stonithd failed.",
+        ]
 
 AllTestClasses.append(RemoteLXC)
 
@@ -2649,32 +2653,31 @@ class RemoteDriver(CTSTest):
         self.remote_node_added = 0
         self.remote_rsc_added = 0
         self.remote_rsc = "remote-rsc"
+        self.remote_use_reconnect_interval = self.Env.RandomGen.choice(["true","false"])
         self.cib_cmd = """cibadmin -C -o %s -X '%s' """
 
-    def del_rsc(self, node, rsc):
-
+    def get_othernode(self, node):
         for othernode in self.Env["nodes"]:
             if othernode == node:
                 # we don't want to try and use the cib that we just shutdown.
                 # find a cluster node that is not our soon to be remote-node.
                 continue
-            rc = self.rsh(othernode, "crm_resource -D -r %s -t primitive" % (rsc))
-            if rc != 0:
-                self.fail_string = ("Removal of resource '%s' failed" % (rsc))
-                self.failed = 1
-            return
+            else:
+                return othernode
+
+    def del_rsc(self, node, rsc):
+        othernode = self.get_othernode(node)
+        rc = self.rsh(othernode, "crm_resource -D -r %s -t primitive" % (rsc))
+        if rc != 0:
+            self.fail_string = ("Removal of resource '%s' failed" % (rsc))
+            self.failed = 1
 
     def add_rsc(self, node, rsc_xml):
-        for othernode in self.CM.Env["nodes"]:
-            if othernode == node:
-                # we don't want to try and use the cib that we just shutdown.
-                # find a cluster node that is not our soon to be remote-node.
-                continue
-            rc = self.rsh(othernode, self.cib_cmd % ("resources", rsc_xml))
-            if rc != 0:
-                self.fail_string = "resource creation failed"
-                self.failed = 1
-            return
+        othernode = self.get_othernode(node)
+        rc = self.rsh(othernode, self.cib_cmd % ("resources", rsc_xml))
+        if rc != 0:
+            self.fail_string = "resource creation failed"
+            self.failed = 1
 
     def add_primitive_rsc(self, node):
         rsc_xml = """
@@ -2689,7 +2692,24 @@ class RemoteDriver(CTSTest):
             self.remote_rsc_added = 1
 
     def add_connection_rsc(self, node):
-        rsc_xml = """
+        if self.remote_use_reconnect_interval == "true":
+            # use reconnect interval and make sure to set cluster-recheck-interval as well.
+            rsc_xml = """
+<primitive class="ocf" id="%s" provider="pacemaker" type="remote">
+    <instance_attributes id="remote-instance_attributes"/>
+        <instance_attributes id="remote-instance_attributes">
+          <nvpair id="remote-instance_attributes-server" name="server" value="%s"/>
+          <nvpair id="remote-instance_attributes-reconnect_interval" name="reconnect_interval" value="60s"/>
+        </instance_attributes>
+    <operations>
+      <op id="remote-monitor-interval-60s" interval="60s" name="monitor"/>
+      <op id="remote-name-start-interval-0-timeout-120" interval="0" name="start" timeout="60"/>
+    </operations>
+</primitive>""" % (self.remote_node, node)
+            self.rsh(self.get_othernode(node), self.templates["SetCheckInterval"] % ("45s"))
+        else:
+            # not using reconnect interval
+            rsc_xml = """
 <primitive class="ocf" id="%s" provider="pacemaker" type="remote">
     <instance_attributes id="remote-instance_attributes"/>
         <instance_attributes id="remote-instance_attributes">
@@ -2700,6 +2720,7 @@ class RemoteDriver(CTSTest):
       <op id="remote-name-start-interval-0-timeout-120" interval="0" name="start" timeout="120"/>
     </operations>
 </primitive>""" % (self.remote_node, node)
+
         self.add_rsc(node, rsc_xml)
         if self.failed == 0:
             self.remote_node_added = 1
@@ -2838,7 +2859,7 @@ class RemoteDriver(CTSTest):
         self.CM.ns.WaitForNodeToComeUp(node, 120);
 
         pats = [ ]
-        watch = self.create_watch(pats, 120)
+        watch = self.create_watch(pats, 200)
         watch.setwatch()
         pats.append(self.templates["Pat:RscOpOK"] % (self.remote_node, "start"))
         if self.remote_rsc_added == 1:
@@ -2929,12 +2950,19 @@ class RemoteDriver(CTSTest):
             pats.append(self.templates["Pat:RscOpOK"] % (self.remote_node, "stop"))
 
         self.set_timer("remoteMetalCleanup")
+
+        if self.remote_use_reconnect_interval == "true":
+            self.debug("Cleaning up re-check interval")
+            self.rsh(self.get_othernode(node), self.templates["ClearCheckInterval"])
         if self.remote_rsc_added == 1:
+            self.debug("Cleaning up dummy rsc put on remote node")
             self.rsh(node, "crm_resource -U -r %s -N %s" % (self.remote_rsc, self.remote_node))
             self.del_rsc(node, self.remote_rsc)
         if self.remote_node_added == 1:
+            self.debug("Cleaning up remote node connection resource")
             self.rsh(node, "crm_resource -U -r %s" % (self.remote_node))
             self.del_rsc(node, self.remote_node)
+
         watch.lookforall()
         self.log_timer("remoteMetalCleanup")
 
@@ -3086,18 +3114,18 @@ class RemoteStonithd(CTSTest):
         if not self.driver.is_applicable():
             return False
 
-        if self.Env.has_key("DoFencing"):
+        if "DoFencing" in self.Env.keys():
             return self.Env["DoFencing"]
 
         return True
 
     def errorstoignore(self):
         ignore_pats = [
-            """Unexpected disconnect on remote-node""",
-            """error: process_lrm_event: Operation remote_.*_monitor""",
-            """LogActions: Recover remote_""",
-            """Calculated Transition .* /var/lib/pacemaker/pengine/pe-error""",
-            """error: native_create_actions: Resource .*ocf::.* is active on 2 nodes attempting recovery""",
+            r"Unexpected disconnect on remote-node",
+            r"crmd.*: error.*: Operation remote_.*_monitor",
+            r"pengine.*: Recover remote_.*\s*\(.*\)",
+            r"Calculated Transition .* /var/lib/pacemaker/pengine/pe-error",
+            r"error.*: Resource .*ocf::.* is active on 2 nodes attempting recovery",
         ]
 
         ignore_pats.extend(self.driver.errorstoignore())
@@ -3191,7 +3219,7 @@ class RemoteRscFailure(CTSTest):
 
     def errorstoignore(self):
         ignore_pats = [
-            """LogActions: Recover remote-rsc""",
+            r"pengine.*: Recover remote-rsc\s*\(.*\)",
         ]
 
         ignore_pats.extend(self.driver.errorstoignore())

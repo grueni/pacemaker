@@ -1,5 +1,4 @@
-from UserDict import UserDict
-import sys, time, types, syslog, os, struct, string, signal, traceback, warnings, socket
+import sys, os
 
 from cts.CTSvars import *
 
@@ -8,7 +7,9 @@ class BasePatterns:
     def __init__(self, name):
         self.name = name
         patternvariants[name] = self
-        self.ignore = []
+        self.ignore = [
+            "avoid confusing Valgrind",
+        ]
         self.BadNews = []
         self.components = {}
         self.commands = {
@@ -33,6 +34,9 @@ class BasePatterns:
 
             "UUIDQueryCmd"    : "crmadmin -N",
 
+            "SetCheckInterval"    : "cibadmin --modify -c --xml-text '<cluster_property_set id=\"cib-bootstrap-options\"><nvpair id=\"cts-recheck-interval-setting\" name=\"cluster-recheck-interval\" value=\"%s\"/></cluster_property_set>'",
+            "ClearCheckInterval"    : "cibadmin --delete --xpath \"//nvpair[@name='cluster-recheck-interval']\"",
+
             "MaintenanceModeOn"    : "cibadmin --modify -c --xml-text '<cluster_property_set id=\"cib-bootstrap-options\"><nvpair id=\"cts-maintenance-mode-setting\" name=\"maintenance-mode\" value=\"true\"/></cluster_property_set>'",
             "MaintenanceModeOff"    : "cibadmin --delete --xpath \"//nvpair[@name='maintenance-mode']\"",
 
@@ -53,18 +57,19 @@ class BasePatterns:
             "Pat:TransitionComplete" : "Transition status: Complete: complete",
 
             "Pat:Fencing_start" : "Initiating remote operation .* for %s",
-            "Pat:Fencing_ok"    : "stonith.*remote_op_done:.*Operation .* of %s by .*: OK",
+            "Pat:Fencing_ok"    : r"stonith.*:\s*Operation .* of %s by .* for .*@.*: OK",
+            "Pat:Fencing_recover"    : r"pengine.*: Recover %s",
 
-            "Pat:RscOpOK"       : "process_lrm_event:.*Operation %s_%s.*ok.*confirmed",
-            "Pat:RscRemoteOpOK" : "process_lrm_event:.*Operation %s_%s.*ok.*node=%s, .*confirmed.*true",
-            "Pat:NodeFenced"    : "tengine_stonith_notify:.*Peer %s was terminated .*: OK",
+            "Pat:RscOpOK"       : r"crmd.*:\s*Operation %s_%s.*:\s*ok \(.*confirmed=\S+\)",
+            "Pat:RscRemoteOpOK" : r"crmd.*:\s*Operation %s_%s.*:\s*ok \(node=%s,.*,\s*confirmed=true\)",
+            "Pat:NodeFenced"    : r"crmd.*:\s*Peer\s+%s\s+was\s+terminated\s+\(.*\)\s+by\s+.*\s+for\s+.*:\s+OK",
             "Pat:FenceOpOK"     : "Operation .* for host '%s' with device .* returned: 0",
         }
 
     def get_component(self, key):
-        if self.components.has_key(key):
+        if key in self.components:
             return self.components[key]
-        print "Unknown component '%s' for %s" % (key, self.name)
+        print("Unknown component '%s' for %s" % (key, self.name))
         return []
 
     def get_patterns(self, key):
@@ -82,12 +87,12 @@ class BasePatterns:
     def __getitem__(self, key):
         if key == "Name":
             return self.name
-        elif self.commands.has_key(key):
+        elif key in self.commands:
             return self.commands[key]
-        elif self.search.has_key(key):
+        elif key in self.search:
             return self.search[key]
         else:
-            print "Unknown template '%s' for %s" % (key, self.name)
+            print("Unknown template '%s' for %s" % (key, self.name))
             return None
 
 class crm_lha(BasePatterns):
@@ -97,9 +102,9 @@ class crm_lha(BasePatterns):
         self.commands.update({
             "StartCmd"       : "service heartbeat start > /dev/null 2>&1",
             "StopCmd"        : "service heartbeat stop  > /dev/null 2>&1",
-            "EpocheCmd"      : "crm_node -H -e",
+            "EpochCmd"      : "crm_node -H -e",
             "QuorumCmd"      : "crm_node -H -q",
-            "ParitionCmd"    : "crm_node -H -p",
+            "PartitionCmd"    : "crm_node -H -p",
         })
 
         self.search.update({
@@ -137,8 +142,8 @@ class crm_lha(BasePatterns):
                 r"Parameters to .* changed",
             ]
 
-        self.ignore = [
-                "(ERROR|error): crm_abort:.*crm_glib_handler: ",
+        self.ignore = self.ignore + [
+                r"(ERROR|error):.*\s+assert\s+at\s+crm_glib_handler:"
                 "(ERROR|error): Message hist queue is filling up",
                 "stonithd.*CRIT: external_hostlist:.*'vmware gethosts' returned an empty hostlist",
                 "stonithd.*(ERROR|error): Could not list nodes for stonith RA external/vmware.",
@@ -150,9 +155,9 @@ class crm_cs_v0(BasePatterns):
         BasePatterns.__init__(self, name)
 
         self.commands.update({
-            "EpocheCmd"      : "crm_node -e --openais",
+            "EpochCmd"      : "crm_node -e --openais",
             "QuorumCmd"      : "crm_node -q --openais",
-            "ParitionCmd"    : "crm_node -p --openais",
+            "PartitionCmd"    : "crm_node -p --openais",
             "StartCmd"       : "service corosync start",
             "StopCmd"        : "service corosync stop",
         })
@@ -169,20 +174,23 @@ class crm_cs_v0(BasePatterns):
             "Pat:ChildExit"    : "Child process .* exited",
             "Pat:ChildKilled"  : "%s\W.*corosync.*Child process %s terminated with signal 9",
             "Pat:ChildRespawn" : "%s\W.*corosync.*Respawning failed child process: %s",
+
+            "Pat:InfraUp"      : "%s\W.*corosync.*Initializing transport",
+            "Pat:PacemakerUp"  : "%s\W.*pacemakerd.*Starting Pacemaker",
         })
 
-        self.ignore = [
+        self.ignore = self.ignore + [
             r"crm_mon:",
             r"crmadmin:",
             r"update_trace_data",
             r"async_notify:.*strange, client not found",
             r"Parse error: Ignoring unknown option .*nodename",
-            r"error: log_operation:.*Operation 'reboot' .* with device 'FencingFail' returned:",
+            r"error.*: Operation 'reboot' .* with device 'FencingFail' returned:",
             r"Child process .* terminated with signal 9",
             r"getinfo response error: 1$",
             "sbd.* error: inquisitor_child: DEBUG MODE IS ACTIVE",
-            "sbd.* pcmk:    error: crm_ipc_read: Connection to cib_ro failed",
-            "sbd.* pcmk:    error: mainloop_gio_callback: Connection to cib_ro.* closed .I/O condition=17",
+            r"sbd.* pcmk:\s*error:.*Connection to cib_ro failed",
+            r"sbd.* pcmk:\s*error:.*Connection to cib_ro.* closed .I/O condition=17",
         ]
 
         self.BadNews = [
@@ -213,12 +221,12 @@ class crm_cs_v0(BasePatterns):
             r"Parameters to .* changed",
             r"The .* process .* terminated with signal",
             r"Child process .* terminated with signal",
-            r"LogActions:.*Recover",
+            r"pengine:.*Recover .*\(.* -\> .*\)",
             r"rsyslogd.* imuxsock lost .* messages from pid .* due to rate-limiting",
             r"Peer is not part of our cluster",
             r"We appear to be in an election loop",
             r"Unknown node -> we will not deliver message",
-            r"crm_write_blackbox",
+            r"(Blackbox dump requested|Problem detected)",
             r"pacemakerd.*Could not connect to Cluster Configuration Database API",
             r"Receiving messages from a node we think is dead",
             r"share the same cluster nodeid",
@@ -231,9 +239,10 @@ class crm_cs_v0(BasePatterns):
             #r"No need to invoke the TE",
             #r"ping.*: DEBUG: Updated connected = 0",
             #r"Digest mis-match:",
-            r"te_graph_trigger:.*Transition failed: terminated",
-            r"process_ping_reply",
-            r"warn.*:retrieveCib",
+            r"crmd:.*Transition failed: terminated",
+            r"Local CIB .* differs from .*:",
+            r"warn.*:\s*Continuing but .* will NOT be used",
+            r"warn.*:\s*Cluster configuration file .* is corrupt",
             #r"Executing .* fencing operation",
             #r"fence_pcmk.* Call to fence",
             #r"fence_pcmk",
@@ -252,52 +261,54 @@ class crm_cs_v0(BasePatterns):
                     "Connection to the CIB terminated...",
                     "Sending message to CIB service FAILED",
                     "apply_xml_diff:.*Diff application failed!",
-                    "crmd.*Action A_RECOVER .* not supported",
+                    r"crmd.*:\s*Action A_RECOVER .* not supported",
                     "unconfirmed_actions:.*Waiting on .* unconfirmed actions",
                     "cib_native_msgready:.*Message pending on command channel",
-                    "crmd.*do_exit:.*Performing A_EXIT_1 - forcefully exiting the CRMd",
+                    r"crmd.*:\s*Performing A_EXIT_1 - forcefully exiting the CRMd",
                     "verify_stopped:.*Resource .* was active at shutdown.  You may ignore this error if it is unmanaged.",
                     "error: attrd_connection_destroy:.*Lost connection to attrd",
-                    "info: te_fence_node:.*Executing .* fencing operation",
-                    "crm_write_blackbox:",
+                    r".*:\s*Executing .* fencing operation \(.*\) on ",
+                    r"(Blackbox dump requested|Problem detected)",
 #                    "error: native_create_actions: Resource .*stonith::.* is active on 2 nodes attempting recovery",
 #                    "error: process_pe_message: Transition .* ERRORs found during PE processing",
             ]
         
         self.components["corosync-ignore"] = [
-            r"error: pcmk_cpg_dispatch:.*Connection to the CPG API failed: Library error",
+            r"error:.*Connection to the CPG API failed: Library error",
             r"The .* process .* exited",
-            r"pacemakerd.*error: pcmk_child_exit:.*Child process .* exited",
-            r"cib.*error: cib_cs_destroy:.*Corosync connection lost",
-            r"stonith-ng.*error: stonith_peer_cs_destroy:.*Corosync connection terminated",
+            r"pacemakerd.*error:.*Child process .* exited",
+            r"cib.*error:.*Corosync connection lost",
+            r"stonith-ng.*error:.*Corosync connection terminated",
             r"The cib process .* exited: Invalid argument",
             r"The attrd process .* exited: Transport endpoint is not connected",
             r"The crmd process .* exited: Link has been severed",
-            r"error: pcmk_child_exit:.*Child process cib .* exited: Invalid argument",
-            r"error: pcmk_child_exit:.*Child process attrd .* exited: Transport endpoint is not connected",
-            r"error: pcmk_child_exit:.*Child process crmd .* exited: Link has been severed",
-            r"lrmd.*error: crm_ipc_read:.*Connection to stonith-ng failed",
-            r"lrmd.*error: mainloop_gio_callback:.*Connection to stonith-ng.* closed",
-            r"lrmd.*error: stonith_connection_destroy_cb:.*LRMD lost STONITH connection",
-            r"crmd.*do_state_transition:.*State transition .* S_RECOVERY",
-            r"crmd.*error: do_log:.*FSA: Input I_ERROR",
-            r"crmd.*error: do_log:.*FSA: Input I_TERMINATE",
-            r"crmd.*error: pcmk_cman_dispatch:.*Connection to cman failed",
-            r"crmd.*error: crmd_fast_exit:.*Could not recover from internal error",
-            r"error: crm_ipc_read:.*Connection to cib_shm failed",
-            r"error: mainloop_gio_callback:.*Connection to cib_shm.* closed",
-            r"error: stonith_connection_failed:.*STONITH connection failed",
+            r"error:.*Child process cib .* exited: Invalid argument",
+            r"error:.*Child process attrd .* exited: Transport endpoint is not connected",
+            r"error:.*Child process crmd .* exited: Link has been severed",
+            r"lrmd.*error:.*Connection to stonith-ng failed",
+            r"lrmd.*error:.*Connection to stonith-ng.* closed",
+            r"lrmd.*error:.*LRMD lost STONITH connection",
+            r"crmd.*State transition .* S_RECOVERY",
+            r"crmd.*error:.*FSA: Input I_ERROR",
+            r"crmd.*error:.*FSA: Input I_TERMINATE",
+            r"crmd.*error:.*Connection to cman failed",
+            r"crmd.*error:.*Could not recover from internal error",
+            r"error:.*Connection to cib_shm failed",
+            r"error:.*Connection to cib_shm.* closed",
+            r"error:.*STONITH connection failed",
+            r"error: Connection to stonith-ng failed",
+            r"crit: Fencing daemon connection failed",
+            r"error: Connection to stonith-ng.* closed",
             ]
 
         self.components["corosync"] = [
-            r"pacemakerd.*error: cfg_connection_destroy:.*Connection destroyed",
-            r"pacemakerd.*error: mcp_cpg_destroy:.*Connection destroyed",
-            r"crit: attrd_(cs|cpg)_destroy:.*Lost connection to Corosync service",
-            r"stonith_peer_cs_destroy:.*Corosync connection terminated",
-            r"cib_cs_destroy:.*Corosync connection lost!  Exiting.",
-            r"crmd_(cs|quorum)_destroy:.*connection terminated",
+            r"pacemakerd.*error:.*Connection destroyed",
+            r"attrd.*:\s*crit:.*Lost connection to Corosync service",
+            r"stonith.*:\s*Corosync connection terminated",
+            r"cib.*:\s*Corosync connection lost!\s+Exiting.",
+            r"crmd.*:\s*connection terminated",
             r"pengine.*Scheduling Node .* for STONITH",
-            r"tengine_stonith_notify:.*Peer .* was terminated .*: OK",
+            r"crmd.*:\s*Peer %s was terminated \(.*\) by .* for .*:\s*OK",
         ]
 
         self.components["cib-ignore"] = [
@@ -365,17 +376,17 @@ class crm_cs_v0(BasePatterns):
             "LRMD lost STONITH connection",
             "Connection to stonith-ng.* closed",
             "Fencing daemon connection failed",
-            "crmd.*stonith_api_add_notification:.*Callback already present",
+            r"crmd.*:\s*warn.*:\s*Callback already present",
         ]
         self.components["stonith-ignore"] = [
-            "LogActions: Recover Fencing",
-            "Updating failcount for Fencing",
-            "error: crm_ipc_read: Connection to stonith-ng failed",
-            "error: mainloop_gio_callback: Connection to stonith-ng.*closed (I/O condition=17)",
-            "crit: tengine_stonith_connection_destroy: Fencing daemon connection failed",
-            "error: te_connect_stonith:.*Sign-in failed: triggered a retry",
+            r"pengine.*: Recover Fencing",
+            r"Updating failcount for Fencing",
+            r"error:.*Connection to stonith-ng failed",
+            r"error:.*Connection to stonith-ng.*closed \(I/O condition=17\)",
+            r"crit:.*Fencing daemon connection failed",
+            r"error:.*Sign-in failed: triggered a retry",
             "STONITH connection failed, finalizing .* pending operations.",
-            "process_lrm_event:.*Operation Fencing.* Error",
+            r"crmd.*:\s*Operation Fencing.* Error",
         ]
         self.components["stonith-ignore"].extend(self.components["common-ignore"])
 
@@ -390,16 +401,16 @@ class crm_mcp(crm_cs_v0):
 
         self.commands.update({
             "StartCmd"       : "service corosync start && service pacemaker start",
-            "StopCmd"        : "service pacemaker stop; service pacemaker_remote stop; service corosync stop",
+            "StopCmd"        : "service pacemaker stop; [ ! -e /usr/sbin/pacemaker_remoted ] || service pacemaker_remote stop; service corosync stop",
 
-            "EpocheCmd"      : "crm_node -e",
+            "EpochCmd"      : "crm_node -e",
             "QuorumCmd"      : "crm_node -q",
-            "ParitionCmd"    : "crm_node -p",
+            "PartitionCmd"    : "crm_node -p",
         })
 
         self.search.update({
             # Close enough... "Corosync Cluster Engine exiting normally" isn't printed
-            #   reliably and there's little interest in doing anything it
+            #   reliably and there's little interest in doing anything about it
             "Pat:We_stopped"   : "%s\W.*Unloading all Corosync service engines",
             "Pat:They_stopped" : "%s\W.*crmd.*Node %s\[.*state is now lost",
             "Pat:They_dead"    : "crmd.*Node %s\[.*state is now lost",
@@ -407,9 +418,6 @@ class crm_mcp(crm_cs_v0):
             "Pat:ChildExit"    : "The .* process exited",
             "Pat:ChildKilled"  : "%s\W.*pacemakerd.*The %s process .* terminated with signal 9",
             "Pat:ChildRespawn" : "%s\W.*pacemakerd.*Respawning failed child process: %s",
-
-            "Pat:InfraUp"      : "%s\W.*corosync.*Initializing transport",
-            "Pat:PacemakerUp"  : "%s\W.*pacemakerd.*Starting Pacemaker",
         })
 
 #        if self.Env["have_systemd"]:
@@ -443,11 +451,11 @@ class crm_cman(crm_cs_v0):
 
         self.commands.update({
             "StartCmd"       : "service pacemaker start",
-            "StopCmd"        : "service pacemaker stop; service pacemaker_remote stop",
+            "StopCmd"        : "service pacemaker stop; [ ! -e /usr/sbin/pacemaker_remoted ] || service pacemaker_remote stop",
 
-            "EpocheCmd"      : "crm_node -e --cman",
+            "EpochCmd"      : "crm_node -e --cman",
             "QuorumCmd"      : "crm_node -q --cman",
-            "ParitionCmd"    : "crm_node -p --cman",
+            "PartitionCmd"    : "crm_node -p --cman",
 
             "Pat:We_stopped"   : "%s.*Unloading all Corosync service engines",
             "Pat:They_stopped" : "%s\W.*crmd.*Node %s\[.*state is now lost",
@@ -481,9 +489,9 @@ class PatternSelector:
             crm_mcp_docker(name)
 
     def get_variant(self, variant):
-        if patternvariants.has_key(variant):
+        if variant in patternvariants:
             return patternvariants[variant]
-        print "defaulting to crm-base for %s" % variant
+        print("defaulting to crm-base for %s" % variant)
         return self.base
 
     def get_patterns(self, variant, kind):
@@ -505,8 +513,6 @@ if __name__ == '__main__':
     pdir=os.path.dirname(sys.path[0])
     sys.path.insert(0, pdir) # So that things work from the source directory
 
-    from cts.CTSvars   import *
-
     kind=None
     template=None
 
@@ -526,7 +532,7 @@ if __name__ == '__main__':
            template = args[i+1]
 
        else:
-           print "Illegal argument " + args[i]
+           print("Illegal argument " + args[i])
 
 
-    print PatternSelector(kind)[template]
+    print(PatternSelector(kind)[template])

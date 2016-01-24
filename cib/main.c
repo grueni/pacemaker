@@ -71,8 +71,6 @@ gboolean cib_register_ha(ll_cluster_t * hb_cluster, const char *client_name);
 void *hb_conn = NULL;
 #endif
 
-extern void terminate_cib(const char *caller, gboolean fast);
-
 GMainLoop *mainloop = NULL;
 const char *cib_root = NULL;
 char *cib_our_uname = NULL;
@@ -139,12 +137,12 @@ main(int argc, char **argv)
     crm_set_options(NULL, "[options]",
                     long_options, "Daemon for storing and replicating the cluster configuration");
 
+    crm_peer_init();
+
     mainloop_add_signal(SIGTERM, cib_shutdown);
     mainloop_add_signal(SIGPIPE, cib_enable_writes);
 
     cib_writer = mainloop_add_trigger(G_PRIORITY_LOW, write_cib_contents, NULL);
-
-    crm_peer_init();
 
     while (1) {
         flag = crm_get_option(argc, argv, &index);
@@ -215,8 +213,8 @@ main(int argc, char **argv)
 
     crm_log_init(NULL, LOG_INFO, TRUE, FALSE, argc, argv, FALSE);
     if (cib_root == NULL) {
-        char *path = g_strdup_printf("%s/cib.xml", CRM_CONFIG_DIR);
-        char *legacy = g_strdup_printf("%s/cib.xml", CRM_LEGACY_CONFIG_DIR);
+        char *path = crm_strdup_printf("%s/cib.xml", CRM_CONFIG_DIR);
+        char *legacy = crm_strdup_printf("%s/cib.xml", CRM_LEGACY_CONFIG_DIR);
 
         if (g_file_test(path, G_FILE_TEST_EXISTS)) {
             cib_root = CRM_CONFIG_DIR;
@@ -230,8 +228,8 @@ main(int argc, char **argv)
             crm_notice("Using new config location: %s", cib_root);
         }
 
-        g_free(legacy);
-        g_free(path);
+        free(legacy);
+        free(path);
 
     } else {
         crm_notice("Using custom config location: %s", cib_root);
@@ -414,7 +412,7 @@ cib_cs_destroy(gpointer user_data)
         crm_info("Corosync disconnection complete");
     } else {
         crm_err("Corosync connection lost!  Exiting.");
-        terminate_cib(__FUNCTION__, TRUE);
+        terminate_cib(__FUNCTION__, -1);
     }
 }
 #endif
@@ -422,22 +420,29 @@ cib_cs_destroy(gpointer user_data)
 static void
 cib_peer_update_callback(enum crm_status_type type, crm_node_t * node, const void *data)
 {
-    if (type == crm_status_processes && legacy_mode && is_not_set(node->processes, crm_proc_cpg)) {
-        uint32_t old = 0;
+    switch (type) {
+        case crm_status_processes:
+            if (legacy_mode && is_not_set(node->processes, crm_get_cluster_proc())) {
+                uint32_t old = data? *(const uint32_t *)data : 0;
 
-        if (data) {
-            old = *(const uint32_t *)data;
-        }
+                if ((node->processes ^ old) & crm_proc_cpg) {
+                    crm_info("Attempting to disable legacy mode after %s left the cluster",
+                             node->uname);
+                    legacy_mode = FALSE;
+                }
+            }
+            break;
 
-        if ((node->processes ^ old) & crm_proc_cpg) {
-            crm_info("Attempting to disable legacy mode after %s left the cluster", node->uname);
-            legacy_mode = FALSE;
-        }
-    }
+        case crm_status_uname:
+        case crm_status_rstate:
+        case crm_status_nstate:
+            if (cib_shutdown_flag && (crm_active_peers() < 2)
+                && crm_hash_table_size(client_connections) == 0) {
 
-    if (cib_shutdown_flag && crm_active_peers() < 2 && crm_hash_table_size(client_connections) == 0) {
-        crm_info("No more peers");
-        terminate_cib(__FUNCTION__, FALSE);
+                crm_info("No more peers");
+                terminate_cib(__FUNCTION__, 1);
+            }
+            break;
     }
 }
 
@@ -447,10 +452,10 @@ cib_ha_connection_destroy(gpointer user_data)
 {
     if (cib_shutdown_flag) {
         crm_info("Heartbeat disconnection complete... exiting");
-        terminate_cib(__FUNCTION__, FALSE);
+        terminate_cib(__FUNCTION__, 0);
     } else {
         crm_err("Heartbeat connection lost!  Exiting.");
-        terminate_cib(__FUNCTION__, TRUE);
+        terminate_cib(__FUNCTION__, -1);
     }
 }
 #endif
@@ -533,8 +538,12 @@ cib_init(void)
     /* Create the mainloop and run it... */
     mainloop = g_main_new(FALSE);
     crm_info("Starting %s mainloop", crm_system_name);
-
     g_main_run(mainloop);
+
+    /* If main loop returned, clean up and exit. We disconnect in case
+     * terminate_cib() was called with fast=1.
+     */
+    crm_cluster_disconnect(&crm_cluster);
     cib_ipc_servers_destroy(ipcs_ro, ipcs_rw, ipcs_shm);
 
     return crm_exit(pcmk_ok);

@@ -50,10 +50,17 @@
 static int operations = 0;
 GHashTable *recurring_actions = NULL;
 
+/* ops waiting to run async because of conflicting active
+ * pending ops*/
+GList *blocked_ops = NULL;
+
+/* ops currently active (in-flight) */
+GList *inflight_ops = NULL;
+
 svc_action_t *
 services_action_create(const char *name, const char *action, int interval, int timeout)
 {
-    return resources_action_create(name, "lsb", NULL, name, action, interval, timeout, NULL);
+    return resources_action_create(name, "lsb", NULL, name, action, interval, timeout, NULL, 0);
 }
 
 const char *
@@ -95,7 +102,7 @@ resources_find_service_class(const char *agent)
 svc_action_t *
 resources_action_create(const char *name, const char *standard, const char *provider,
                         const char *agent, const char *action, int interval, int timeout,
-                        GHashTable * params)
+                        GHashTable * params, enum svc_action_flags flags)
 {
     svc_action_t *op = NULL;
 
@@ -129,8 +136,11 @@ resources_action_create(const char *name, const char *standard, const char *prov
         goto return_error;
     }
 
-    if (safe_str_eq(action, "monitor")
-        && (safe_str_eq(standard, "lsb") || safe_str_eq(standard, "service"))) {
+    if (safe_str_eq(action, "monitor") && (
+#if SUPPORT_HEARTBEAT
+        safe_str_eq(standard, "heartbeat") ||
+#endif
+        safe_str_eq(standard, "lsb") || safe_str_eq(standard, "service"))) {
         action = "status";
     }
 
@@ -140,6 +150,7 @@ resources_action_create(const char *name, const char *standard, const char *prov
 
     op = calloc(1, sizeof(svc_action_t));
     op->opaque = calloc(1, sizeof(svc_action_private_t));
+    op->opaque->pending = NULL;
     op->rsc = strdup(name);
     op->action = strdup(action);
     op->interval = interval;
@@ -147,6 +158,8 @@ resources_action_create(const char *name, const char *standard, const char *prov
     op->standard = strdup(standard);
     op->agent = strdup(agent);
     op->sequence = ++operations;
+    op->flags = flags;
+
     if (asprintf(&op->id, "%s_%s_%d", name, action, interval) == -1) {
         goto return_error;
     }
@@ -191,7 +204,42 @@ resources_action_create(const char *name, const char *standard, const char *prov
         op->opaque->args[0] = strdup(op->opaque->exec);
         op->opaque->args[1] = strdup(op->action);
         op->opaque->args[2] = NULL;
+#if SUPPORT_HEARTBEAT
+    } else if (strcasecmp(op->standard, "heartbeat") == 0) {
+        int index;
+        int param_num;
+        char buf_tmp[20];
+        void *value_tmp;
 
+        if (op->agent[0] == '/') {
+            /* if given an absolute path, use that instead
+             * of tacking on the HB_RA_DIR path to the front */
+            op->opaque->exec = strdup(op->agent);
+        } else if (asprintf(&op->opaque->exec, "%s/%s", HB_RA_DIR, op->agent) == -1) {
+            crm_err("Internal error: cannot create agent path");
+            goto return_error;
+        }
+        op->opaque->args[0] = strdup(op->opaque->exec);
+
+        /* The "heartbeat" agent class only has positional arguments,
+         * which we keyed by their decimal position number. */
+        param_num = 1;
+	for (index = 1; index <= MAX_ARGC - 3; index++ ) {
+            snprintf(buf_tmp, sizeof(buf_tmp), "%d", index);
+            value_tmp = g_hash_table_lookup(params, buf_tmp);
+            if (value_tmp == NULL) {
+                /* maybe: strdup("") ??
+                 * But the old lrmd did simply continue as well. */
+                continue;
+            }
+            op->opaque->args[param_num++] = strdup(value_tmp);
+        }
+
+	/* Add operation code as the last argument, */
+	/* and the teminating NULL pointer */
+        op->opaque->args[param_num++] = strdup(op->action);
+        op->opaque->args[param_num] = NULL;
+#endif
 #if SUPPORT_SYSTEMD
     } else if (strcasecmp(op->standard, "systemd") == 0) {
         op->opaque->exec = strdup("systemd-dbus");
@@ -289,6 +337,7 @@ services_action_create_generic(const char *exec, const char *args[])
 
     op->opaque->exec = strdup(exec);
     op->opaque->args[0] = strdup(exec);
+    op->opaque->pending = NULL;
 
     for (cur_arg = 1; args && args[cur_arg - 1]; cur_arg++) {
         op->opaque->args[cur_arg] = strdup(args[cur_arg - 1]);
@@ -302,9 +351,42 @@ services_action_create_generic(const char *exec, const char *args[])
     return op;
 }
 
+#if SUPPORT_DBUS
+/*
+ * \internal
+ * \brief Update operation's pending DBus call, unreferencing old one if needed
+ *
+ * \param[in,out] op       Operation to modify
+ * \param[in]     pending  Pending call to set
+ */
+void
+services_set_op_pending(svc_action_t *op, DBusPendingCall *pending)
+{
+    if (op->opaque->pending && (op->opaque->pending != pending)) {
+        if (pending) {
+            crm_info("Lost pending %s DBus call (%p)", op->id, op->opaque->pending);
+        } else {
+            crm_info("Done with pending %s DBus call (%p)", op->id, op->opaque->pending);
+        }
+        dbus_pending_call_unref(op->opaque->pending);
+    }
+    op->opaque->pending = pending;
+    if (pending) {
+        crm_info("Updated pending %s DBus call (%p)", op->id, pending);
+    } else {
+        crm_info("Cleared pending %s DBus call", op->id);
+    }
+}
+#endif
+
 void
 services_action_cleanup(svc_action_t * op)
 {
+#if SUPPORT_DBUS
+    if(op->opaque == NULL) {
+        return;
+    }
+
     if(op->opaque->timerid != 0) {
         crm_trace("Removing timer for call %s to %s", op->action, op->rsc);
         g_source_remove(op->opaque->timerid);
@@ -330,6 +412,7 @@ services_action_cleanup(svc_action_t * op)
         mainloop_del_fd(op->opaque->stdout_gsource);
         op->opaque->stdout_gsource = NULL;
     }
+#endif
 }
 
 void
@@ -377,7 +460,7 @@ services_action_free(svc_action_t * op)
 gboolean
 cancel_recurring_action(svc_action_t * op)
 {
-    crm_info("Cancelling operation %s", op->id);
+    crm_info("Cancelling %s operation %s", op->standard, op->id);
 
     if (recurring_actions) {
         g_hash_table_remove(recurring_actions, op->id);
@@ -411,6 +494,8 @@ services_action_cancel(const char *name, const char *action, int interval)
         if (op->opaque->callback) {
             op->opaque->callback(op);
         }
+
+        blocked_ops = g_list_remove(blocked_ops, op);
         services_action_free(op);
 
     } else {
@@ -496,6 +581,30 @@ handle_duplicate_recurring(svc_action_t * op, void (*action_callback) (svc_actio
     return FALSE;
 }
 
+static gboolean
+action_async_helper(svc_action_t * op) {
+    gboolean res = FALSE;
+
+    if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
+#if SUPPORT_UPSTART
+        res = upstart_job_exec(op, FALSE);
+#endif
+    } else if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
+#if SUPPORT_SYSTEMD
+        res =  systemd_unit_exec(op);
+#endif
+    } else {
+        res = services_os_action_execute(op, FALSE);
+    }
+
+    /* keep track of ops that are in-flight to avoid collisions in the same namespace */
+    if (res) {
+        inflight_ops = g_list_append(inflight_ops, op);
+    }
+
+    return res;
+}
+
 gboolean
 services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *))
 {
@@ -507,21 +616,78 @@ services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *
     if (op->interval > 0) {
         if (handle_duplicate_recurring(op, action_callback) == TRUE) {
             /* entry rescheduled, dup freed */
+            /* exit early */
             return TRUE;
         }
         g_hash_table_replace(recurring_actions, op->id, op);
     }
-    if (op->standard && strcasecmp(op->standard, "upstart") == 0) {
-#if SUPPORT_UPSTART
-        return upstart_job_exec(op, FALSE);
-#endif
+
+    if (is_op_blocked(op->rsc)) {
+        blocked_ops = g_list_append(blocked_ops, op);
+        return TRUE;
     }
-    if (op->standard && strcasecmp(op->standard, "systemd") == 0) {
-#if SUPPORT_SYSTEMD
-        return systemd_unit_exec(op);
-#endif
+
+    return action_async_helper(op);
+}
+
+
+static gboolean processing_blocked_ops = FALSE;
+
+gboolean
+is_op_blocked(const char *rsc)
+{
+    GList *gIter = NULL;
+    svc_action_t *op = NULL;
+
+    for (gIter = inflight_ops; gIter != NULL; gIter = gIter->next) {
+        op = gIter->data;
+        if (safe_str_eq(op->rsc, rsc)) {
+            return TRUE;
+        }
     }
-    return services_os_action_execute(op, FALSE);
+
+    return FALSE;
+}
+
+void
+handle_blocked_ops(void)
+{
+    GList *executed_ops = NULL;
+    GList *gIter = NULL;
+    svc_action_t *op = NULL;
+    gboolean res = FALSE;
+
+    if (processing_blocked_ops) {
+        /* avoid nested calling of this function */
+        return;
+    }
+
+    processing_blocked_ops = TRUE;
+
+    /* n^2 operation here, but blocked ops are incredibly rare. this list
+     * will be empty 99% of the time. */
+    for (gIter = blocked_ops; gIter != NULL; gIter = gIter->next) {
+        op = gIter->data;
+        if (is_op_blocked(op->rsc)) {
+            continue;
+        }
+        executed_ops = g_list_append(executed_ops, op);
+        res = action_async_helper(op);
+        if (res == FALSE) {
+            op->status = PCMK_LRM_OP_ERROR;
+            /* this can cause this function to be called recursively
+             * which is why we have processing_blocked_ops static variable */
+            operation_finalize(op);
+        }
+    }
+
+    for (gIter = executed_ops; gIter != NULL; gIter = gIter->next) {
+        op = gIter->data;
+        blocked_ops = g_list_remove(blocked_ops, op);
+    }
+    g_list_free(executed_ops);
+
+    processing_blocked_ops = FALSE;
 }
 
 gboolean
@@ -568,6 +734,14 @@ services_list(void)
     return resources_list_agents("lsb", NULL);
 }
 
+#if SUPPORT_HEARTBEAT
+static GList *
+resources_os_list_hb_agents(void)
+{
+    return services_os_get_directory_list(HB_RA_DIR, TRUE, TRUE);
+}
+#endif
+
 GList *
 resources_list_standards(void)
 {
@@ -604,6 +778,10 @@ resources_list_standards(void)
         standards = g_list_append(standards, strdup("nagios"));
         g_list_free_full(agents, free);
     }
+#endif
+
+#if SUPPORT_HEARTBEAT
+    standards = g_list_append(standards, strdup("heartbeat"));
 #endif
 
     return standards;
@@ -656,6 +834,10 @@ resources_list_agents(const char *standard, const char *provider)
         return resources_os_list_ocf_agents(provider);
     } else if (strcasecmp(standard, "lsb") == 0) {
         return resources_os_list_lsb_agents();
+#if SUPPORT_HEARTBEAT
+    } else if (strcasecmp(standard, "heartbeat") == 0) {
+        return resources_os_list_hb_agents();
+#endif
 #if SUPPORT_SYSTEMD
     } else if (strcasecmp(standard, "systemd") == 0) {
         return systemd_unit_listall();

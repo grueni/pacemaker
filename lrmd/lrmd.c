@@ -56,6 +56,8 @@ typedef struct lrmd_cmd_s {
 
     int rsc_deleted;
 
+    int service_flags;
+
     char *client_id;
     char *origin;
     char *rsc_id;
@@ -65,15 +67,18 @@ typedef struct lrmd_cmd_s {
     char *output;
     char *userdata_str;
 
+    /* when set, this cmd should go through a container wrapper */
+    const char *isolation_wrapper;
+
 #ifdef HAVE_SYS_TIMEB_H
-    /* Timestamp of when op first ran */
-    struct timeb t_first_run;
-    /* Timestamp of when op ran */
-    struct timeb t_run;
-    /* Timestamp of when op was queued */
-    struct timeb t_queue;
-    /* Timestamp of last rc change */
-    struct timeb t_rcchange;
+    /* recurring and systemd operations may involve more than one lrmd command
+     * per operation, so they need info about original and most recent
+     */
+    struct timeb t_first_run;   /* Timestamp of when op first ran */
+    struct timeb t_run;         /* Timestamp of when op most recently ran */
+    struct timeb t_first_queue; /* Timestamp of when op first was queued */
+    struct timeb t_queue;       /* Timestamp of when op most recently was queued */
+    struct timeb t_rcchange;    /* Timestamp of last rc change */
 #endif
 
     int first_notify_sent;
@@ -156,7 +161,7 @@ build_rsc_from_xml(xmlNode * msg)
 }
 
 static lrmd_cmd_t *
-create_lrmd_cmd(xmlNode * msg, crm_client_t * client)
+create_lrmd_cmd(xmlNode * msg, crm_client_t * client, lrmd_rsc_t *rsc)
 {
     int call_options = 0;
     xmlNode *rsc_xml = get_xpath_object("//" F_LRMD_RSC, msg, LOG_ERR);
@@ -180,7 +185,23 @@ create_lrmd_cmd(xmlNode * msg, crm_client_t * client)
     cmd->rsc_id = crm_element_value_copy(rsc_xml, F_LRMD_RSC_ID);
 
     cmd->params = xml2list(rsc_xml);
+    cmd->isolation_wrapper = g_hash_table_lookup(cmd->params, "CRM_meta_isolation_wrapper");
 
+    if (cmd->isolation_wrapper) {
+        if (g_hash_table_lookup(cmd->params, "CRM_meta_isolation_instance") == NULL) {
+            g_hash_table_insert(cmd->params, strdup("CRM_meta_isolation_instance"), strdup(rsc->rsc_id));
+        }
+        if (rsc->provider) {
+            g_hash_table_insert(cmd->params, strdup("CRM_meta_provider"), strdup(rsc->provider));
+        }
+        g_hash_table_insert(cmd->params, strdup("CRM_meta_class"), strdup(rsc->class));
+        g_hash_table_insert(cmd->params, strdup("CRM_meta_type"), strdup(rsc->type));
+    }
+
+    if (safe_str_eq(g_hash_table_lookup(cmd->params, "CRM_meta_on_fail"), "block")) {
+        crm_debug("Setting flag to leave pid group on timeout and only kill action pid for %s_%s_%d", cmd->rsc_id, cmd->action, cmd->interval);
+        cmd->service_flags |= SVC_ACTION_LEAVE_GROUP;
+    }
     return cmd;
 }
 
@@ -198,6 +219,7 @@ free_lrmd_cmd(lrmd_cmd_t * cmd)
     }
     free(cmd->origin);
     free(cmd->action);
+    free(cmd->real_action);
     free(cmd->userdata_str);
     free(cmd->rsc_id);
     free(cmd->output);
@@ -227,6 +249,9 @@ stonith_recurring_op_helper(gpointer data)
     rsc->pending_ops = g_list_append(rsc->pending_ops, cmd);
 #ifdef HAVE_SYS_TIMEB_H
     ftime(&cmd->t_queue);
+    if (cmd->t_first_queue.time == 0) {
+        cmd->t_first_queue = cmd->t_queue;
+    }
 #endif
     mainloop_set_trigger(rsc->work);
 
@@ -335,6 +360,9 @@ schedule_lrmd_cmd(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)
     rsc->pending_ops = g_list_append(rsc->pending_ops, cmd);
 #ifdef HAVE_SYS_TIMEB_H
     ftime(&cmd->t_queue);
+    if (cmd->t_first_queue.time == 0) {
+        cmd->t_first_queue = cmd->t_queue;
+    }
 #endif
     mainloop_set_trigger(rsc->work);
 
@@ -382,17 +410,55 @@ send_client_notify(gpointer key, gpointer value, gpointer user_data)
 }
 
 #ifdef HAVE_SYS_TIMEB_H
+/*!
+ * \internal
+ * \brief Return difference between two times in milliseconds
+ *
+ * \param[in] now  More recent time (or NULL to use current time)
+ * \param[in] old  Earlier time
+ *
+ * \return milliseconds difference (or 0 if old is NULL or has time zero)
+ */
 static int
 time_diff_ms(struct timeb *now, struct timeb *old)
 {
-    int sec = difftime(now->time, old->time);
-    int ms = now->millitm - old->millitm;
+    struct timeb local_now = { 0, };
 
-    if (old->time == 0) {
+    if (now == NULL) {
+        ftime(&local_now);
+        now = &local_now;
+    }
+    if ((old == NULL) || (old->time == 0)) {
         return 0;
     }
+    return difftime(now->time, old->time) * 1000 + now->millitm - old->millitm;
+}
 
-    return (sec * 1000) + ms;
+/*!
+ * \internal
+ * \brief Reset a command's operation times to their original values.
+ *
+ * Reset a command's run and queued timestamps to the timestamps of the original
+ * command, so we report the entire time since then and not just the time since
+ * the most recent command (for recurring and systemd operations).
+ *
+ * /param[in] cmd  LRMD command object to reset
+ *
+ * /note It's not obvious what the queued time should be for a systemd
+ * start/stop operation, which might go like this:
+ *   initial command queued 5ms, runs 3s
+ *   monitor command queued 10ms, runs 10s
+ *   monitor command queued 10ms, runs 10s
+ * Is the queued time for that operation 5ms, 10ms or 25ms? The current
+ * implementation will report 5ms. If it's 25ms, then we need to
+ * subtract 20ms from the total exec time so as not to count it twice.
+ * We can implement that later if it matters to anyone ...
+ */
+static void
+cmd_original_times(lrmd_cmd_t * cmd)
+{
+    cmd->t_run = cmd->t_first_run;
+    cmd->t_queue = cmd->t_first_queue;
 }
 #endif
 
@@ -404,10 +470,7 @@ send_cmd_complete_notify(lrmd_cmd_t * cmd)
     xmlNode *notify = NULL;
 
 #ifdef HAVE_SYS_TIMEB_H
-    struct timeb now = { 0, };
-
-    ftime(&now);
-    exec_time = time_diff_ms(&now, &cmd->t_run);
+    exec_time = time_diff_ms(NULL, &cmd->t_run);
     queue_time = time_diff_ms(&cmd->t_run, &cmd->t_queue);
 #endif
 
@@ -468,7 +531,7 @@ send_cmd_complete_notify(lrmd_cmd_t * cmd)
 
         g_hash_table_iter_init(&iter, cmd->params);
         while (g_hash_table_iter_next(&iter, (gpointer *) & key, (gpointer *) & value)) {
-            hash2field((gpointer) key, (gpointer) value, args);
+            hash2smartfield((gpointer) key, (gpointer) value, args);
         }
     }
 
@@ -537,6 +600,9 @@ cmd_finalize(lrmd_cmd_t * cmd, lrmd_rsc_t * rsc)
         cmd->rsc_deleted = 1;
     }
 
+    /* reset original timeout so client notification has correct information */
+    cmd->timeout = cmd->timeout_orig;
+
     send_cmd_complete_notify(cmd);
 
     if (cmd->interval && (cmd->lrmd_op_status == PCMK_LRM_OP_CANCELLED)) {
@@ -556,36 +622,59 @@ cmd_finalize(lrmd_cmd_t * cmd, lrmd_rsc_t * rsc)
     }
 }
 
-static int
-lsb2uniform_rc(const char *action, int rc)
+#if SUPPORT_HEARTBEAT
+static int pattern_matched(const char *pat, const char *str)
 {
+    if (g_pattern_match_simple(pat, str)) {
+        crm_debug("RA output matched stopped pattern [%s]", pat);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static int
+hb2uniform_rc(const char *action, int rc, const char *stdout_data)
+{
+    const char *stop_pattern[] = { "*stopped*", "*not*running*" };
+    const char *running_pattern[] = { "*running*", "*OK*" };
+    char *lower_std_output = NULL;
+    int result;
+
+
     if (rc < 0) {
         return PCMK_OCF_UNKNOWN_ERROR;
     }
 
-    /* status has different return codes that everything else. */
+    /* Treat class heartbeat the same as class lsb. */
     if (!safe_str_eq(action, "status") && !safe_str_eq(action, "monitor")) {
-        if (rc > PCMK_LSB_NOT_RUNNING) {
-            return PCMK_OCF_UNKNOWN_ERROR;
-        }
-        return rc;
+        return services_get_ocf_exitcode(action, rc);
     }
 
-    switch (rc) {
-        case PCMK_LSB_STATUS_OK:
-            return PCMK_OCF_OK;
-        case PCMK_LSB_STATUS_NOT_INSTALLED:
-            return PCMK_OCF_NOT_INSTALLED;
-        case PCMK_LSB_STATUS_VAR_PID:
-        case PCMK_LSB_STATUS_VAR_LOCK:
-        case PCMK_LSB_STATUS_NOT_RUNNING:
-            return PCMK_OCF_NOT_RUNNING;
-        default:
-            return PCMK_OCF_UNKNOWN_ERROR;
+    /* for status though, exit code is ignored,
+     * and the stdout is scanned for specific strings */
+    if (stdout_data == NULL) {
+        crm_warn("No status output from the (hb) resource agent, assuming stopped");
+        return PCMK_OCF_NOT_RUNNING;
     }
 
-    return PCMK_OCF_UNKNOWN_ERROR;
+    lower_std_output = g_ascii_strdown(stdout_data, -1);
+
+    if (pattern_matched(stop_pattern[0], lower_std_output) ||
+        pattern_matched(stop_pattern[1], lower_std_output)) {
+        result = PCMK_OCF_NOT_RUNNING;
+    } else if (pattern_matched(running_pattern[0], lower_std_output) ||
+        pattern_matched(running_pattern[1], stdout_data)) {
+            /* "OK" is matched case sensitive */
+        result = PCMK_OCF_OK;
+    } else {
+        /* It didn't say it was running - must be stopped */
+        crm_debug("RA output did not match any pattern, assuming stopped");
+        result = PCMK_OCF_NOT_RUNNING;
+    }
+    free(lower_std_output);
+    return result;
 }
+#endif
 
 static int
 ocf2uniform_rc(int rc)
@@ -657,8 +746,20 @@ get_uniform_rc(const char *standard, const char *action, int rc)
         return nagios2uniform_rc(action, rc);
 #endif
     } else {
-        return lsb2uniform_rc(action, rc);
+        return services_get_ocf_exitcode(action, rc);
     }
+}
+
+static int
+action_get_uniform_rc(svc_action_t * action)
+{
+    lrmd_cmd_t *cmd = action->cb_data;
+#if SUPPORT_HEARTBEAT
+    if (safe_str_eq(action->standard, "heartbeat")) {
+        return hb2uniform_rc(cmd->action, action->rc, action->stdout_data);
+    }
+#endif
+    return get_uniform_rc(action->standard, cmd->action, action->rc);
 }
 
 void
@@ -765,7 +866,7 @@ action_complete(svc_action_t * action)
 #endif
 
     cmd->last_pid = action->pid;
-    cmd->exec_rc = get_uniform_rc(action->standard, cmd->action, action->rc);
+    cmd->exec_rc = action_get_uniform_rc(action);
     cmd->lrmd_op_status = action->status;
     rsc = cmd->rsc_id ? g_hash_table_lookup(rsc_list, cmd->rsc_id) : NULL;
 
@@ -790,10 +891,29 @@ action_complete(svc_action_t * action)
             cmd->real_action = cmd->action;
             cmd->action = strdup("monitor");
 
+        } else if(cmd->exec_rc == PCMK_OCF_OK && safe_str_eq(cmd->action, "stop")) {
+            goagain = true;
+            cmd->real_action = cmd->action;
+            cmd->action = strdup("monitor");
+
         } else if(cmd->real_action) {
             /* Ok, so this is the follow up monitor action to check if start actually completed */
             if(cmd->lrmd_op_status == PCMK_LRM_OP_DONE && cmd->exec_rc == PCMK_OCF_PENDING) {
                 goagain = true;
+
+            } else {
+#ifdef HAVE_SYS_TIMEB_H
+                int time_sum = time_diff_ms(NULL, &cmd->t_first_run);
+                int timeout_left = cmd->timeout_orig - time_sum;
+
+                crm_debug("%s %s is now complete (elapsed=%dms, remaining=%dms): %s (%d)",
+                          cmd->rsc_id, cmd->real_action, time_sum, timeout_left, services_ocf_exitcode_str(cmd->exec_rc), cmd->exec_rc);
+                cmd_original_times(cmd);
+#endif
+
+                if(cmd->lrmd_op_status == PCMK_LRM_OP_DONE && cmd->exec_rc == PCMK_OCF_NOT_RUNNING && safe_str_eq(cmd->real_action, "stop")) {
+                    cmd->exec_rc = PCMK_OCF_OK;
+                }
             }
         }
     }
@@ -811,29 +931,37 @@ action_complete(svc_action_t * action)
     }
 #endif
 
+    /* Wrapping this section in ifdef implies that systemd resources are not
+     * fully supported on platforms without sys/timeb.h. Since timeb is
+     * obsolete, we should eventually prefer a clock_gettime() implementation
+     * (wrapped in its own ifdef) with timeb as a fallback.
+     */
+#ifdef HAVE_SYS_TIMEB_H
     if(goagain) {
-        int time_sum = 0;
-        int timeout_left = 0;
+        int time_sum = time_diff_ms(NULL, &cmd->t_first_run);
+        int timeout_left = cmd->timeout_orig - time_sum;
         int delay = cmd->timeout_orig / 10;
-
-#  ifdef HAVE_SYS_TIMEB_H
-        struct timeb now = { 0, };
-
-        ftime(&now);
-        time_sum = time_diff_ms(&now, &cmd->t_first_run);
-        timeout_left = cmd->timeout_orig - time_sum;
 
         if(delay >= timeout_left && timeout_left > 20) {
             delay = timeout_left/2;
         }
 
+        delay = QB_MIN(2000, delay);
         if (delay < timeout_left) {
             cmd->start_delay = delay;
             cmd->timeout = timeout_left;
 
-            if(cmd->exec_rc != PCMK_OCF_OK) {
-                crm_info("%s %s failed (rc=%d): re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)",
-                         cmd->rsc_id, cmd->action, cmd->exec_rc, time_sum, timeout_left, delay);
+            if(cmd->exec_rc == PCMK_OCF_OK) {
+                crm_debug("%s %s may still be in progress: re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)",
+                          cmd->rsc_id, cmd->real_action, time_sum, timeout_left, delay);
+
+            } else if(cmd->exec_rc == PCMK_OCF_PENDING) {
+                crm_info("%s %s is still in progress: re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)",
+                         cmd->rsc_id, cmd->action, time_sum, timeout_left, delay);
+
+            } else {
+                crm_notice("%s %s failed '%s' (%d): re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)",
+                           cmd->rsc_id, cmd->action, services_ocf_exitcode_str(cmd->exec_rc), cmd->exec_rc, time_sum, timeout_left, delay);
             }
 
             cmd_reset(cmd);
@@ -841,16 +969,19 @@ action_complete(svc_action_t * action)
                 rsc->active = NULL;
             }
             schedule_lrmd_cmd(rsc, cmd);
+
+            /* Don't finalize cmd, we're not done with it yet */
             return;
 
         } else {
             crm_notice("Giving up on %s %s (rc=%d): timeout (elapsed=%dms, remaining=%dms)",
-                       cmd->rsc_id, cmd->action, cmd->exec_rc, time_sum, timeout_left);
+                       cmd->rsc_id, cmd->real_action?cmd->real_action:cmd->action, cmd->exec_rc, time_sum, timeout_left);
             cmd->lrmd_op_status = PCMK_LRM_OP_TIMEOUT;
             cmd->exec_rc = PCMK_OCF_TIMEOUT;
+            cmd_original_times(cmd);
         }
-#  endif
     }
+#endif
 
     if (action->stderr_data) {
         cmd->output = strdup(action->stderr_data);
@@ -931,6 +1062,9 @@ stonith_connection_failed(void)
     g_hash_table_iter_init(&iter, rsc_list);
     while (g_hash_table_iter_next(&iter, (gpointer *) & key, (gpointer *) & rsc)) {
         if (safe_str_eq(rsc->class, "stonith")) {
+            if (rsc->active) {
+                cmd_list = g_list_append(cmd_list, rsc->active);
+            }
             if (rsc->recurring_ops) {
                 cmd_list = g_list_concat(cmd_list, rsc->recurring_ops);
             }
@@ -1066,12 +1200,28 @@ lrmd_rsc_execute_service_lib(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)
         }
     }
 
-    action = resources_action_create(rsc->rsc_id,
-                                     rsc->class,
-                                     rsc->provider,
-                                     rsc->type,
-                                     normalize_action_name(rsc, cmd->action),
-                                     cmd->interval, cmd->timeout, params_copy);
+    if (cmd->isolation_wrapper) {
+        g_hash_table_remove(params_copy, "CRM_meta_isolation_wrapper");
+        action = resources_action_create(rsc->rsc_id,
+                                         "ocf",
+                                         LRMD_ISOLATION_PROVIDER,
+                                         cmd->isolation_wrapper,
+                                         cmd->action, /*action will be normalized in wrapper*/
+                                         cmd->interval,
+                                         cmd->timeout,
+                                         params_copy,
+                                         cmd->service_flags);
+    } else {
+        action = resources_action_create(rsc->rsc_id,
+                                         rsc->class,
+                                         rsc->provider,
+                                         rsc->type,
+                                         normalize_action_name(rsc, cmd->action),
+                                         cmd->interval,
+                                         cmd->timeout,
+                                         params_copy,
+                                         cmd->service_flags);
+    }
 
     if (!action) {
         crm_err("Failed to create action, action:%s on resource %s", cmd->action, rsc->rsc_id);
@@ -1187,7 +1337,12 @@ free_rsc(gpointer data)
 
         if (is_stonith) {
             cmd->lrmd_op_status = PCMK_LRM_OP_CANCELLED;
-            cmd_finalize(cmd, NULL);
+            /* if a stonith cmd is in-flight, mark just mark it as cancelled,
+             * it is not safe to finalize/free the cmd until the stonith api
+             * says it has either completed or timed out.*/ 
+            if (rsc->active != cmd) {
+                cmd_finalize(cmd, NULL);
+            }
         } else {
             /* This command is already handed off to service library,
              * let service library cancel it and tell us via the callback
@@ -1355,7 +1510,7 @@ process_lrmd_rsc_exec(crm_client_t * client, uint32_t id, xmlNode * request)
         return -ENODEV;
     }
 
-    cmd = create_lrmd_cmd(request, client);
+    cmd = create_lrmd_cmd(request, client, rsc);
     call_id = cmd->call_id;
 
     /* Don't reference cmd after handing it off to be scheduled.

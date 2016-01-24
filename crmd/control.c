@@ -86,6 +86,7 @@ do_ha_control(long long action,
 
     if (action & A_HA_CONNECT) {
         crm_set_status_callback(&peer_update_callback);
+        crm_set_autoreap(FALSE);
 
         if (is_openais_cluster()) {
 #if SUPPORT_COROSYNC
@@ -152,6 +153,24 @@ do_ha_control(long long action,
     }
 }
 
+static bool
+need_spawn_pengine_from_crmd(void)
+{
+	static int result = -1;
+
+	if (result != -1)
+		return result;
+	if (!is_heartbeat_cluster()) {
+		result = 0;
+		return result;
+	}
+
+	/* NULL, or "strange" value: rather spawn from here. */
+	result = TRUE;
+	crm_str_to_boolean(daemon_option("crmd_spawns_pengine"), &result);
+	return result;
+}
+
 /*	 A_SHUTDOWN	*/
 void
 do_shutdown(long long action,
@@ -161,7 +180,7 @@ do_shutdown(long long action,
     /* just in case */
     set_bit(fsa_input_register, R_SHUTDOWN);
 
-    if (is_heartbeat_cluster()) {
+    if (need_spawn_pengine_from_crmd()) {
         if (is_set(fsa_input_register, pe_subsystem->flag_connected)) {
             crm_info("Terminating the %s", pe_subsystem->name);
             if (stop_subsystem(pe_subsystem, TRUE) == FALSE) {
@@ -195,7 +214,7 @@ do_shutdown_req(long long action,
     xmlNode *msg = NULL;
 
     crm_info("Sending shutdown request to %s", crm_str(fsa_our_dc));
-    msg = create_request(CRM_OP_SHUTDOWN_REQ, NULL, NULL, CRM_SYSTEM_DC, CRM_SYSTEM_CRMD, NULL);
+    msg = create_request(CRM_OP_SHUTDOWN_REQ, NULL, NULL, CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);
 
 /* 	set_bit(fsa_input_register, R_STAYDOWN); */
     if (send_cluster_message(NULL, crm_msg_crmd, msg, TRUE) == FALSE) {
@@ -209,7 +228,7 @@ extern char *max_generation_from;
 extern xmlNode *max_generation_xml;
 extern GHashTable *resource_history;
 extern GHashTable *voted;
-extern GHashTable *reload_hash;
+extern GHashTable *metadata_hash;
 extern char *te_client_id;
 
 void log_connected_client(gpointer key, gpointer value, gpointer user_data);
@@ -323,9 +342,9 @@ crmd_exit(int rc)
     free(te_subsystem); te_subsystem = NULL;
     free(cib_subsystem); cib_subsystem = NULL;
 
-    if (reload_hash) {
-        crm_trace("Destroying reload cache with %d members", g_hash_table_size(reload_hash));
-        g_hash_table_destroy(reload_hash); reload_hash = NULL;
+    if (metadata_hash) {
+        crm_trace("Destroying reload cache with %d members", g_hash_table_size(metadata_hash));
+        g_hash_table_destroy(metadata_hash); metadata_hash = NULL;
     }
 
     election_fini(fsa_election);
@@ -634,7 +653,7 @@ do_startup(long long action,
         was_error = TRUE;
     }
 
-    if (was_error == FALSE && is_heartbeat_cluster()) {
+    if (was_error == FALSE && need_spawn_pengine_from_crmd()) {
         if (start_subsystem(pe_subsystem) == FALSE) {
             was_error = TRUE;
         }
@@ -964,7 +983,7 @@ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
         char *timeout = NULL;
 
         st_timeout = 2 * sbd_timeout / 1000;
-        timeout = g_strdup_printf("%lds", st_timeout);
+        timeout = crm_strdup_printf("%lds", st_timeout);
         crm_notice("Setting stonith-watchdog-timeout=%s", timeout);
 
         update_attr_delegate(fsa_cib_conn, cib_none, XML_CIB_TAG_CRMCONFIG, NULL, NULL, NULL, NULL,

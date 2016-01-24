@@ -23,14 +23,9 @@ Licensed under the GNU GPL.
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA.
 
-import types, string, select, sys, time, re, os, struct, signal
-import time, syslog, random, traceback, base64, pickle, binascii, fcntl
+import string, sys, time, re, os, traceback
 
-
-from socket import gethostbyname_ex
 from UserDict import UserDict
-from subprocess import Popen,PIPE
-from threading import Thread
 
 from cts.CTSvars     import *
 from cts.logging     import LogFactory
@@ -74,7 +69,7 @@ function status() {
 function start() {
     # Is it already running?
     if
-	status
+        status
     then
         return
     fi
@@ -99,20 +94,20 @@ case $action in
         nohup $0 $f start >/dev/null 2>&1 </dev/null &
         ;;
     stop)
-	killpid
-	;;
+        killpid
+        ;;
     delete)
-	killpid
-	rm -f $f
-	;;
+        killpid
+        rm -f $f
+        ;;
     mark)
-	uptime | sed s/up.*:/,/ | tr '\\n' ',' >> $f
-	echo " $*" >> $f
+        uptime | sed s/up.*:/,/ | tr '\\n' ',' >> $f
+        echo " $*" >> $f
         start
-	;;
+        ;;
     *)
-	echo "Unknown action: $action."
-	;;
+        echo "Unknown action: $action."
+        ;;
 esac
 """
 
@@ -162,21 +157,13 @@ class CtsLab:
         self.Env.dump()
 
     def has_key(self, key):
-        return self.Env.has_key(key)
+        return key in self.Env.keys()
 
     def __getitem__(self, key):
         return self.Env[key]
 
     def __setitem__(self, key, value):
         self.Env[key] = value
-
-    def HasMinimalKeys(self):
-        'Return TRUE if our object has the minimal set of keys/values in it'
-        result = 1
-        for key in self.MinimalKeys:
-            if not self.has_key(key):
-                result = None
-        return result
 
     def run(self, Scenario, Iterations):
         if not Scenario:
@@ -212,10 +199,6 @@ class CtsLab:
             return 1
 
         return 0
-
-    def IsValidNode(self, node):
-        'Return TRUE if the given node is valid'
-        return self.Nodes.has_key(node)
 
     def __CheckNode(self, node):
         "Raise a ValueError if the given node isn't valid"
@@ -292,7 +275,7 @@ class ClusterManager(UserDict):
         None
 
     def _finalConditions(self):
-        for key in self.keys():
+        for key in list(self.keys()):
             if self[key] == None:
                 raise ValueError("Improper derivation: self[" + key +   "] must be overridden by subclass.")
 
@@ -316,14 +299,14 @@ class ClusterManager(UserDict):
         if key == "Name":
             return self.name
 
-        print "FIXME: Getting %s from %s" % (key, repr(self))
-        if self.data.has_key(key):
+        print("FIXME: Getting %s from %s" % (key, repr(self)))
+        if key in self.data:
             return self.data[key]
 
         return self.templates.get_patterns(self.Env["Name"], key)
 
     def __setitem__(self, key, value):
-        print "FIXME: Setting %s=%s on %s" % (key, value, repr(self))
+        print("FIXME: Setting %s=%s on %s" % (key, value, repr(self)))
         self.data[key] = value
 
     def key_for_node(self, node):
@@ -350,7 +333,7 @@ class ClusterManager(UserDict):
     def prepare(self):
         '''Finish the Initialization process. Prepare to test...'''
 
-        print repr(self)+"prepare"
+        print(repr(self)+"prepare")
         for node in self.Env["nodes"]:
             if self.StataCM(node):
                 self.ShouldBeStatus[node] = "up"
@@ -404,11 +387,11 @@ class ClusterManager(UserDict):
             return None
 
         if not self.templates["Pat:Fencing_start"]:
-            print "No start pattern"
+            print("No start pattern")
             return None
 
         if not self.templates["Pat:Fencing_ok"]:
-            print "No ok pattern"
+            print("No ok pattern")
             return None
 
         stonith = None
@@ -517,7 +500,7 @@ class ClusterManager(UserDict):
         else: self.debug("Starting %s on node %s" % (self.templates["Name"], node))
         ret = 1
 
-        if not self.ShouldBeStatus.has_key(node):
+        if not node in self.ShouldBeStatus:
             self.ShouldBeStatus[node] = "down"
 
         if self.ShouldBeStatus[node] != "down":
@@ -888,13 +871,13 @@ class ClusterManager(UserDict):
 
         for host in self.Env["nodes"]:
             log_stats_file = "%s/cts-stats.csv" % CTSvars.CRM_DAEMON_DIR
-            if has_log_stats.has_key(host):
+            if host in has_log_stats:
                 self.rsh(host, '''bash %s %s stop''' % (log_stats_bin, log_stats_file))
                 (rc, lines) = self.rsh(host, '''cat %s''' % log_stats_file, stdout=2)
                 self.rsh(host, '''bash %s %s delete''' % (log_stats_bin, log_stats_file))
 
                 fname = "cts-stats-%d-nodes-%s.csv" % (len(self.Env["nodes"]), host)
-                print "Extracted stats: %s" % fname
+                print("Extracted stats: %s" % fname)
                 fd = open(fname, "a")
                 fd.writelines(lines)
                 fd.close()
@@ -908,7 +891,7 @@ class ClusterManager(UserDict):
 
         for host in self.Env["nodes"]:
             log_stats_file = "%s/cts-stats.csv" % CTSvars.CRM_DAEMON_DIR
-            if not has_log_stats.has_key(host):
+            if not host in has_log_stats:
 
                 global log_stats
                 global log_stats_bin
@@ -1003,7 +986,7 @@ class Process(Component):
         self.CM = cm
         self.badnews_ignore = badnews_ignore
         self.badnews_ignore.extend(common_ignore)
-	self.triggersreboot = triggersreboot
+        self.triggersreboot = triggersreboot
 
         if process:
             self.proc = str(process)

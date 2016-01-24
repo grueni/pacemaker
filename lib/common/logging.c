@@ -204,16 +204,13 @@ set_format_string(int method, const char *daemon)
         }
     }
 
-    if (crm_tracing_enabled() && method >= QB_LOG_STDERR) {
-        offset += snprintf(fmt + offset, FMT_MAX - offset, "(%%-12f:%%5l %%g) %%-7p: %%n: ");
-    } else {
-        offset += snprintf(fmt + offset, FMT_MAX - offset, "%%g %%-7p: %%n: ");
-    }
-
     if (method == QB_LOG_SYSLOG) {
-        offset += snprintf(fmt + offset, FMT_MAX - offset, "%%b");
+        offset += snprintf(fmt + offset, FMT_MAX - offset, "%%g %%-7p: %%b");
+        crm_extended_logging(method, QB_FALSE);
+    } else if (crm_tracing_enabled()) {
+        offset += snprintf(fmt + offset, FMT_MAX - offset, "(%%-12f:%%5l %%g) %%-7p: %%n:\t%%b");
     } else {
-        offset += snprintf(fmt + offset, FMT_MAX - offset, "\t%%b");
+        offset += snprintf(fmt + offset, FMT_MAX - offset, "%%g %%-7p: %%n:\t%%b");
     }
 
     CRM_LOG_ASSERT(offset > 0);
@@ -497,7 +494,7 @@ crm_log_filter_source(int source, const char *trace_files, const char *trace_fns
             qb_bit_set(cs->targets, source);
 
         } else if (trace_blackbox) {
-            char *key = g_strdup_printf("%s:%d", cs->function, cs->lineno);
+            char *key = crm_strdup_printf("%s:%d", cs->function, cs->lineno);
 
             if (strstr(trace_blackbox, key) != NULL) {
                 qb_bit_set(cs->targets, source);
@@ -956,7 +953,7 @@ crm_log_args(int argc, char **argv)
         }
 
         len = 2 + strlen(argv[lpc]);    /* +1 space, +1 EOS */
-        arg_string = realloc(arg_string, len + existing_len);
+        arg_string = realloc_safe(arg_string, len + existing_len);
         existing_len += sprintf(arg_string + existing_len, "%s ", argv[lpc]);
     }
 
@@ -1114,6 +1111,7 @@ pcmk_errorname(int rc)
         case pcmk_err_cib_modified: return "pcmk_err_cib_modified";
         case pcmk_err_cib_backup: return "pcmk_err_cib_backup";
         case pcmk_err_cib_save: return "pcmk_err_cib_save";
+        case pcmk_err_cib_corrupt: return "pcmk_err_cib_corrupt";
     }
     return "Unknown";
 }
@@ -1151,6 +1149,8 @@ pcmk_strerror(int rc)
             return "Could not archive the previous configuration";
         case pcmk_err_cib_save:
             return "Could not save the new configuration to disk";
+        case pcmk_err_cib_corrupt:
+            return "Could not parse on-disk configuration";
 
         case pcmk_err_schema_unchanged:
             return "Schema is already the latest available";
@@ -1236,4 +1236,20 @@ crm_log_output_fn(const char *file, const char *function, int line, int level, c
         }
 
     } while (next != NULL && next[0] != 0);
+}
+
+char *
+crm_strdup_printf (char const *format, ...)
+{
+    va_list ap;
+    int len = 0;
+    char *string = NULL;
+
+    va_start(ap, format);
+
+    len = vasprintf (&string, format, ap);
+    CRM_ASSERT(len > 0);
+
+    va_end(ap);
+    return string;
 }

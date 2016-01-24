@@ -170,7 +170,7 @@ standalone_cfg_add_node(const char *node, const char *device, const char *ports)
 
     if (tmp) {
         offset = strlen(tmp);
-        tmp = realloc(tmp, len + offset + 1);
+        tmp = realloc_safe(tmp, len + offset + 1);
     } else {
         tmp = malloc(len);
     }
@@ -313,7 +313,7 @@ cfg_register_device(struct device *dev)
     dump = dump_xml_formatted(data);
     crm_info("Standalone device being added:\n%s", dump);
 
-    res = stonith_device_register(data, NULL);
+    res = stonith_device_register(data, NULL, FALSE);
 
     free(dump);
     free_xml(data);

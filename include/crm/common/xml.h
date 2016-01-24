@@ -230,6 +230,18 @@ __xml_next(xmlNode * child)
     return child;
 }
 
+static inline xmlNode *
+__xml_next_element(xmlNode * child)
+{
+    if (child) {
+        child = child->next;
+        while (child && child->type != XML_ELEMENT_NODE) {
+            child = child->next;
+        }
+    }
+    return child;
+}
+
 void free_xml(xmlNode * child);
 
 xmlNode *first_named_child(xmlNode * parent, const char *name);
@@ -241,6 +253,7 @@ xmlNode *expand_idref(xmlNode * input, xmlNode * top);
 
 void freeXpathObject(xmlXPathObjectPtr xpathObj);
 xmlNode *getXpathResult(xmlXPathObjectPtr xpathObj, int index);
+void dedupXpathResults(xmlXPathObjectPtr xpathObj);
 
 static inline int numXpathResults(xmlXPathObjectPtr xpathObj)
 {
@@ -267,8 +280,10 @@ void xml_log_patchset(uint8_t level, const char *function, xmlNode *xml);
 bool xml_patch_versions(xmlNode *patchset, int add[3], int del[3]);
 
 xmlNode *xml_create_patchset(
-    int format, xmlNode *source, xmlNode *target, bool *config, bool manage_version, bool with_digest);
+    int format, xmlNode *source, xmlNode *target, bool *config, bool manage_version);
 int xml_apply_patchset(xmlNode *xml, xmlNode *patchset, bool check_version);
+
+void patchset_process_digest(xmlNode *patch, xmlNode *source, xmlNode *target, bool with_digest);
 
 void save_xml_to_file(xmlNode * xml, const char *desc, const char *filename);
 char *xml_get_path(xmlNode *xml);

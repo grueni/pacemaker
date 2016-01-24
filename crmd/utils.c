@@ -978,7 +978,10 @@ update_dc(xmlNode * msg)
         /* do nothing */
 
     } else if (fsa_our_dc != NULL) {
+        crm_node_t *dc_node = crm_get_peer(0, fsa_our_dc);
+
         crm_info("Set DC to %s (%s)", crm_str(fsa_our_dc), crm_str(fsa_our_dc_version));
+        crm_update_peer_expected(__FUNCTION__, dc_node, CRMD_JOINSTATE_MEMBER);
 
     } else if (last_dc != NULL) {
         crm_info("Unset DC. Was %s", crm_str(last_dc));
@@ -996,7 +999,6 @@ erase_xpath_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void 
 
     do_crm_log_unlikely(rc == 0 ? LOG_DEBUG : LOG_NOTICE,
                         "Deletion of \"%s\": %s (rc=%d)", xpath, pcmk_strerror(rc), rc);
-    free(xpath);
 }
 
 void
@@ -1029,8 +1031,10 @@ update_attrd_helper(const char *host, const char *name, const char *value, const
     do {
         if (crm_ipc_connected(attrd_ipc) == FALSE) {
             crm_ipc_close(attrd_ipc);
-            crm_info("Connecting to attrd... %d retries remaining", max);
-            crm_ipc_connect(attrd_ipc);
+            crm_info("Connecting to attribute manager ... %d retries remaining", max);
+            if (crm_ipc_connect(attrd_ipc) == FALSE) {
+                crm_perror(LOG_INFO, "Connection to attribute manager failed");
+            }
         }
 
         rc = attrd_update_delegate(attrd_ipc, command, host, name, value, XML_CIB_TAG_STATUS, NULL,
@@ -1039,7 +1043,7 @@ update_attrd_helper(const char *host, const char *name, const char *value, const
             break;
 
         } else if (rc != -EAGAIN && rc != -EALREADY) {
-            crm_info("Disconnecting from attrd: %s (%d)", pcmk_strerror(rc), rc);
+            crm_info("Disconnecting from attribute manager: %s (%d)", pcmk_strerror(rc), rc);
             crm_ipc_close(attrd_ipc);
         }
 

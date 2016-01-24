@@ -64,11 +64,14 @@ pcmk_dbus_find_error(const char *method, DBusPendingCall* pending, DBusMessage *
     } else {
         DBusMessageIter args;
         int dtype = dbus_message_get_type(reply);
+        char *sig;
 
         switch(dtype) {
             case DBUS_MESSAGE_TYPE_METHOD_RETURN:
                 dbus_message_iter_init(reply, &args);
-                crm_trace("Call to %s returned '%s'", method, dbus_message_iter_get_signature(&args));
+                sig = dbus_message_iter_get_signature(&args);
+                crm_trace("Call to %s returned '%s'", method, sig);
+                dbus_free(sig);
                 break;
             case DBUS_MESSAGE_TYPE_INVALID:
                 error.message = "Invalid reply";
@@ -105,7 +108,7 @@ pcmk_dbus_find_error(const char *method, DBusPendingCall* pending, DBusMessage *
     return FALSE;
 }
 
-DBusMessage *pcmk_dbus_send_recv(DBusMessage *msg, DBusConnection *connection, DBusError *error)
+DBusMessage *pcmk_dbus_send_recv(DBusMessage *msg, DBusConnection *connection, DBusError *error, int timeout)
 {
     const char *method = NULL;
     DBusMessage *reply = NULL;
@@ -114,8 +117,12 @@ DBusMessage *pcmk_dbus_send_recv(DBusMessage *msg, DBusConnection *connection, D
     CRM_ASSERT(dbus_message_get_type (msg) == DBUS_MESSAGE_TYPE_METHOD_CALL);
     method = dbus_message_get_member (msg);
 
+    if (timeout <= 0) {
+        timeout = DBUS_TIMEOUT_USE_DEFAULT;
+    }
+
     // send message and get a handle for a reply
-    if (!dbus_connection_send_with_reply (connection, msg, &pending, -1/* aka. DBUS_TIMEOUT_USE_DEFAULT */)) {
+    if (!dbus_connection_send_with_reply (connection, msg, &pending, timeout/* -1 is default timeout, aka. DBUS_TIMEOUT_USE_DEFAULT */)) {
         if(error) {
             dbus_error_init(error);
             error->message = "Call to dbus_connection_send_with_reply() failed";
@@ -146,7 +153,7 @@ DBusMessage *pcmk_dbus_send_recv(DBusMessage *msg, DBusConnection *connection, D
 }
 
 DBusPendingCall* pcmk_dbus_send(DBusMessage *msg, DBusConnection *connection,
-                    void(*done)(DBusPendingCall *pending, void *user_data), void *user_data)
+                    void(*done)(DBusPendingCall *pending, void *user_data), void *user_data, int timeout)
 {
     DBusError error;
     const char *method = NULL;
@@ -158,8 +165,13 @@ DBusPendingCall* pcmk_dbus_send(DBusMessage *msg, DBusConnection *connection,
     CRM_ASSERT(dbus_message_get_type (msg) == DBUS_MESSAGE_TYPE_METHOD_CALL);
     method = dbus_message_get_member (msg);
 
+
+    if (timeout <= 0) {
+        timeout = DBUS_TIMEOUT_USE_DEFAULT;
+    }
+
     // send message and get a handle for a reply
-    if (!dbus_connection_send_with_reply (connection, msg, &pending, -1/* aka. DBUS_TIMEOUT_USE_DEFAULT */)) { // -1 is default timeout
+    if (!dbus_connection_send_with_reply (connection, msg, &pending, timeout/* -1 is default timeout, aka. DBUS_TIMEOUT_USE_DEFAULT */)) {
         crm_err("Send with reply failed for %s", method);
         return NULL;
 
@@ -208,11 +220,14 @@ bool pcmk_dbus_type_check(DBusMessage *msg, DBusMessageIter *field, int expected
 
     if(dtype != expected) {
         DBusMessageIter args;
+        char *sig;
 
         dbus_message_iter_init(msg, &args);
+        sig = dbus_message_iter_get_signature(&args);
         do_crm_log_alias(LOG_ERR, __FILE__, function, line,
-                         "Unexepcted DBus type, expected %c in '%s' instead of %c",
-                         expected, dbus_message_iter_get_signature(&args), dtype);
+                         "Unexpected DBus type, expected %c in '%s' instead of %c",
+                         expected, sig, dtype);
+        dbus_free(sig);
         return FALSE;
     }
 
@@ -314,9 +329,6 @@ pcmk_dbus_lookup_cb(DBusPendingCall *pending, void *user_data)
 
     pcmk_dbus_lookup_result(reply, user_data);
 
-    if(pending) {
-        dbus_pending_call_unref(pending);
-    }
     if(reply) {
         dbus_message_unref(reply);
     }
@@ -325,7 +337,8 @@ pcmk_dbus_lookup_cb(DBusPendingCall *pending, void *user_data)
 char *
 pcmk_dbus_get_property(
     DBusConnection *connection, const char *target, const char *obj, const gchar * iface, const char *name,
-    void (*callback)(const char *name, const char *value, void *userdata), void *userdata)
+    void (*callback)(const char *name, const char *value, void *userdata), void *userdata, DBusPendingCall **pending,
+    int timeout)
 {
     DBusMessage *msg;
     const char *method = "GetAll";
@@ -365,10 +378,14 @@ pcmk_dbus_get_property(
     }
 
     if(query_data->callback) {
-        pcmk_dbus_send(msg, connection, pcmk_dbus_lookup_cb, query_data);
+        DBusPendingCall* _pending;
+        _pending = pcmk_dbus_send(msg, connection, pcmk_dbus_lookup_cb, query_data, timeout);
+        if (pending != NULL) {
+            *pending = _pending;
+        }
 
     } else {
-        DBusMessage *reply = pcmk_dbus_send_recv(msg, connection, NULL);
+        DBusMessage *reply = pcmk_dbus_send_recv(msg, connection, NULL, timeout);
 
         output = pcmk_dbus_lookup_result(reply, query_data);
 
@@ -533,6 +550,7 @@ pcmk_dbus_timeout_toggle(DBusTimeout *timeout, void *data){
 /* Inspired by http://www.kolej.mff.cuni.cz/~vesej3am/devel/dbus-select.c */
 
 void pcmk_dbus_connection_setup_with_select(DBusConnection *c){
+        dbus_connection_set_exit_on_disconnect (c, FALSE);
 	dbus_connection_set_timeout_functions(
             c, pcmk_dbus_timeout_add, pcmk_dbus_timeout_remove, pcmk_dbus_timeout_toggle, NULL, NULL);
 	dbus_connection_set_watch_functions(c, pcmk_dbus_watch_add, pcmk_dbus_watch_remove, pcmk_dbus_watch_toggle, NULL, NULL);

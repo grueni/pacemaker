@@ -48,6 +48,7 @@ typedef struct notify_data_s {
     GListPtr promote;           /* notify_entry_t*  */
     GListPtr master;            /* notify_entry_t*  */
     GListPtr slave;             /* notify_entry_t*  */
+    GHashTable *allowed_nodes;
 
 } notify_data_t;
 
@@ -254,8 +255,10 @@ enum rsc_digest_cmp_val {
 typedef struct op_digest_cache_s {
     enum rsc_digest_cmp_val rc;
     xmlNode *params_all;
+    xmlNode *params_secure;
     xmlNode *params_restart;
     char *digest_all_calc;
+    char *digest_secure_calc;
     char *digest_restart_calc;
 } op_digest_cache_t;
 
@@ -264,7 +267,7 @@ op_digest_cache_t *rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, nod
 
 action_t *pe_fence_op(node_t * node, const char *op, bool optional, pe_working_set_t * data_set);
 void trigger_unfencing(
-    resource_t * rsc, node_t *node, const char *reason, action_t *dependancy, pe_working_set_t * data_set);
+    resource_t * rsc, node_t *node, const char *reason, action_t *dependency, pe_working_set_t * data_set);
 
 void set_bit_recursive(resource_t * rsc, unsigned long long flag);
 void clear_bit_recursive(resource_t * rsc, unsigned long long flag);

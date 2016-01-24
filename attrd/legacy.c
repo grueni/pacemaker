@@ -270,6 +270,7 @@ find_hash_entry(xmlNode * msg)
     }
 #if ENABLE_ACL
     free(hash_entry->user);
+    hash_entry->user = NULL;
 
     value = crm_element_value(msg, F_ATTRD_USER);
     if (value != NULL) {
@@ -634,6 +635,20 @@ struct attrd_callback_s {
     char *value;
 };
 
+/*
+ * \internal
+ * \brief Free an attrd callback structure
+ */
+static void
+free_attrd_callback(void *user_data)
+{
+    struct attrd_callback_s *data = user_data;
+
+    free(data->attr);
+    free(data->value);
+    free(data);
+}
+
 static void
 attrd_cib_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)
 {
@@ -645,7 +660,7 @@ attrd_cib_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *u
 
     } else if (call_id < 0) {
         crm_warn("Update %s=%s failed: %s", data->attr, data->value, pcmk_strerror(call_id));
-        goto cleanup;
+        return;
     }
 
     switch (rc) {
@@ -673,10 +688,6 @@ attrd_cib_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *u
             crm_err("Update %d for %s=%s failed: %s",
                     call_id, data->attr, data->value, pcmk_strerror(rc));
     }
-  cleanup:
-    free(data->value);
-    free(data->attr);
-    free(data);
 }
 
 void
@@ -748,8 +759,10 @@ attrd_perform_update(attr_hash_entry_t * hash_entry)
     if (hash_entry->value != NULL) {
         data->value = strdup(hash_entry->value);
     }
-    cib_conn->cmds->register_callback(cib_conn, rc, 120, FALSE, data, "attrd_cib_callback",
-                                      attrd_cib_callback);
+    cib_conn->cmds->register_callback_full(cib_conn, rc, 120, FALSE, data,
+                                           "attrd_cib_callback",
+                                           attrd_cib_callback,
+                                           free_attrd_callback);
     return;
 }
 
@@ -768,7 +781,7 @@ attrd_local_callback(xmlNode * msg)
         crm_notice("Sending full refresh (origin=%s)", from);
         g_hash_table_foreach(attr_hash, update_for_hash_entry, NULL);
         return;
-    } else if(safe_str_eq(op, "peer-remove")) {
+    } else if (safe_str_eq(op, ATTRD_OP_PEER_REMOVE)) {
         /* The legacy code didn't understand this command - swallow silently */
         return;
     }

@@ -20,7 +20,7 @@
 /**
  * \file
  * \brief Local Resource Manager 
- * \ingroup lrm
+ * \ingroup lrmd
  */
 #include <stdbool.h>
 #include <crm/services.h>
@@ -114,22 +114,20 @@ lrmd_t *lrmd_api_new(void);
 /*!
  * \brief Create a new remote lrmd connection using tls backend
  *
- * \note nodename and server may be the same value.
+ * \param nodename  name of remote node identified with this connection
+ * \param server    name of server to connect to
+ * \param port      port number to connect to
  *
- * \param nodename, the remote node name identified with this connection.
- * \param server, the server to connect to.
- * \param port, the port to connect to.
+ * \note nodename and server may be the same value.
  */
 lrmd_t *lrmd_remote_api_new(const char *nodename, const char *server, int port);
 
 /*!
- * \brief Use after lrmd_poll returns 1.
+ * \brief Use after lrmd_poll returns 1 to read and dispatch a message
  *
- * \param fd to poll on
- * \param timeout in ms
+ * \param[in,out] lrmd  lrmd connection object
  *
- * \retval true - connection is still up
- * \retval false - disconnected
+ * \return TRUE if connection is still up, FALSE if disconnected
  */
 bool lrmd_dispatch(lrmd_t * lrmd);
 
@@ -202,8 +200,6 @@ typedef struct lrmd_event_data_s {
     enum ocf_exitcode rc;
     /*! The lrmd status returned for exec_complete events */
     int op_status;
-    /*! exit failure reason string from resource agent operation */
-    const char *exit_reason;
     /*! stdout from resource agent operation */
     const char *output;
     /*! Timestamp of when op ran */
@@ -227,6 +223,9 @@ typedef struct lrmd_event_data_s {
      * a single process. This name allows the actions to be matched
      * to the proper client. */
     const char *remote_nodename;
+
+    /*! exit failure reason string from resource agent operation */
+    const char *exit_reason;
 
 } lrmd_event_data_t;
 

@@ -60,7 +60,6 @@ enum stonith_call_options {
     st_opt_report_only_success = 0x00004000,
 };
 
-#define stonith_default_options = stonith_none
 /*! Order matters here, do not change values */
 enum op_state
 {
@@ -352,7 +351,7 @@ int stonith_api_kick(uint32_t nodeid, const char *uname, int timeout, bool off);
 time_t stonith_api_time(uint32_t nodeid, const char *uname, bool in_progress);
 
 /*
- * Helpers for using the above functions without install-time dependancies
+ * Helpers for using the above functions without install-time dependencies
  *
  * Usage:
  *  #include <crm/stonith-ng.h>

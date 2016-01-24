@@ -785,6 +785,13 @@ crm_ipc_new(const char *name, size_t max_size)
     return client;
 }
 
+/*!
+ * \brief Establish an IPC connection to a Pacemaker component
+ *
+ * \param[in] client  Connection instance obtained from crm_ipc_new()
+ *
+ * \return TRUE on success, FALSE otherwise (in which case errno will be set)
+ */
 bool
 crm_ipc_connect(crm_ipc_t * client)
 {
@@ -792,13 +799,13 @@ crm_ipc_connect(crm_ipc_t * client)
     client->ipc = qb_ipcc_connect(client->name, client->buf_size);
 
     if (client->ipc == NULL) {
-        crm_perror(LOG_INFO, "Could not establish %s connection", client->name);
+        crm_debug("Could not establish %s connection: %s (%d)", client->name, pcmk_strerror(errno), errno);
         return FALSE;
     }
 
     client->pfd.fd = crm_ipc_get_fd(client);
     if (client->pfd.fd < 0) {
-        crm_perror(LOG_INFO, "Could not obtain file descriptor for %s connection", client->name);
+        crm_debug("Could not obtain file descriptor for %s connection: %s (%d)", client->name, pcmk_strerror(errno), errno);
         return FALSE;
     }
 
@@ -859,13 +866,13 @@ crm_ipc_get_fd(crm_ipc_t * client)
 {
     int fd = 0;
 
-    CRM_ASSERT(client != NULL);
-    if (client->ipc && qb_ipcc_fd_get(client->ipc, &fd) == 0) {
+    if (client && client->ipc && (qb_ipcc_fd_get(client->ipc, &fd) == 0)) {
         return fd;
     }
-
-    crm_perror(LOG_ERR, "Could not obtain file IPC descriptor for %s", client->name);
-    return -EINVAL;
+    errno = EINVAL;
+    crm_perror(LOG_ERR, "Could not obtain file IPC descriptor for %s",
+               (client? client->name : "unspecified client"));
+    return -errno;
 }
 
 bool
@@ -1144,7 +1151,7 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
 
     id++;
     CRM_LOG_ASSERT(id != 0); /* Crude wrap-around detection */
-    rc = crm_ipc_prepare(id, message, &iov, ipc_buffer_max);
+    rc = crm_ipc_prepare(id, message, &iov, client->max_buf_size);
     if(rc < 0) {
         return rc;
     }
@@ -1158,10 +1165,10 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
     }
 
     if(header->size_compressed) {
-        if(factor < 10 && (ipc_buffer_max / 10) < (rc / factor)) {
+        if(factor < 10 && (client->max_buf_size / 10) < (rc / factor)) {
             crm_notice("Compressed message exceeds %d0%% of the configured ipc limit (%d bytes), "
                        "consider setting PCMK_ipc_buffer to %d or higher",
-                       factor, ipc_buffer_max, 2*ipc_buffer_max);
+                       factor, client->max_buf_size, 2*client->max_buf_size);
             factor++;
         }
     }

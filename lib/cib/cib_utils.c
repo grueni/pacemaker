@@ -302,6 +302,7 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
     const char *new_version = NULL;
     static struct qb_log_callsite *diff_cs = NULL;
     const char *user = crm_element_value(req, F_CIB_USER);
+    bool with_digest = FALSE;
 
     crm_trace("Begin %s%s op", is_query ? "read-only " : "", op);
 
@@ -449,26 +450,30 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
          * The v1 format would barf on this, but we know the v2 patch
          * format only needs it for the top-level version fields
          */
-        local_diff = xml_create_patchset(2, current_cib, scratch, (bool*)config_changed, manage_counters, FALSE);
+        local_diff = xml_create_patchset(2, current_cib, scratch, (bool*)config_changed, manage_counters);
 
     } else {
         static time_t expires = 0;
         time_t tm_now = time(NULL);
-        bool with_digest = FALSE;
 
         if (expires < tm_now) {
             expires = tm_now + 60;  /* Validate clients are correctly applying v2-style diffs at most once a minute */
             with_digest = TRUE;
         }
 
-        local_diff = xml_create_patchset(0, current_cib, scratch, (bool*)config_changed, manage_counters, with_digest);
+        local_diff = xml_create_patchset(0, current_cib, scratch, (bool*)config_changed, manage_counters);
     }
+
+    xml_log_changes(LOG_TRACE, __FUNCTION__, scratch);
+    xml_accept_changes(scratch);
 
     if (diff_cs == NULL) {
         diff_cs = qb_log_callsite_get(__PRETTY_FUNCTION__, __FILE__, "diff-validation", LOG_DEBUG, __LINE__, crm_trace_nonlog);
     }
 
     if(local_diff) {
+        patchset_process_digest(local_diff, current_cib, scratch, with_digest);
+
         xml_log_patchset(LOG_INFO, __FUNCTION__, local_diff);
         crm_log_xml_trace(local_diff, "raw patch");
     }
@@ -493,9 +498,6 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
         }
         free_xml(c);
     }
-
-    xml_log_changes(LOG_TRACE, __FUNCTION__, scratch);
-    xml_accept_changes(scratch);
 
     if (safe_str_eq(section, XML_CIB_TAG_STATUS)) {
         /* Throttle the amount of costly validation we perform due to status updates
@@ -531,7 +533,7 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
             int current_schema = get_schema_version(schema);
 
             if (minimum_schema == 0) {
-                minimum_schema = get_schema_version("pacemaker-1.1");
+                minimum_schema = get_schema_version("pacemaker-1.2");
             }
 
             /* Does the CIB support the "update-*" attributes... */
@@ -622,12 +624,6 @@ cib_native_callback(cib_t * cib, xmlNode * msg, int call_id, int rc)
 {
     xmlNode *output = NULL;
     cib_callback_client_t *blob = NULL;
-    cib_callback_client_t local_blob;
-
-    local_blob.id = NULL;
-    local_blob.callback = NULL;
-    local_blob.user_data = NULL;
-    local_blob.only_success = FALSE;
 
     if (msg != NULL) {
         crm_element_value_int(msg, F_CIB_RC, &rc);
@@ -636,16 +632,8 @@ cib_native_callback(cib_t * cib, xmlNode * msg, int call_id, int rc)
     }
 
     blob = g_hash_table_lookup(cib_op_callback_table, GINT_TO_POINTER(call_id));
-
-    if (blob != NULL) {
-        local_blob = *blob;
-        blob = NULL;
-
-        remove_cib_op_callback(call_id, FALSE);
-
-    } else {
+    if (blob == NULL) {
         crm_trace("No callback found for call %d", call_id);
-        local_blob.callback = NULL;
     }
 
     if (cib == NULL) {
@@ -657,13 +645,18 @@ cib_native_callback(cib_t * cib, xmlNode * msg, int call_id, int rc)
         rc = pcmk_ok;
     }
 
-    if (local_blob.callback != NULL && (rc == pcmk_ok || local_blob.only_success == FALSE)) {
-        crm_trace("Invoking callback %s for call %d", crm_str(local_blob.id), call_id);
-        local_blob.callback(msg, call_id, rc, output, local_blob.user_data);
+    if (blob && blob->callback && (rc == pcmk_ok || blob->only_success == FALSE)) {
+        crm_trace("Invoking callback %s for call %d", crm_str(blob->id), call_id);
+        blob->callback(msg, call_id, rc, output, blob->user_data);
 
     } else if (cib && cib->op_callback == NULL && rc != pcmk_ok) {
         crm_warn("CIB command failed: %s", pcmk_strerror(rc));
         crm_log_xml_debug(msg, "Failed CIB Update");
+    }
+
+    /* This may free user_data, so do it after the callback */
+    if (blob) {
+        remove_cib_op_callback(call_id, FALSE);
     }
 
     if (cib && cib->op_callback != NULL) {

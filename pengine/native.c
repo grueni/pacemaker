@@ -79,48 +79,7 @@ gboolean (*rsc_action_matrix[RSC_ROLE_MAX][RSC_ROLE_MAX])(resource_t*,node_t*,gb
 };
 /* *INDENT-ON* */
 
-struct capacity_data {
-    node_t *node;
-    resource_t *rsc;
-    gboolean is_enough;
-};
-
 static action_t * get_first_named_action(resource_t * rsc, const char *action, gboolean only_valid, node_t * current);
-
-static void
-check_capacity(gpointer key, gpointer value, gpointer user_data)
-{
-    int required = 0;
-    int remaining = 0;
-    struct capacity_data *data = user_data;
-
-    required = crm_parse_int(value, "0");
-    remaining = crm_parse_int(g_hash_table_lookup(data->node->details->utilization, key), "0");
-
-    if (required > remaining) {
-        CRM_ASSERT(data->rsc);
-        CRM_ASSERT(data->node);
-
-        pe_rsc_debug(data->rsc,
-                     "Node %s has no enough %s for resource %s: required=%d remaining=%d",
-                     data->node->details->uname, (char *)key, data->rsc->id, required, remaining);
-        data->is_enough = FALSE;
-    }
-}
-
-static gboolean
-have_enough_capacity(node_t * node, resource_t * rsc)
-{
-    struct capacity_data data;
-
-    data.node = node;
-    data.rsc = rsc;
-    data.is_enough = TRUE;
-
-    g_hash_table_foreach(rsc->utilization, check_capacity, &data);
-
-    return data.is_enough;
-}
 
 static gboolean
 native_choose_node(resource_t * rsc, node_t * prefer, pe_working_set_t * data_set)
@@ -131,8 +90,6 @@ native_choose_node(resource_t * rsc, node_t * prefer, pe_working_set_t * data_se
        with the fewest resources
        3. remove color.chosen_node from all other colors
      */
-    int alloc_details = scores_log_level + 1;
-
     GListPtr nodes = NULL;
     node_t *chosen = NULL;
 
@@ -141,21 +98,7 @@ native_choose_node(resource_t * rsc, node_t * prefer, pe_working_set_t * data_se
     int length = 0;
     gboolean result = FALSE;
 
-    if (safe_str_neq(data_set->placement_strategy, "default")) {
-        GListPtr gIter = NULL;
-
-        for (gIter = data_set->nodes; gIter != NULL; gIter = gIter->next) {
-            node_t *node = (node_t *) gIter->data;
-
-            if (have_enough_capacity(node, rsc) == FALSE) {
-                pe_rsc_debug(rsc,
-                             "Resource %s cannot be allocated to node %s: none of enough capacity",
-                             rsc->id, node->details->uname);
-                resource_location(rsc, node, -INFINITY, "__limit_utilization_", data_set);
-            }
-        }
-        dump_node_scores(alloc_details, rsc, "Post-utilization", rsc->allowed_nodes);
-    }
+    process_utilization(rsc, &prefer, data_set);
 
     length = g_hash_table_size(rsc->allowed_nodes);
 
@@ -621,7 +564,7 @@ is_op_dup(resource_t * rsc, const char *name, const char *interval)
 
     CRM_ASSERT(rsc);
     for (operation = __xml_first_child(rsc->ops_xml); operation != NULL;
-         operation = __xml_next(operation)) {
+         operation = __xml_next_element(operation)) {
         if (crm_str_eq((const char *)operation->name, "op", TRUE)) {
             value = crm_element_value(operation, "name");
             if (safe_str_neq(value, name)) {
@@ -725,7 +668,18 @@ RecurringOp(resource_t * rsc, action_t * start, node_t * node,
     if (possible_matches == NULL) {
         is_optional = FALSE;
         pe_rsc_trace(rsc, "Marking %s manditory: not active", key);
+
     } else {
+        GListPtr gIter = NULL;
+
+        for (gIter = possible_matches; gIter != NULL; gIter = gIter->next) {
+            action_t *op = (action_t *) gIter->data;
+
+            if (is_set(op->flags, pe_action_reschedule)) {
+                is_optional = FALSE;
+                break;
+            }
+        }
         g_list_free(possible_matches);
     }
 
@@ -841,7 +795,7 @@ Recurring(resource_t * rsc, action_t * start, node_t * node, pe_working_set_t * 
         xmlNode *operation = NULL;
 
         for (operation = __xml_first_child(rsc->ops_xml); operation != NULL;
-             operation = __xml_next(operation)) {
+             operation = __xml_next_element(operation)) {
             if (crm_str_eq((const char *)operation->name, "op", TRUE)) {
                 RecurringOp(rsc, start, node, operation, data_set);
             }
@@ -1073,7 +1027,7 @@ Recurring_Stopped(resource_t * rsc, action_t * start, node_t * node, pe_working_
         xmlNode *operation = NULL;
 
         for (operation = __xml_first_child(rsc->ops_xml); operation != NULL;
-             operation = __xml_next(operation)) {
+             operation = __xml_next_element(operation)) {
             if (crm_str_eq((const char *)operation->name, "op", TRUE)) {
                 RecurringOp_Stopped(rsc, start, node, operation, data_set);
             }
@@ -1137,12 +1091,18 @@ handle_migration_actions(resource_t * rsc, node_t *current, node_t *chosen, pe_w
     if (migrate_to) {
         add_hash_param(migrate_to->meta, XML_LRM_ATTR_MIGRATE_SOURCE, current->details->uname);
         add_hash_param(migrate_to->meta, XML_LRM_ATTR_MIGRATE_TARGET, chosen->details->uname);
-        /* migrate_to takes place on the source node, but can 
-         * have an effect on the target node depending on how
-         * the agent is written. Because of this, we have to maintain
-         * a record that the migrate_to occurred incase the source node 
-         * loses membership while the migrate_to action is still in-flight. */
-        add_hash_param(migrate_to->meta, XML_OP_ATTR_PENDING, "true");
+
+        /* pcmk remote connections don't require pending to be recorded in cib.
+         * We can optimize cib writes by only setting PENDING for non pcmk remote
+         * connection resources */
+        if (rsc->is_remote_node == FALSE) {
+            /* migrate_to takes place on the source node, but can 
+             * have an effect on the target node depending on how
+             * the agent is written. Because of this, we have to maintain
+             * a record that the migrate_to occurred incase the source node 
+             * loses membership while the migrate_to action is still in-flight. */
+            add_hash_param(migrate_to->meta, XML_OP_ATTR_PENDING, "true");
+        }
     }
 
     if (migrate_from) {
@@ -1192,8 +1152,6 @@ native_create_actions(resource_t * rsc, pe_working_set_t * data_set)
         }
         num_active_nodes++;
     }
-
-    get_rsc_attributes(rsc->parameters, rsc, chosen, data_set);
 
     for (gIter = rsc->dangling_migrations; gIter != NULL; gIter = gIter->next) {
         node_t *current = (node_t *) gIter->data;
@@ -1543,22 +1501,16 @@ native_rsc_colocation_lh(resource_t * rsc_lh, resource_t * rsc_rh, rsc_colocatio
     rsc_rh->cmds->rsc_colocation_rh(rsc_lh, rsc_rh, constraint);
 }
 
-enum filter_colocation_res {
-    influence_nothing = 0,
-    influence_rsc_location,
-    influence_rsc_priority,
-};
-
-static enum filter_colocation_res
+enum filter_colocation_res
 filter_colocation_constraint(resource_t * rsc_lh, resource_t * rsc_rh,
-                             rsc_colocation_t * constraint)
+                             rsc_colocation_t * constraint, gboolean preview)
 {
     if (constraint->score == 0) {
         return influence_nothing;
     }
 
     /* rh side must be allocated before we can process constraint */
-    if (is_set(rsc_rh->flags, pe_rsc_provisional)) {
+    if (preview == FALSE && is_set(rsc_rh->flags, pe_rsc_provisional)) {
         return influence_nothing;
     }
 
@@ -1571,7 +1523,7 @@ filter_colocation_constraint(resource_t * rsc_lh, resource_t * rsc_rh,
         return influence_rsc_priority;
     }
 
-    if (is_not_set(rsc_lh->flags, pe_rsc_provisional)) {
+    if (preview == FALSE && is_not_set(rsc_lh->flags, pe_rsc_provisional)) {
         /* error check */
         struct node_shared_s *details_lh;
         struct node_shared_s *details_rh;
@@ -1740,7 +1692,7 @@ native_rsc_colocation_rh(resource_t * rsc_lh, resource_t * rsc_rh, rsc_colocatio
 
     CRM_ASSERT(rsc_lh);
     CRM_ASSERT(rsc_rh);
-    filter_results = filter_colocation_constraint(rsc_lh, rsc_rh, constraint);
+    filter_results = filter_colocation_constraint(rsc_lh, rsc_rh, constraint, FALSE);
     pe_rsc_trace(rsc_lh, "%sColocating %s with %s (%s, weight=%d, filter=%d)",
                  constraint->score >= 0 ? "" : "Anti-",
                  rsc_lh->id, rsc_rh->id, constraint->id, constraint->score, filter_results);
@@ -2149,7 +2101,7 @@ native_expand(resource_t * rsc, pe_working_set_t * data_set)
 
 #define STOP_SANITY_ASSERT(lineno) do {                                 \
         if(current && current->details->unclean) {                      \
-            /* It will be a pseduo op */                                \
+            /* It will be a pseudo op */                                \
         } else if(stop == NULL) {                                       \
             crm_err("%s:%d: No stop action exists for %s", __FUNCTION__, lineno, rsc->id); \
             CRM_ASSERT(stop != NULL);                                   \
@@ -2865,8 +2817,7 @@ native_create_probe(resource_t * rsc, node_t * node, action_t * complete,
 }
 
 static void
-native_start_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_stonith,
-                         pe_working_set_t * data_set)
+native_start_constraints(resource_t * rsc, action_t * stonith_op, pe_working_set_t * data_set)
 {
     node_t *target = stonith_op ? stonith_op->node : NULL;
 
@@ -2907,17 +2858,60 @@ native_start_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_st
     }
 }
 
+static GListPtr
+find_fence_target_node_actions(GListPtr search_list, const char *key, node_t *fence_target, pe_working_set_t *data_set)
+{
+    GListPtr gIter = NULL;
+    GListPtr result_list = find_actions(search_list, key, fence_target);
+
+    /* find stop actions for this rsc on any container nodes running on
+     * the fencing target node */
+    for (gIter = fence_target->details->running_rsc; gIter != NULL; gIter = gIter->next) { 
+        GListPtr iter = NULL;
+        GListPtr tmp_list = NULL;
+        resource_t *tmp_rsc = (resource_t *) gIter->data;
+        node_t *container_node = NULL;
+
+        /* found a container node that lives on the host node
+         * that is getting fenced. Find stop for our rsc that live on
+         * the container node as well. These stop operations are also
+         * implied by fencing of the host cluster node. */
+        if (tmp_rsc->is_remote_node && tmp_rsc->container != NULL) {
+            container_node = pe_find_node(data_set->nodes, tmp_rsc->id);
+        }
+        if (container_node) {
+            tmp_list = find_actions(search_list, key, container_node);
+        }
+        for (iter = tmp_list; iter != NULL; iter = iter->next) { 
+            result_list = g_list_prepend(result_list, (action_t *) iter->data);
+        }
+        g_list_free(tmp_list);
+    }
+
+    return result_list;
+}
+
 static void
-native_stop_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_stonith,
-                        pe_working_set_t * data_set)
+native_stop_constraints(resource_t * rsc, action_t * stonith_op, pe_working_set_t * data_set)
 {
     char *key = NULL;
     GListPtr gIter = NULL;
     GListPtr action_list = NULL;
+
+    action_t *start = NULL;
     resource_t *top = uber_parent(rsc);
 
+    key = start_key(rsc);
+    action_list = find_actions(rsc->actions, key, NULL);
+    if(action_list) {
+        start = action_list->data;
+    }
+
+    g_list_free(action_list);
+    free(key);
+
     key = stop_key(rsc);
-    action_list = find_actions(rsc->actions, key, stonith_op->node);
+    action_list = find_fence_target_node_actions(rsc->actions, key, stonith_op->node, data_set);
     free(key);
 
     /* add the stonith OP as a stop pre-req and the mark the stop
@@ -2947,7 +2941,7 @@ native_stop_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_sto
         update_action_flags(action, pe_action_runnable);
         update_action_flags(action, pe_action_implied_by_stonith);
 
-        {
+        if(start == NULL || start->needs > rsc_req_quorum) {
             enum pe_ordering flags = pe_order_optional;
             action_t *parent_stop = find_first_action(top->actions, NULL, RSC_STOP, NULL);
 
@@ -3026,7 +3020,7 @@ native_stop_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_sto
     g_list_free(action_list);
 
     key = demote_key(rsc);
-    action_list = find_actions(rsc->actions, key, stonith_op->node);
+    action_list = find_fence_target_node_actions(rsc->actions, key, stonith_op->node, data_set);
     free(key);
 
     for (gIter = action_list; gIter != NULL; gIter = gIter->next) {
@@ -3047,7 +3041,8 @@ native_stop_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_sto
             crm_trace("here - 1");
             update_action_flags(action, pe_action_pseudo);
             update_action_flags(action, pe_action_runnable);
-            if (is_stonith == FALSE) {
+
+            if (start == NULL || start->needs > rsc_req_quorum) {
                 order_actions(stonith_op, action, pe_order_preserve|pe_order_optional);
             }
         }
@@ -3059,8 +3054,6 @@ native_stop_constraints(resource_t * rsc, action_t * stonith_op, gboolean is_sto
 void
 rsc_stonith_ordering(resource_t * rsc, action_t * stonith_op, pe_working_set_t * data_set)
 {
-    gboolean is_stonith = FALSE;
-
     if (rsc->children) {
         GListPtr gIter = NULL;
 
@@ -3078,11 +3071,11 @@ rsc_stonith_ordering(resource_t * rsc, action_t * stonith_op, pe_working_set_t *
     }
 
     /* Start constraints */
-    native_start_constraints(rsc, stonith_op, is_stonith, data_set);
+    native_start_constraints(rsc, stonith_op, data_set);
 
     /* Stop constraints */
     if (stonith_op) {
-        native_stop_constraints(rsc, stonith_op, is_stonith, data_set);
+        native_stop_constraints(rsc, stonith_op, data_set);
     }
 }
 
@@ -3217,6 +3210,7 @@ void
 native_append_meta(resource_t * rsc, xmlNode * xml)
 {
     char *value = g_hash_table_lookup(rsc->meta, XML_RSC_ATTR_INCARNATION);
+    resource_t *iso_parent, *last_parent, *parent;
 
     if (value) {
         char *name = NULL;
@@ -3233,5 +3227,89 @@ native_append_meta(resource_t * rsc, xmlNode * xml)
         name = crm_meta_name(XML_RSC_ATTR_REMOTE_NODE);
         crm_xml_add(xml, name, value);
         free(name);
+    }
+
+    for (parent = rsc; parent != NULL; parent = parent->parent) {
+        if (parent->container) {
+            crm_xml_add(xml, CRM_META"_"XML_RSC_ATTR_CONTAINER, parent->container->id);
+        }
+    }
+
+    last_parent = iso_parent = rsc;
+    while (iso_parent != NULL) {
+        char *name = NULL;
+        char *iso = NULL;
+
+        if (iso_parent->isolation_wrapper == NULL) {
+            last_parent = iso_parent;
+            iso_parent = iso_parent->parent;
+            continue;
+        }
+
+        /* name of wrapper script this resource is routed through. */
+        name = crm_meta_name(XML_RSC_ATTR_ISOLATION_WRAPPER);
+        crm_xml_add(xml, name, iso_parent->isolation_wrapper);
+        free(name);
+
+        /* instance name for isolated environment */
+        name = crm_meta_name(XML_RSC_ATTR_ISOLATION_INSTANCE);
+        if (iso_parent->variant >= pe_clone) { 
+            /* if isolation is set at the clone/master level, we have to 
+             * give this resource the unique isolation instance associated
+             * with the clone child (last_parent)*/
+
+            /* Example: cloned group. group is container
+             * clone myclone - iso_parent
+             *    group mygroup - last_parent (this is the iso environment)
+             *       rsc myrsc1 - rsc
+             *       rsc myrsc2
+             * The group is what is isolated in example1. We have to make
+             * sure myrsc1 and myrsc2 launch in the same isolated environment.
+             *
+             * Example: cloned primitives. rsc primitive is container
+             * clone myclone iso_parent
+             *     rsc myrsc1 - last_parent == rsc (this is the iso environment)
+             * The individual cloned primitive instances are isolated
+             */
+            value = g_hash_table_lookup(last_parent->meta, XML_RSC_ATTR_INCARNATION);
+            CRM_ASSERT(value != NULL);
+
+            iso = crm_concat(crm_element_value(last_parent->xml, XML_ATTR_ID), value, '_');
+            crm_xml_add(xml, name, iso);
+            free(iso);
+        } else { 
+            /*
+             * Example: cloned group of containers
+             * clone myclone
+             *    group mygroup
+             *       rsc myrsc1 - iso_parent (this is the iso environment)
+             *       rsc myrsc2
+             *
+             * Example: group of containers
+             * group mygroup
+             *   rsc myrsc1 - iso_parent (this is the iso environment)
+             *   rsc myrsc2
+             * 
+             * Example: group is container
+             * group mygroup - iso_parent ( this is iso environment)
+             *   rsc myrsc1 
+             *   rsc myrsc2
+             *
+             * Example: single primitive
+             * rsc myrsc1 - iso_parent (this is the iso environment)
+             */
+            value = g_hash_table_lookup(iso_parent->meta, XML_RSC_ATTR_INCARNATION);
+            if (value) {
+                crm_xml_add(xml, name, iso_parent->id);
+                iso = crm_concat(crm_element_value(iso_parent->xml, XML_ATTR_ID), value, '_');
+                crm_xml_add(xml, name, iso);
+                free(iso);
+            } else {
+                crm_xml_add(xml, name, iso_parent->id);
+            }
+        }
+        free(name);
+
+        break;
     }
 }

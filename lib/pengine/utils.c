@@ -35,6 +35,7 @@ void unpack_operation(action_t * action, xmlNode * xml_obj, resource_t * contain
                       pe_working_set_t * data_set);
 static xmlNode *find_rsc_op_entry_helper(resource_t * rsc, const char *key,
                                          gboolean include_disabled);
+static gboolean is_rsc_baremetal_remote_node(resource_t *rsc, pe_working_set_t * data_set);
 
 bool pe_can_fence(pe_working_set_t * data_set, node_t *node)
 {
@@ -415,7 +416,6 @@ custom_action(resource_t * rsc, char *key, const char *task,
         }
         action->uuid = strdup(key);
 
-        pe_set_action_bit(action, pe_action_failure_is_fatal);
         pe_set_action_bit(action, pe_action_runnable);
         if (optional) {
             pe_rsc_trace(rsc, "Set optional on %s", action->uuid);
@@ -584,7 +584,7 @@ unpack_operation_on_fail(action_t * action)
         CRM_CHECK(action->rsc != NULL, return NULL);
 
         for (operation = __xml_first_child(action->rsc->ops_xml);
-             operation && !value; operation = __xml_next(operation)) {
+             operation && !value; operation = __xml_next_element(operation)) {
 
             if (!crm_str_eq((const char *)operation->name, "op", TRUE)) {
                 continue;
@@ -623,7 +623,7 @@ find_min_interval_mon(resource_t * rsc, gboolean include_disabled)
     xmlNode *operation = NULL;
 
     for (operation = __xml_first_child(rsc->ops_xml); operation != NULL;
-         operation = __xml_next(operation)) {
+         operation = __xml_next_element(operation)) {
 
         if (crm_str_eq((const char *)operation->name, "op", TRUE)) {
             name = crm_element_value(operation, "name");
@@ -686,6 +686,19 @@ unpack_operation(action_t * action, xmlNode * xml_obj, resource_t * container,
                                NULL, action->meta, NULL, FALSE, data_set->now);
     g_hash_table_remove(action->meta, "id");
 
+    field = XML_LRM_ATTR_INTERVAL;
+    value = g_hash_table_lookup(action->meta, field);
+    if (value != NULL) {
+        interval = crm_get_interval(value);
+        if (interval > 0) {
+            value_ms = crm_itoa(interval);
+            g_hash_table_replace(action->meta, strdup(field), value_ms);
+
+        } else {
+            g_hash_table_remove(action->meta, field);
+        }
+    }
+
     /* Begin compatability code */
     value = g_hash_table_lookup(action->meta, "requires");
 
@@ -736,6 +749,7 @@ unpack_operation(action_t * action, xmlNode * xml_obj, resource_t * container,
 
     } else if (safe_str_eq(value, "block")) {
         action->on_fail = action_fail_block;
+        g_hash_table_insert(action->meta, strdup(XML_OP_ATTR_ON_FAIL), strdup("block"));
 
     } else if (safe_str_eq(value, "fence")) {
         action->on_fail = action_fail_fence;
@@ -789,6 +803,30 @@ unpack_operation(action_t * action, xmlNode * xml_obj, resource_t * container,
         action->on_fail = action_fail_restart_container;
         value = "restart container (and possibly migrate) (default)";
 
+    /* for barmetal remote nodes, ensure that any failure that results in
+     * dropping an active connection to a remote node results in fencing of
+     * the remote node.
+     *
+     * There are only two action failures that don't result in fencing.
+     * 1. probes - probe failures are expected.
+     * 2. start - a start failure indicates that an active connection does not already
+     * exist. The user can set op on-fail=fence if they really want to fence start
+     * failures. */
+    } else if (value == NULL &&
+               is_rsc_baremetal_remote_node(action->rsc, data_set) &&
+               !(safe_str_eq(action->task, CRMD_ACTION_STATUS) && interval == 0) &&
+                (safe_str_neq(action->task, CRMD_ACTION_START))) {
+
+        if (is_set(data_set->flags, pe_flag_stonith_enabled)) {
+            value = "fence baremetal remote node (default)";
+        } else {
+            value = "recover baremetal remote node connection (default)";
+        }
+        if (action->rsc->remote_reconnect_interval) {
+            action->fail_role = RSC_ROLE_STOPPED;
+        }
+        action->on_fail = action_fail_reset_remote;
+
     } else if (value == NULL && safe_str_eq(action->task, CRMD_ACTION_STOP)) {
         if (is_set(data_set->flags, pe_flag_stonith_enabled)) {
             action->on_fail = action_fail_fence;
@@ -823,19 +861,6 @@ unpack_operation(action_t * action, xmlNode * xml_obj, resource_t * container,
     }
     pe_rsc_trace(action->rsc, "\t%s failure results in: %s", action->task,
                  role2text(action->fail_role));
-
-    field = XML_LRM_ATTR_INTERVAL;
-    value = g_hash_table_lookup(action->meta, field);
-    if (value != NULL) {
-        interval = crm_get_interval(value);
-        if (interval > 0) {
-            value_ms = crm_itoa(interval);
-            g_hash_table_replace(action->meta, strdup(field), value_ms);
-
-        } else {
-            g_hash_table_remove(action->meta, field);
-        }
-    }
 
     field = XML_OP_ATTR_START_DELAY;
     value = g_hash_table_lookup(action->meta, field);
@@ -940,7 +965,7 @@ find_rsc_op_entry_helper(resource_t * rsc, const char *key, gboolean include_dis
 
   retry:
     for (operation = __xml_first_child(rsc->ops_xml); operation != NULL;
-         operation = __xml_next(operation)) {
+         operation = __xml_next_element(operation)) {
         if (crm_str_eq((const char *)operation->name, "op", TRUE)) {
             name = crm_element_value(operation, "name");
             interval = crm_element_value(operation, XML_LRM_ATTR_INTERVAL);
@@ -1528,7 +1553,7 @@ static gboolean
 block_failure(node_t * node, resource_t * rsc, xmlNode * xml_op, pe_working_set_t * data_set)
 {
     char *xml_name = clone_strip(rsc->id);
-    char *xpath = g_strdup_printf("//primitive[@id='%s']//op[@on-fail='block']", xml_name);
+    char *xpath = crm_strdup_printf("//primitive[@id='%s']//op[@on-fail='block']", xml_name);
     xmlXPathObject *xpathObj = xpath_search(rsc->xml, xpath);
     gboolean should_block = FALSE;
 
@@ -1556,7 +1581,7 @@ block_failure(node_t * node, resource_t * rsc, xmlNode * xml_op, pe_working_set_
                 conf_op_name = crm_element_value(pref, "name");
                 conf_op_interval = crm_get_msec(crm_element_value(pref, "interval"));
 
-                lrm_op_xpath = g_strdup_printf("//node_state[@uname='%s']"
+                lrm_op_xpath = crm_strdup_printf("//node_state[@uname='%s']"
                                                "//lrm_resource[@id='%s']"
                                                "/lrm_rsc_op[@operation='%s'][@interval='%d']",
                                                node->details->uname, xml_name,
@@ -1753,7 +1778,7 @@ order_actions(action_t * lh_action, action_t * rh_action, enum pe_ordering order
 
     crm_trace("Ordering Action %s before %s", lh_action->uuid, rh_action->uuid);
 
-    /* Ensure we never create a dependancy on ourselves... its happened */
+    /* Ensure we never create a dependency on ourselves... its happened */
     CRM_ASSERT(lh_action != rh_action);
 
     /* Filter dups, otherwise update_action_states() has too much work to do */
@@ -1855,6 +1880,47 @@ ticket_new(const char *ticket_id, pe_working_set_t * data_set)
     return ticket;
 }
 
+static void
+filter_parameters(xmlNode * param_set, const char *param_string, bool need_present)
+{
+    int len = 0;
+    char *name = NULL;
+    char *match = NULL;
+
+    if (param_set == NULL) {
+        return;
+    }
+
+    if (param_set) {
+        xmlAttrPtr xIter = param_set->properties;
+
+        while (xIter) {
+            const char *prop_name = (const char *)xIter->name;
+
+            xIter = xIter->next;
+            name = NULL;
+            len = strlen(prop_name) + 3;
+
+            name = malloc(len);
+            if(name) {
+                sprintf(name, " %s ", prop_name);
+                name[len - 1] = 0;
+                match = strstr(param_string, name);
+            }
+
+            if (need_present && match == NULL) {
+                crm_trace("%s not found in %s", prop_name, param_string);
+                xml_remove_prop(param_set, prop_name);
+
+            } else if (need_present == FALSE && match) {
+                crm_trace("%s found in %s", prop_name, param_string);
+                xml_remove_prop(param_set, prop_name);
+            }
+            free(name);
+        }
+    }
+}
+
 op_digest_cache_t *
 rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, node_t * node,
                       pe_working_set_t * data_set)
@@ -1872,6 +1938,7 @@ rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, node_t * node,
     const char *task = crm_element_value(xml_op, XML_LRM_ATTR_TASK);
     const char *digest_all;
     const char *digest_restart;
+    const char *secure_list;
     const char *restart_list;
     const char *op_version;
 
@@ -1884,7 +1951,10 @@ rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, node_t * node,
 
     digest_all = crm_element_value(xml_op, XML_LRM_ATTR_OP_DIGEST);
     digest_restart = crm_element_value(xml_op, XML_LRM_ATTR_RESTART_DIGEST);
+
+    secure_list = crm_element_value(xml_op, XML_LRM_ATTR_OP_SECURE);
     restart_list = crm_element_value(xml_op, XML_LRM_ATTR_OP_RESTART);
+
     op_version = crm_element_value(xml_op, XML_ATTR_CRM_VERSION);
 
     /* key is freed in custom_action */
@@ -1905,20 +1975,32 @@ rsc_action_digest_cmp(resource_t * rsc, xmlNode * xml_op, node_t * node,
 
     data->digest_all_calc = calculate_operation_digest(data->params_all, op_version);
 
+    if (secure_list && is_set(data_set->flags, pe_flag_sanitized)) {
+        data->params_secure = copy_xml(data->params_all);
+
+        if (secure_list) {
+            filter_parameters(data->params_secure, secure_list, FALSE);
+        }
+        data->digest_secure_calc = calculate_operation_digest(data->params_secure, op_version);
+    }
+
     if (digest_restart) {
         data->params_restart = copy_xml(data->params_all);
 
         if (restart_list) {
-            filter_reload_parameters(data->params_restart, restart_list);
+            filter_parameters(data->params_restart, restart_list, TRUE);
         }
         data->digest_restart_calc = calculate_operation_digest(data->params_restart, op_version);
     }
 
+    data->rc = RSC_DIGEST_MATCH;
     if (digest_restart && strcmp(data->digest_restart_calc, digest_restart) != 0) {
         data->rc = RSC_DIGEST_RESTART;
+
     } else if (digest_all == NULL) {
         /* it is unknown what the previous op digest was */
         data->rc = RSC_DIGEST_UNKNOWN;
+
     } else if (strcmp(digest_all, data->digest_all_calc) != 0) {
         data->rc = RSC_DIGEST_ALL;
     }
@@ -1936,6 +2018,25 @@ const char *rsc_printable_id(resource_t *rsc)
         return ID(rsc->xml);
     }
     return rsc->id;
+}
+
+gboolean
+is_rsc_baremetal_remote_node(resource_t *rsc, pe_working_set_t * data_set)
+{
+    node_t *node;
+
+    if (rsc == NULL) {
+        return FALSE;
+    } else if (rsc->is_remote_node == FALSE) {
+        return FALSE;
+    }
+
+    node = pe_find_node(data_set->nodes, rsc->id);
+    if (node == NULL) {
+        return FALSE;
+    }
+
+    return is_baremetal_remote_node(node);
 }
 
 gboolean
@@ -2034,7 +2135,7 @@ pe_fence_op(node_t * node, const char *op, bool optional, pe_working_set_t * dat
         op = data_set->stonith_action;
     }
 
-    key = g_strdup_printf("%s-%s-%s", CRM_OP_FENCE, node->details->uname, op);
+    key = crm_strdup_printf("%s-%s-%s", CRM_OP_FENCE, node->details->uname, op);
 
     if(data_set->singletons) {
         stonith_op = g_hash_table_lookup(data_set->singletons, key);
@@ -2060,7 +2161,7 @@ pe_fence_op(node_t * node, const char *op, bool optional, pe_working_set_t * dat
 
 void
 trigger_unfencing(
-    resource_t * rsc, node_t *node, const char *reason, action_t *dependancy, pe_working_set_t * data_set) 
+    resource_t * rsc, node_t *node, const char *reason, action_t *dependency, pe_working_set_t * data_set) 
 {
     if(is_not_set(data_set->flags, pe_flag_enable_unfencing)) {
         /* No resources require it */
@@ -2077,8 +2178,8 @@ trigger_unfencing(
         action_t *unfence = pe_fence_op(node, "on", FALSE, data_set);
 
         crm_notice("Unfencing %s: %s", node->details->uname, reason);
-        if(dependancy) {
-            order_actions(unfence, dependancy, pe_order_optional);
+        if(dependency) {
+            order_actions(unfence, dependency, pe_order_optional);
         }
 
     } else if(rsc) {
@@ -2087,7 +2188,7 @@ trigger_unfencing(
         g_hash_table_iter_init(&iter, rsc->allowed_nodes);
         while (g_hash_table_iter_next(&iter, NULL, (void **)&node)) {
             if(node->details->online && node->details->unclean == FALSE && node->details->shutdown == FALSE) {
-                trigger_unfencing(rsc, node, reason, dependancy, data_set);
+                trigger_unfencing(rsc, node, reason, dependency, data_set);
             }
         }
     }

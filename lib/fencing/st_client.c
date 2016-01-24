@@ -308,7 +308,7 @@ append_arg(gpointer key, gpointer value, gpointer user_data)
         last = strlen(*args);
     }
 
-    *args = realloc(*args, last + len);
+    *args = realloc_safe(*args, last + len);
     crm_trace("Appending: %s=%s", (char *)key, (char *)value);
     sprintf((*args) + last, "%s=%s\n", (char *)key, (char *)value);
 }
@@ -401,7 +401,7 @@ append_host_specific_args(const char *victim, const char *map, GHashTable * para
 }
 
 static char *
-make_args(const char *action, const char *victim, uint32_t victim_nodeid, GHashTable * device_args,
+make_args(const char *agent, const char *action, const char *victim, uint32_t victim_nodeid, GHashTable * device_args,
           GHashTable * port_map)
 {
     char buffer[512];
@@ -456,7 +456,10 @@ make_args(const char *action, const char *victim, uint32_t victim_nodeid, GHashT
         }
 
         /* Check if we need to supply the victim in any other form */
-        if (param == NULL) {
+        if(safe_str_eq(agent, "fence_legacy")) {
+            value = agent;
+
+        } else if (param == NULL) {
             const char *map = g_hash_table_lookup(device_args, STONITH_ATTR_ARGMAP);
 
             if (map == NULL) {
@@ -580,7 +583,7 @@ stonith_action_create(const char *agent,
 
     action = calloc(1, sizeof(stonith_action_t));
     crm_debug("Initiating action %s for agent %s (target=%s)", _action, agent, victim);
-    action->args = make_args(_action, victim, victim_nodeid, device_args, port_map);
+    action->args = make_args(agent, _action, victim, victim_nodeid, device_args, port_map);
     action->agent = strdup(agent);
     action->action = strdup(_action);
     if (victim) {
@@ -627,7 +630,7 @@ read_output(int fd)
                               * 'more' is always less than our buffer size
                               */
             crm_trace("Got %d more bytes: %.200s...", more, buffer);
-            output = realloc(output, len + more + 1);
+            output = realloc_safe(output, len + more + 1);
             snprintf(output + len, more + 1, "%s", buffer);
             len += more;
         }
@@ -1056,21 +1059,25 @@ strdup_null(const char *val)
 }
 
 static void
-stonith_plugin(int priority, const char *fmt, ...)
-G_GNUC_PRINTF(2, 3);
+stonith_plugin(int priority, const char *fmt, ...) __attribute__((__format__ (__printf__, 2, 3)));
 
 static void
-stonith_plugin(int priority, const char *fmt, ...)
+stonith_plugin(int priority, const char *format, ...)
 {
-    va_list args;
-    char *str;
     int err = errno;
 
-    va_start(args, fmt);
-    str = g_strdup_vprintf(fmt, args);
-    va_end(args);
-    do_crm_log_alias(priority, __FILE__, __func__, __LINE__, "%s", str);
-    g_free(str);
+    va_list ap;
+    int len = 0;
+    char *string = NULL;
+
+    va_start(ap, format);
+
+    len = vasprintf (&string, format, ap);
+    CRM_ASSERT(len > 0);
+
+    do_crm_log_alias(priority, __FILE__, __func__, __LINE__, "%s", string);
+
+    free(string);
     errno = err;
 }
 #endif
@@ -1093,57 +1100,62 @@ stonith_api_device_metadata(stonith_t * stonith, int call_options, const char *a
     if (safe_str_eq(provider, "redhat")) {
         stonith_action_t *action = stonith_action_create(agent, "metadata", NULL, 0, 5, NULL, NULL);
         int exec_rc = stonith_action_execute(action, &rc, &buffer);
+        xmlNode *xml = NULL;
+        xmlNode *actions = NULL;
+        xmlXPathObject *xpathObj = NULL;
 
         if (exec_rc < 0 || rc != 0 || buffer == NULL) {
+            crm_warn("Could not obtain metadata for %s", agent);
             crm_debug("Query failed: %d %d: %s", exec_rc, rc, crm_str(buffer));
             free(buffer);       /* Just in case */
             return -EINVAL;
+        }
 
-        } else {
-
-            xmlNode *xml = string2xml(buffer);
-            xmlNode *actions = NULL;
-            xmlXPathObject *xpathObj = NULL;
-
-            xpathObj = xpath_search(xml, "//actions");
-            if (numXpathResults(xpathObj) > 0) {
-                actions = getXpathResult(xpathObj, 0);
-            }
-
-            freeXpathObject(xpathObj);
-
-            /* Now fudge the metadata so that the start/stop actions appear */
-            xpathObj = xpath_search(xml, "//action[@name='stop']");
-            if (numXpathResults(xpathObj) <= 0) {
-                xmlNode *tmp = NULL;
-
-                tmp = create_xml_node(actions, "action");
-                crm_xml_add(tmp, "name", "stop");
-                crm_xml_add(tmp, "timeout", "20s");
-
-                tmp = create_xml_node(actions, "action");
-                crm_xml_add(tmp, "name", "start");
-                crm_xml_add(tmp, "timeout", "20s");
-            }
-
-            freeXpathObject(xpathObj);
-
-            /* Now fudge the metadata so that the port isn't required in the configuration */
-            xpathObj = xpath_search(xml, "//parameter[@name='port']");
-            if (numXpathResults(xpathObj) > 0) {
-                /* We'll fill this in */
-                xmlNode *tmp = getXpathResult(xpathObj, 0);
-
-                crm_xml_add(tmp, "required", "0");
-            }
-
-            freeXpathObject(xpathObj);
+        xml = string2xml(buffer);
+        if(xml == NULL) {
+            crm_warn("Metadata for %s is invalid", agent);
             free(buffer);
-            buffer = dump_xml_formatted(xml);
-            free_xml(xml);
-            if (!buffer) {
-                return -EINVAL;
-            }
+            return -EINVAL;
+        }
+
+        xpathObj = xpath_search(xml, "//actions");
+        if (numXpathResults(xpathObj) > 0) {
+            actions = getXpathResult(xpathObj, 0);
+        }
+
+        freeXpathObject(xpathObj);
+
+        /* Now fudge the metadata so that the start/stop actions appear */
+        xpathObj = xpath_search(xml, "//action[@name='stop']");
+        if (numXpathResults(xpathObj) <= 0) {
+            xmlNode *tmp = NULL;
+
+            tmp = create_xml_node(actions, "action");
+            crm_xml_add(tmp, "name", "stop");
+            crm_xml_add(tmp, "timeout", "20s");
+
+            tmp = create_xml_node(actions, "action");
+            crm_xml_add(tmp, "name", "start");
+            crm_xml_add(tmp, "timeout", "20s");
+        }
+
+        freeXpathObject(xpathObj);
+
+        /* Now fudge the metadata so that the port isn't required in the configuration */
+        xpathObj = xpath_search(xml, "//parameter[@name='port']");
+        if (numXpathResults(xpathObj) > 0) {
+            /* We'll fill this in */
+            xmlNode *tmp = getXpathResult(xpathObj, 0);
+
+            crm_xml_add(tmp, "required", "0");
+        }
+
+        freeXpathObject(xpathObj);
+        free(buffer);
+        buffer = dump_xml_formatted(xml);
+        free_xml(xml);
+        if (!buffer) {
+            return -EINVAL;
         }
 
     } else {
@@ -1273,7 +1285,10 @@ stonith_api_query(stonith_t * stonith, int call_options, const char *target,
 
             CRM_LOG_ASSERT(match != NULL);
             if(match != NULL) {
-                crm_info("%s[%d] = %s", "//@agent", lpc, xmlGetNodePath(match));
+                xmlChar *match_path = xmlGetNodePath(match);
+
+                crm_info("%s[%d] = %s", "//@agent", lpc, match_path);
+                free(match_path);
                 *devices = stonith_key_value_add(*devices, NULL, crm_element_value(match, XML_ATTR_ID));
             }
         }
@@ -1582,8 +1597,8 @@ stonith_api_signon(stonith_t * stonith, const char *name, int *stonith_fd)
 
         if (native->ipc && crm_ipc_connect(native->ipc)) {
             *stonith_fd = crm_ipc_get_fd(native->ipc);
-
         } else if (native->ipc) {
+            crm_perror(LOG_ERR, "Connection to STONITH manager failed");
             rc = -ENOTCONN;
         }
 
@@ -1977,7 +1992,7 @@ xml_to_event(xmlNode * msg)
 {
     stonith_event_t *event = calloc(1, sizeof(stonith_event_t));
     const char *ntype = crm_element_value(msg, F_SUBTYPE);
-    char *data_addr = g_strdup_printf("//%s", ntype);
+    char *data_addr = crm_strdup_printf("//%s", ntype);
     xmlNode *data = get_xpath_object(data_addr, msg, LOG_DEBUG);
 
     crm_log_xml_trace(msg, "stonith_notify");
@@ -2002,7 +2017,7 @@ xml_to_event(xmlNode * msg)
         }
     }
 
-    g_free(data_addr);
+    free(data_addr);
     return event;
 }
 

@@ -36,7 +36,6 @@
 #include <limits.h>
 #include <ctype.h>
 #include <pwd.h>
-#include <grp.h>
 #include <time.h>
 #include <libgen.h>
 #include <signal.h>
@@ -423,30 +422,6 @@ crm_itoa(int an_int)
     }
 
     return buffer;
-}
-
-void
-crm_build_path(const char *path_c, mode_t mode)
-{
-    int offset = 1, len = 0;
-    char *path = strdup(path_c);
-
-    CRM_CHECK(path != NULL, return);
-    for (len = strlen(path); offset < len; offset++) {
-        if (path[offset] == '/') {
-            path[offset] = 0;
-            if (mkdir(path, mode) < 0 && errno != EEXIST) {
-                crm_perror(LOG_ERR, "Could not create directory '%s'", path);
-                break;
-            }
-            path[offset] = '/';
-        }
-    }
-    if (mkdir(path, mode) < 0 && errno != EEXIST) {
-        crm_perror(LOG_ERR, "Could not create directory '%s'", path);
-    }
-
-    free(path);
 }
 
 int
@@ -1117,43 +1092,6 @@ filter_action_parameters(xmlNode * param_set, const char *version)
     free(key);
 }
 
-void
-filter_reload_parameters(xmlNode * param_set, const char *restart_string)
-{
-    int len = 0;
-    char *name = NULL;
-    char *match = NULL;
-
-    if (param_set == NULL) {
-        return;
-    }
-
-    if (param_set) {
-        xmlAttrPtr xIter = param_set->properties;
-
-        while (xIter) {
-            const char *prop_name = (const char *)xIter->name;
-
-            xIter = xIter->next;
-            name = NULL;
-            len = strlen(prop_name) + 3;
-
-            name = malloc(len);
-            if(name) {
-                sprintf(name, " %s ", prop_name);
-                name[len - 1] = 0;
-                match = strstr(restart_string, name);
-            }
-
-            if (match == NULL) {
-                crm_trace("%s not found in %s", prop_name, restart_string);
-                xml_remove_prop(param_set, prop_name);
-            }
-            free(name);
-        }
-    }
-}
-
 extern bool crm_is_daemon;
 
 /* coverity[+kill] */
@@ -1217,140 +1155,6 @@ crm_abort(const char *file, const char *function, int line,
         return;
     }
     crm_perror(LOG_ERR, "Cannot wait on forked child %d", pid);
-}
-
-char *
-generate_series_filename(const char *directory, const char *series, int sequence, gboolean bzip)
-{
-    int len = 40;
-    char *filename = NULL;
-    const char *ext = "raw";
-
-    CRM_CHECK(directory != NULL, return NULL);
-    CRM_CHECK(series != NULL, return NULL);
-
-#if !HAVE_BZLIB_H
-    bzip = FALSE;
-#endif
-
-    len += strlen(directory);
-    len += strlen(series);
-    filename = malloc(len);
-    CRM_CHECK(filename != NULL, return NULL);
-
-    if (bzip) {
-        ext = "bz2";
-    }
-    sprintf(filename, "%s/%s-%d.%s", directory, series, sequence, ext);
-
-    return filename;
-}
-
-int
-get_last_sequence(const char *directory, const char *series)
-{
-    FILE *file_strm = NULL;
-    int start = 0, length = 0, read_len = 0;
-    char *series_file = NULL;
-    char *buffer = NULL;
-    int seq = 0;
-    int len = 36;
-
-    CRM_CHECK(directory != NULL, return 0);
-    CRM_CHECK(series != NULL, return 0);
-
-    len += strlen(directory);
-    len += strlen(series);
-    series_file = malloc(len);
-    CRM_CHECK(series_file != NULL, return 0);
-    sprintf(series_file, "%s/%s.last", directory, series);
-
-    file_strm = fopen(series_file, "r");
-    if (file_strm == NULL) {
-        crm_debug("Series file %s does not exist", series_file);
-        free(series_file);
-        return 0;
-    }
-
-    /* see how big the file is */
-    start = ftell(file_strm);
-    fseek(file_strm, 0L, SEEK_END);
-    length = ftell(file_strm);
-    fseek(file_strm, 0L, start);
-
-    CRM_ASSERT(length >= 0);
-    CRM_ASSERT(start == ftell(file_strm));
-
-    if (length <= 0) {
-        crm_info("%s was not valid", series_file);
-        free(buffer);
-        buffer = NULL;
-
-    } else {
-        crm_trace("Reading %d bytes from file", length);
-        buffer = calloc(1, (length + 1));
-        read_len = fread(buffer, 1, length, file_strm);
-        if (read_len != length) {
-            crm_err("Calculated and read bytes differ: %d vs. %d", length, read_len);
-            free(buffer);
-            buffer = NULL;
-        }
-    }
-
-    seq = crm_parse_int(buffer, "0");
-    fclose(file_strm);
-
-    crm_trace("Found %d in %s", seq, series_file);
-
-    free(series_file);
-    free(buffer);
-    return seq;
-}
-
-void
-write_last_sequence(const char *directory, const char *series, int sequence, int max)
-{
-    int rc = 0;
-    int len = 36;
-    FILE *file_strm = NULL;
-    char *series_file = NULL;
-
-    CRM_CHECK(directory != NULL, return);
-    CRM_CHECK(series != NULL, return);
-
-    if (max == 0) {
-        return;
-    }
-    if (max > 0 && sequence >= max) {
-        sequence = 0;
-    }
-
-    len += strlen(directory);
-    len += strlen(series);
-    series_file = malloc(len);
-
-    if(series_file) {
-        sprintf(series_file, "%s/%s.last", directory, series);
-        file_strm = fopen(series_file, "w");
-    }
-
-    if (file_strm != NULL) {
-        rc = fprintf(file_strm, "%d", sequence);
-        if (rc < 0) {
-            crm_perror(LOG_ERR, "Cannot write to series file %s", series_file);
-        }
-
-    } else {
-        crm_err("Cannot open series file %s for writing", series_file);
-    }
-
-    if (file_strm != NULL) {
-        fflush(file_strm);
-        fclose(file_strm);
-    }
-
-    crm_trace("Wrote %d to %s", sequence, series_file);
-    free(series_file);
 }
 
 #define	LOCKSTRLEN	11
@@ -1552,78 +1356,6 @@ crm_make_daemon(const char *name, gboolean daemonize, const char *pidfile)
     (void)open(devnull, O_WRONLY);      /* Stderr: fd 2 */
 }
 
-gboolean
-crm_is_writable(const char *dir, const char *file,
-                const char *user, const char *group, gboolean need_both)
-{
-    int s_res = -1;
-    struct stat buf;
-    char *full_file = NULL;
-    const char *target = NULL;
-
-    gboolean pass = TRUE;
-    gboolean readwritable = FALSE;
-
-    CRM_ASSERT(dir != NULL);
-    if (file != NULL) {
-        full_file = crm_concat(dir, file, '/');
-        target = full_file;
-        s_res = stat(full_file, &buf);
-        if (s_res == 0 && S_ISREG(buf.st_mode) == FALSE) {
-            crm_err("%s must be a regular file", target);
-            pass = FALSE;
-            goto out;
-        }
-    }
-
-    if (s_res != 0) {
-        target = dir;
-        s_res = stat(dir, &buf);
-        if (s_res != 0) {
-            crm_err("%s must exist and be a directory", dir);
-            pass = FALSE;
-            goto out;
-
-        } else if (S_ISDIR(buf.st_mode) == FALSE) {
-            crm_err("%s must be a directory", dir);
-            pass = FALSE;
-        }
-    }
-
-    if (user) {
-        struct passwd *sys_user = NULL;
-
-        sys_user = getpwnam(user);
-        readwritable = (sys_user != NULL
-                        && buf.st_uid == sys_user->pw_uid && (buf.st_mode & (S_IRUSR | S_IWUSR)));
-        if (readwritable == FALSE) {
-            crm_err("%s must be owned and r/w by user %s", target, user);
-            if (need_both) {
-                pass = FALSE;
-            }
-        }
-    }
-
-    if (group) {
-        struct group *sys_grp = getgrnam(group);
-
-        readwritable = (sys_grp != NULL
-                        && buf.st_gid == sys_grp->gr_gid && (buf.st_mode & (S_IRGRP | S_IWGRP)));
-        if (readwritable == FALSE) {
-            if (need_both || user == NULL) {
-                pass = FALSE;
-                crm_err("%s must be owned and r/w by group %s", target, group);
-            } else {
-                crm_warn("%s should be owned and r/w by group %s", target, group);
-            }
-        }
-    }
-
-  out:
-    free(full_file);
-    return pass;
-}
-
 char *
 crm_strip_trailing_newline(char *str)
 {
@@ -1712,7 +1444,7 @@ crm_create_long_opts(struct crm_option *long_options)
      * This dummy entry allows us to differentiate between the two in crm_get_option()
      * and exit with the correct error code
      */
-    long_opts = realloc(long_opts, (index + 1) * sizeof(struct option));
+    long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));
     long_opts[index].name = "__dummmy__";
     long_opts[index].has_arg = 0;
     long_opts[index].flag = 0;
@@ -1724,7 +1456,7 @@ crm_create_long_opts(struct crm_option *long_options)
             continue;
         }
 
-        long_opts = realloc(long_opts, (index + 1) * sizeof(struct option));
+        long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));
         /*fprintf(stderr, "Creating %d %s = %c\n", index,
          * long_options[lpc].name, long_options[lpc].val);      */
         long_opts[index].name = long_options[lpc].name;
@@ -1735,7 +1467,7 @@ crm_create_long_opts(struct crm_option *long_options)
     }
 
     /* Now create the list terminator */
-    long_opts = realloc(long_opts, (index + 1) * sizeof(struct option));
+    long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));
     long_opts[index].name = NULL;
     long_opts[index].has_arg = 0;
     long_opts[index].flag = 0;
@@ -1759,7 +1491,7 @@ crm_set_options(const char *short_options, const char *app_usage, struct crm_opt
 
         for (lpc = 0; long_options[lpc].name != NULL; lpc++) {
             if (long_options[lpc].val && long_options[lpc].val != '-' && long_options[lpc].val < UCHAR_MAX) {
-                local_short_options = realloc(local_short_options, opt_string_len + 4);
+                local_short_options = realloc_safe(local_short_options, opt_string_len + 4);
                 local_short_options[opt_string_len++] = long_options[lpc].val;
                 /* getopt(3) says: Two colons mean an option takes an optional arg; */
                 if (long_options[lpc].has_arg == optional_argument) {
@@ -1802,6 +1534,7 @@ crm_get_option_long(int argc, char **argv, int *index, const char **longname)
         long_opts = crm_create_long_opts(crm_long_options);
     }
 
+    *index = 0;
     if (long_opts) {
         int flag = getopt_long(argc, argv, crm_short_options, long_opts, index);
 
@@ -1971,7 +1704,7 @@ stonith_ipc_server_init(qb_ipcs_service_t **ipcs, struct qb_ipcs_service_handler
 int
 attrd_update_delegate(crm_ipc_t * ipc, char command, const char *host, const char *name,
                       const char *value, const char *section, const char *set, const char *dampen,
-                      const char *user_name, gboolean is_remote)
+                      const char *user_name, int options)
 {
     int rc = -ENOTCONN;
     int max = 5;
@@ -2008,23 +1741,24 @@ attrd_update_delegate(crm_ipc_t * ipc, char command, const char *host, const cha
 
     switch (command) {
         case 'u':
-            crm_xml_add(update, F_ATTRD_TASK, "update");
+            crm_xml_add(update, F_ATTRD_TASK, ATTRD_OP_UPDATE);
             crm_xml_add(update, F_ATTRD_REGEX, name);
             break;
         case 'D':
         case 'U':
         case 'v':
-            crm_xml_add(update, F_ATTRD_TASK, "update");
+            crm_xml_add(update, F_ATTRD_TASK, ATTRD_OP_UPDATE);
             crm_xml_add(update, F_ATTRD_ATTRIBUTE, name);
             break;
         case 'R':
-            crm_xml_add(update, F_ATTRD_TASK, "refresh");
+            crm_xml_add(update, F_ATTRD_TASK, ATTRD_OP_REFRESH);
             break;
-        case 'q':
-            crm_xml_add(update, F_ATTRD_TASK, "query");
+        case 'Q':
+            crm_xml_add(update, F_ATTRD_TASK, ATTRD_OP_QUERY);
+            crm_xml_add(update, F_ATTRD_ATTRIBUTE, name);
             break;
         case 'C':
-            crm_xml_add(update, F_ATTRD_TASK, "peer-remove");
+            crm_xml_add(update, F_ATTRD_TASK, ATTRD_OP_PEER_REMOVE);
             break;
     }
 
@@ -2033,7 +1767,8 @@ attrd_update_delegate(crm_ipc_t * ipc, char command, const char *host, const cha
     crm_xml_add(update, F_ATTRD_SECTION, section);
     crm_xml_add(update, F_ATTRD_HOST, host);
     crm_xml_add(update, F_ATTRD_SET, set);
-    crm_xml_add_int(update, F_ATTRD_IS_REMOTE, is_remote);
+    crm_xml_add_int(update, F_ATTRD_IS_REMOTE, is_set(options, attrd_opt_remote));
+    crm_xml_add_int(update, F_ATTRD_IS_PRIVATE, is_set(options, attrd_opt_private));
 #if ENABLE_ACL
     if (user_name) {
         crm_xml_add(update, F_ATTRD_USER, user_name);
@@ -2048,6 +1783,8 @@ attrd_update_delegate(crm_ipc_t * ipc, char command, const char *host, const cha
 
         if (connected) {
             rc = crm_ipc_send(ipc, update, flags, 0, NULL);
+        } else {
+            crm_perror(LOG_INFO, "Connection to cluster attribute manager failed");
         }
 
         if (ipc != local_ipc) {
@@ -2157,8 +1894,8 @@ did_rsc_op_fail(lrmd_event_data_t * op, int target_rc)
 }
 
 xmlNode *
-create_operation_update(xmlNode * parent, lrmd_event_data_t * op, const char *caller_version,
-                        int target_rc, const char *origin, int level)
+create_operation_update(xmlNode * parent, lrmd_event_data_t * op, const char * caller_version,
+                        int target_rc, const char * node, const char * origin, int level)
 {
     char *key = NULL;
     char *magic = NULL;
@@ -2261,6 +1998,7 @@ create_operation_update(xmlNode * parent, lrmd_event_data_t * op, const char *ca
     crm_xml_add(xml_op, XML_ATTR_TRANSITION_KEY, op->user_data);
     crm_xml_add(xml_op, XML_ATTR_TRANSITION_MAGIC, magic);
     crm_xml_add(xml_op, XML_LRM_ATTR_EXIT_REASON, exit_reason);
+    crm_xml_add(xml_op, XML_LRM_ATTR_TARGET, node); /* For context during triage */
 
     crm_xml_add_int(xml_op, XML_LRM_ATTR_CALLID, op->call_id);
     crm_xml_add_int(xml_op, XML_LRM_ATTR_RC, op->rc);
@@ -2517,7 +2255,7 @@ add_list_element(char *list, const char *value)
     }
     len = last + 2;             /* +1 space, +1 EOS */
     len += strlen(value);
-    list = realloc(list, len);
+    list = realloc_safe(list, len);
     sprintf(list + last, " %s", value);
     return list;
 }

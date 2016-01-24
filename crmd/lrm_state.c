@@ -27,40 +27,10 @@
 #include <crmd_lrm.h>
 
 GHashTable *lrm_state_table = NULL;
-GHashTable *proxy_table = NULL;
+extern GHashTable *proxy_table;
 int lrmd_internal_proxy_send(lrmd_t * lrmd, xmlNode *msg);
 void lrmd_internal_set_proxy_callback(lrmd_t * lrmd, void *userdata, void (*callback)(lrmd_t *lrmd, void *userdata, xmlNode *msg));
 
-typedef struct remote_proxy_s {
-    char *node_name;
-    char *session_id;
-
-    gboolean is_local;
-
-    crm_ipc_t *ipc;
-    mainloop_io_t *source;
-    uint32_t last_request_id;
-
-} remote_proxy_t;
-
-static void
-history_cache_destroy(gpointer data)
-{
-    rsc_history_t *entry = data;
-
-    if (entry->stop_params) {
-        g_hash_table_destroy(entry->stop_params);
-    }
-
-    free(entry->rsc.type);
-    free(entry->rsc.class);
-    free(entry->rsc.provider);
-
-    lrmd_free_event(entry->failed);
-    lrmd_free_event(entry->last);
-    free(entry->id);
-    free(entry);
-}
 static void
 free_rsc_info(gpointer value)
 {
@@ -84,10 +54,60 @@ free_recurring_op(gpointer value)
 {
     struct recurring_op_s *op = (struct recurring_op_s *)value;
 
+    free(op->user_data);
     free(op->rsc_id);
     free(op->op_type);
     free(op->op_key);
+    if (op->params) {
+        g_hash_table_destroy(op->params);
+    }
     free(op);
+}
+
+static gboolean
+fail_pending_op(gpointer key, gpointer value, gpointer user_data)
+{
+    lrmd_event_data_t event = { 0, };
+    lrm_state_t *lrm_state = user_data;
+    struct recurring_op_s *op = (struct recurring_op_s *)value;
+
+    crm_trace("Pre-emptively failing %s_%s_%d on %s (call=%s, %s)",
+              op->rsc_id, op->op_type, op->interval,
+              lrm_state->node_name, key, op->user_data);
+
+    event.type = lrmd_event_exec_complete;
+    event.rsc_id = op->rsc_id;
+    event.op_type = op->op_type;
+    event.user_data = op->user_data;
+    event.timeout = 0;
+    event.interval = op->interval;
+    event.rc = PCMK_OCF_CONNECTION_DIED;
+    event.op_status = PCMK_LRM_OP_ERROR;
+    event.t_run = op->start_time;
+    event.t_rcchange = op->start_time;
+    event.t_rcchange = op->start_time;
+
+    event.call_id = op->call_id;
+    event.remote_nodename = lrm_state->node_name;
+    event.params = op->params;
+
+    process_lrm_event(lrm_state, &event, op);
+    return TRUE;
+}
+
+gboolean
+lrm_state_is_local(lrm_state_t *lrm_state)
+{
+    if (lrm_state == NULL || fsa_our_uname == NULL) {
+        return FALSE;
+    }
+
+    if (strcmp(lrm_state->node_name, fsa_our_uname) != 0) {
+        return FALSE;
+    }
+
+    return TRUE;
+
 }
 
 lrm_state_t *
@@ -117,7 +137,7 @@ lrm_state_create(const char *node_name)
                                                g_str_equal, g_hash_destroy_str, free_recurring_op);
 
     state->resource_history = g_hash_table_new_full(crm_str_hash,
-                                                    g_str_equal, NULL, history_cache_destroy);
+                                                    g_str_equal, NULL, history_free);
 
     g_hash_table_insert(lrm_state_table, (char *)state->node_name, state);
     return state;
@@ -152,7 +172,7 @@ internal_lrm_state_destroy(gpointer data)
         return;
     }
 
-    crm_trace("Destroying proxy table with %d members", g_hash_table_size(proxy_table));
+    crm_trace("Destroying proxy table %s with %d members", lrm_state->node_name, g_hash_table_size(proxy_table));
     g_hash_table_foreach_remove(proxy_table, remote_proxy_remove_by_node, (char *) lrm_state->node_name);
     remote_ra_cleanup(lrm_state);
     lrmd_api_delete(lrm_state->conn);
@@ -201,32 +221,6 @@ lrm_state_reset_tables(lrm_state_t * lrm_state)
                   g_hash_table_size(lrm_state->rsc_info_cache));
         g_hash_table_remove_all(lrm_state->rsc_info_cache);
     }
-}
-
-static void
-remote_proxy_end_session(const char *session)
-{
-    remote_proxy_t *proxy = g_hash_table_lookup(proxy_table, session);
-
-    if (proxy == NULL) {
-        return;
-    }
-    crm_trace("ending session ID %s", proxy->session_id);
-
-    if (proxy->source) {
-        mainloop_del_ipc_client(proxy->source);
-    }
-}
-
-static void
-remote_proxy_free(gpointer data)
-{
-    remote_proxy_t *proxy = data;
-
-    crm_trace("freed proxy session ID %s", proxy->session_id);
-    free(proxy->node_name);
-    free(proxy->session_id);
-    free(proxy);
 }
 
 gboolean
@@ -296,10 +290,19 @@ lrm_state_get_list(void)
 void
 lrm_state_disconnect(lrm_state_t * lrm_state)
 {
+    int removed = 0;
+
     if (!lrm_state->conn) {
         return;
     }
+    crm_trace("Disconnecting %s", lrm_state->node_name);
     ((lrmd_t *) lrm_state->conn)->cmds->disconnect(lrm_state->conn);
+
+    if (is_not_set(fsa_input_register, R_SHUTDOWN)) {
+        removed = g_hash_table_foreach_remove(lrm_state->pending_ops, fail_pending_op, lrm_state);
+        crm_trace("Synthesized %d operation failures for %s", removed, lrm_state->node_name);
+    }
+
     lrmd_api_delete(lrm_state->conn);
     lrm_state->conn = NULL;
 }
@@ -344,43 +347,6 @@ lrm_state_ipc_connect(lrm_state_t * lrm_state)
     return ret;
 }
 
-static void
-remote_proxy_notify_destroy(lrmd_t *lrmd, const char *session_id)
-{
-    /* sending to the remote node that an ipc connection has been destroyed */
-    xmlNode *msg = create_xml_node(NULL, T_LRMD_IPC_PROXY);
-    crm_xml_add(msg, F_LRMD_IPC_OP, "destroy");
-    crm_xml_add(msg, F_LRMD_IPC_SESSION, session_id);
-    lrmd_internal_proxy_send(lrmd, msg);
-    free_xml(msg);
-}
-
-static void
-remote_proxy_relay_event(lrmd_t *lrmd, const char *session_id, xmlNode *msg)
-{
-    /* sending to the remote node an event msg. */
-    xmlNode *event = create_xml_node(NULL, T_LRMD_IPC_PROXY);
-    crm_xml_add(event, F_LRMD_IPC_OP, "event");
-    crm_xml_add(event, F_LRMD_IPC_SESSION, session_id);
-    add_message_xml(event, F_LRMD_IPC_MSG, msg);
-    crm_log_xml_explicit(event, "EventForProxy");
-    lrmd_internal_proxy_send(lrmd, event);
-    free_xml(event);
-}
-
-static void
-remote_proxy_relay_response(lrmd_t *lrmd, const char *session_id, xmlNode *msg, int msg_id)
-{
-    /* sending to the remote node a response msg. */
-    xmlNode *response = create_xml_node(NULL, T_LRMD_IPC_PROXY);
-    crm_xml_add(response, F_LRMD_IPC_OP, "response");
-    crm_xml_add(response, F_LRMD_IPC_SESSION, session_id);
-    crm_xml_add_int(response, F_LRMD_IPC_MSG_ID, msg_id);
-    add_message_xml(response, F_LRMD_IPC_MSG, msg);
-    lrmd_internal_proxy_send(lrmd, response);
-    free_xml(response);
-}
-
 static int
 remote_proxy_dispatch_internal(const char *buffer, ssize_t length, gpointer userdata)
 {
@@ -420,7 +386,7 @@ remote_proxy_disconnected(void *userdata)
     remote_proxy_t *proxy = userdata;
     lrm_state_t *lrm_state = lrm_state_find(proxy->node_name);
 
-    crm_trace("destroying %p", userdata);
+    crm_trace("Destroying %s (%p)", lrm_state->node_name, userdata);
 
     proxy->source = NULL;
     proxy->ipc = NULL;

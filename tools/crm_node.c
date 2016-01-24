@@ -34,6 +34,7 @@
 #include <crm/common/mainloop.h>
 #include <crm/msg_xml.h>
 #include <crm/cib.h>
+#include <crm/attrd.h>
 
 int command = 0;
 int ccm_fd = 0;
@@ -92,7 +93,7 @@ cib_remove_node(uint32_t id, const char *name)
     crm_trace("Removing %s from the CIB", name);
 
     /* TODO: Use 'id' instead */
-    if(name == NULL) {
+    if(name == NULL && id == 0) {
         return -ENOTUNIQ;
     }
 
@@ -101,17 +102,24 @@ cib_remove_node(uint32_t id, const char *name)
 
     crm_xml_add(node, XML_ATTR_UNAME, name);
     crm_xml_add(node_state, XML_ATTR_UNAME, name);
+    if(id) {
+        char buffer[64];
+        if(snprintf(buffer, 63, "%u", id) > 0) {
+            crm_xml_add(node, XML_ATTR_ID, buffer);
+            crm_xml_add(node_state, XML_ATTR_ID, buffer);
+        }
+    }
 
     cib = cib_new();
     cib->cmds->signon(cib, crm_system_name, cib_command);
 
     rc = cib->cmds->delete(cib, XML_CIB_TAG_NODES, node, cib_sync_call);
     if (rc != pcmk_ok) {
-        printf("Could not remove %s from " XML_CIB_TAG_NODES ": %s", name, pcmk_strerror(rc));
+        printf("Could not remove %s/%u from " XML_CIB_TAG_NODES ": %s", name, id, pcmk_strerror(rc));
     }
     rc = cib->cmds->delete(cib, XML_CIB_TAG_STATUS, node_state, cib_sync_call);
     if (rc != pcmk_ok) {
-        printf("Could not remove %s from " XML_CIB_TAG_STATUS ": %s", name, pcmk_strerror(rc));
+        printf("Could not remove %s/%u from " XML_CIB_TAG_STATUS ": %s", name, id, pcmk_strerror(rc));
     }
 
     cib->cmds->signoff(cib);
@@ -137,6 +145,7 @@ int tools_remove_node_cache(const char *node, const char *target)
     }
 
     if (!crm_ipc_connect(conn)) {
+        crm_perror(LOG_ERR, "Connection to %s failed", target);
         crm_ipc_destroy(conn);
         return -ENOTCONN;
     }
@@ -156,6 +165,7 @@ int tools_remove_node_cache(const char *node, const char *target)
         }
     }
 
+
     errno = 0;
     n = strtol(node, &endptr, 10);
     if (errno != 0 || endptr == node || *endptr != '\0') {
@@ -166,21 +176,39 @@ int tools_remove_node_cache(const char *node, const char *target)
         name = get_node_name(n);
     }
 
-    crm_trace("Removing %s aka. %s from the membership cache", name, node);
+    crm_trace("Removing %s aka. %s (%u) from the membership cache", name, node, n);
 
-    cmd = create_request(CRM_OP_RM_NODE_CACHE,
-                         NULL, NULL, target, "crm_node", admin_uuid);
+    if(safe_str_eq(target, T_ATTRD)) {
+        cmd = create_xml_node(NULL, __FUNCTION__);
 
-    if (n) {
-        char buffer[64];
+        crm_xml_add(cmd, F_TYPE, T_ATTRD);
+        crm_xml_add(cmd, F_ORIG, crm_system_name);
 
-        if(snprintf(buffer, 63, "%u", n) > 0) {
-            crm_xml_add(cmd, XML_ATTR_ID, buffer);
+        crm_xml_add(cmd, F_ATTRD_TASK, ATTRD_OP_PEER_REMOVE);
+        crm_xml_add(cmd, F_ATTRD_HOST, name);
+
+        if (n) {
+            char buffer[64];
+            if(snprintf(buffer, 63, "%u", n) > 0) {
+                crm_xml_add(cmd, F_ATTRD_HOST_ID, buffer);
+            }
         }
+
+    } else {
+        cmd = create_request(CRM_OP_RM_NODE_CACHE,
+                             NULL, NULL, target, crm_system_name, admin_uuid);
+        if (n) {
+            char buffer[64];
+            if(snprintf(buffer, 63, "%u", n) > 0) {
+                crm_xml_add(cmd, XML_ATTR_ID, buffer);
+            }
+        }
+        crm_xml_add(cmd, XML_ATTR_UNAME, name);
     }
-    crm_xml_add(cmd, XML_ATTR_UNAME, name);
 
     rc = crm_ipc_send(conn, cmd, 0, 0, NULL);
+    crm_debug("%s peer cache cleanup for %s (%u): %d", target, name, n, rc);
+
     if (rc > 0) {
         rc = cib_remove_node(n, name);
     }
@@ -189,8 +217,8 @@ int tools_remove_node_cache(const char *node, const char *target)
         crm_ipc_close(conn);
         crm_ipc_destroy(conn);
     }
-    free_xml(cmd);
     free(admin_uuid);
+    free_xml(cmd);
     free(name);
     return rc > 0 ? 0 : rc;
 }
@@ -442,6 +470,7 @@ try_cman(int command, enum cluster_type_e stack)
 
         case 'l':
         case 'p':
+            memset(cman_nodes, 0, MAX_NODES * sizeof(cman_node_t));
             rc = cman_get_nodes(cman_handle, MAX_NODES, &node_count, cman_nodes);
             if (rc != 0) {
                 fprintf(stderr, "Couldn't query cman node list: %d %d", rc, errno);
@@ -461,6 +490,7 @@ try_cman(int command, enum cluster_type_e stack)
             break;
 
         case 'i':
+            memset(&node, 0, sizeof(cman_node_t));
             rc = cman_get_node(cman_handle, CMAN_NODEID_US, &node);
             if (rc != 0) {
                 fprintf(stderr, "Couldn't query cman node id: %d %d", rc, errno);
@@ -649,6 +679,12 @@ try_corosync(int command, enum cluster_type_e stack)
 
     mainloop_io_t *ipc = NULL;
     GMainLoop *amainloop = NULL;
+    const char *daemons[] = {
+            CRM_SYSTEM_CRMD,
+            "stonith-ng",
+            T_ATTRD,
+            CRM_SYSTEM_MCP,
+        };
 
     struct ipc_client_callbacks node_callbacks = {
         .dispatch = node_mcp_dispatch,
@@ -657,13 +693,11 @@ try_corosync(int command, enum cluster_type_e stack)
 
     switch (command) {
         case 'R':
-            if (tools_remove_node_cache(target_uname, CRM_SYSTEM_CRMD)) {
-                crm_err("Failed to connect to "CRM_SYSTEM_CRMD" to remove node '%s'", target_uname);
-                crm_exit(pcmk_err_generic);
-            }
-            if (tools_remove_node_cache(target_uname, CRM_SYSTEM_MCP)) {
-                crm_err("Failed to connect to "CRM_SYSTEM_MCP" to remove node '%s'", target_uname);
-                crm_exit(pcmk_err_generic);
+            for(rc = 0; rc < DIMOF(daemons); rc++) {
+                if (tools_remove_node_cache(target_uname, daemons[rc])) {
+                    crm_err("Failed to connect to %s to remove node '%s'", daemons[rc], target_uname);
+                    crm_exit(pcmk_err_generic);
+                }
             }
             crm_exit(pcmk_ok);
             break;
@@ -834,8 +868,8 @@ main(int argc, char **argv)
                 force_flag = TRUE;
                 break;
             case 'R':
-                dangerous_cmd = TRUE;
                 command = flag;
+                dangerous_cmd = TRUE;
                 target_uname = optarg;
                 break;
             case 'N':

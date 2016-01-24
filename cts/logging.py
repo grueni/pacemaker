@@ -22,7 +22,7 @@ Licensed under the GNU GPL.
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA.
 
-import types, string, sys, time, re, os, syslog
+import string, sys, time, os
 
 class Logger:
     TimeFormat = "%b %d %H:%M:%S\t"
@@ -47,7 +47,7 @@ class StdErrLog(Logger):
 
     def __call__(self, lines):
         t = time.strftime(Logger.TimeFormat, time.localtime(time.time()))
-        if isinstance(lines, types.StringType):
+        if isinstance(lines, basestring):
             sys.__stderr__.writelines([t, lines, "\n"])
         else:
             for line in lines:
@@ -60,7 +60,6 @@ class StdErrLog(Logger):
 class FileLog(Logger):
     def __init__(self, filename, tag):
         self.logfile=filename
-        import os
         self.hostname = os.uname()[1]+" "
 
         self.source = ""
@@ -72,7 +71,7 @@ class FileLog(Logger):
         fd = open(self.logfile, "a")
         t = time.strftime(Logger.TimeFormat, time.localtime(time.time()))
 
-        if isinstance(lines, types.StringType):
+        if isinstance(lines, basestring):
             fd.writelines([t, self.hostname, self.source, lines, "\n"])
         else:
             for line in lines:
