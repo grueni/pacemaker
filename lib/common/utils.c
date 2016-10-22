@@ -2315,6 +2315,7 @@ find_library_function(void **handle, const char *lib, const char *fn, gboolean f
         return NULL;
     }
 
+    error = dlerror();
     a_function = dlsym(*handle, fn);
     if (a_function == NULL) {
         error = dlerror();
